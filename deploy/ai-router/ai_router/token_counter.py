@@ -7,6 +7,20 @@ from typing import Any, Protocol
 from .errors import TokenizationUnavailableError
 
 
+DEFAULT_IMAGE_TOKEN_ESTIMATE = 1024
+DEFAULT_AUDIO_TOKEN_ESTIMATE = 4096
+MEDIA_PAYLOAD_KEYS = {
+    "audio",
+    "audio_url",
+    "data",
+    "file_data",
+    "file_id",
+    "image",
+    "image_url",
+    "url",
+}
+
+
 class TokenCounter(Protocol):
     def count_request(self, body: dict[str, Any], api_kind: str) -> int: ...
 
@@ -39,6 +53,15 @@ def request_modalities(body: dict[str, Any], api_kind: str) -> set[str]:
     return modalities
 
 
+def redact_media_payloads(value: Any) -> Any:
+    sanitized, _ = _sanitize_media(
+        value,
+        image_token_estimate=DEFAULT_IMAGE_TOKEN_ESTIMATE,
+        audio_token_estimate=DEFAULT_AUDIO_TOKEN_ESTIMATE,
+    )
+    return sanitized
+
+
 def _collect_modalities(value: Any, modalities: set[str]) -> None:
     if isinstance(value, list):
         for item in value:
@@ -57,8 +80,16 @@ def _collect_modalities(value: Any, modalities: set[str]) -> None:
 
 
 class HuggingFaceTokenCounter:
-    def __init__(self, tokenizer_path: str | Path) -> None:
+    def __init__(
+        self,
+        tokenizer_path: str | Path,
+        *,
+        image_token_estimate: int = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+        audio_token_estimate: int = DEFAULT_AUDIO_TOKEN_ESTIMATE,
+    ) -> None:
         self.tokenizer_path = Path(tokenizer_path)
+        self.image_token_estimate = max(1, int(image_token_estimate))
+        self.audio_token_estimate = max(1, int(audio_token_estimate))
         self._tokenizer: Any | None = None
 
     def _load(self) -> Any:
@@ -93,6 +124,11 @@ class HuggingFaceTokenCounter:
             )
         if not isinstance(messages, list):
             raise TokenizationUnavailableError("request does not contain tokenizable messages")
+        messages, media_tokens = _sanitize_media(
+            messages,
+            image_token_estimate=self.image_token_estimate,
+            audio_token_estimate=self.audio_token_estimate,
+        )
         tools = body.get("tools")
         try:
             token_ids = tokenizer.apply_chat_template(
@@ -101,14 +137,17 @@ class HuggingFaceTokenCounter:
                 tokenize=True,
                 add_generation_prompt=True,
             )
-            return len(token_ids)
+            return len(token_ids) + media_tokens
         except Exception:
             rendered = json.dumps(
                 {"messages": messages, "tools": tools or []},
                 ensure_ascii=False,
                 separators=(",", ":"),
             )
-            return len(tokenizer.encode(rendered, add_special_tokens=True))
+            return (
+                len(tokenizer.encode(rendered, add_special_tokens=True))
+                + media_tokens
+            )
 
 
 def _responses_to_messages(
@@ -186,9 +225,138 @@ def _responses_to_messages(
 class SimpleTokenCounter:
     """Deterministic test counter; production must use the model tokenizer."""
 
+    def __init__(
+        self,
+        *,
+        image_token_estimate: int = DEFAULT_IMAGE_TOKEN_ESTIMATE,
+        audio_token_estimate: int = DEFAULT_AUDIO_TOKEN_ESTIMATE,
+    ) -> None:
+        self.image_token_estimate = max(1, int(image_token_estimate))
+        self.audio_token_estimate = max(1, int(audio_token_estimate))
+
     def count_request(self, body: dict[str, Any], api_kind: str) -> int:
         if api_kind == "chat":
             value = body.get("messages", [])
         else:
             value = body.get("input", "")
-        return max(1, len(json.dumps(value, ensure_ascii=False)) // 4)
+        sanitized, media_tokens = _sanitize_media(
+            value,
+            image_token_estimate=self.image_token_estimate,
+            audio_token_estimate=self.audio_token_estimate,
+        )
+        text_tokens = max(
+            1,
+            len(json.dumps(sanitized, ensure_ascii=False)) // 4,
+        )
+        return text_tokens + media_tokens
+
+
+def _sanitize_media(
+    value: Any,
+    *,
+    image_token_estimate: int,
+    audio_token_estimate: int,
+) -> tuple[Any, int]:
+    if isinstance(value, str):
+        modality = _data_uri_modality(value)
+        if modality == "image":
+            return "<image>", image_token_estimate
+        if modality == "audio":
+            return "<audio>", audio_token_estimate
+        return value, 0
+    if isinstance(value, list):
+        result = []
+        total = 0
+        for item in value:
+            sanitized, tokens = _sanitize_media(
+                item,
+                image_token_estimate=image_token_estimate,
+                audio_token_estimate=audio_token_estimate,
+            )
+            result.append(sanitized)
+            total += tokens
+        return result, total
+    if not isinstance(value, dict):
+        return value, 0
+
+    item_type = str(value.get("type", "")).lower()
+    modality = (
+        "image"
+        if "image" in item_type
+        else "audio"
+        if "audio" in item_type
+        else None
+    )
+    if modality:
+        estimate = (
+            image_token_estimate
+            if modality == "image"
+            else audio_token_estimate
+        )
+        return _sanitize_media_item(value, modality), estimate
+
+    result: dict[str, Any] = {}
+    total = 0
+    for key, item in value.items():
+        sanitized, tokens = _sanitize_media(
+            item,
+            image_token_estimate=image_token_estimate,
+            audio_token_estimate=audio_token_estimate,
+        )
+        result[key] = sanitized
+        total += tokens
+    return result, total
+
+
+def _sanitize_media_item(
+    value: dict[str, Any],
+    modality: str,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, item in value.items():
+        if key.lower() in MEDIA_PAYLOAD_KEYS:
+            result[key] = _media_placeholder(item, modality)
+        else:
+            result[key] = _redact_nested_media(item, modality)
+    return result
+
+
+def _media_placeholder(value: Any, modality: str) -> Any:
+    marker = f"<{modality}>"
+    if not isinstance(value, dict):
+        return marker
+    return {
+        key: (
+            marker
+            if key.lower() in MEDIA_PAYLOAD_KEYS
+            else _redact_nested_media(item, modality)
+        )
+        for key, item in value.items()
+    }
+
+
+def _redact_nested_media(value: Any, modality: str) -> Any:
+    marker = f"<{modality}>"
+    if isinstance(value, str):
+        return marker if _data_uri_modality(value) else value
+    if isinstance(value, list):
+        return [_redact_nested_media(item, modality) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: (
+                marker
+                if key.lower() in MEDIA_PAYLOAD_KEYS
+                else _redact_nested_media(item, modality)
+            )
+            for key, item in value.items()
+        }
+    return value
+
+
+def _data_uri_modality(value: str) -> str | None:
+    lowered = value.lstrip().lower()
+    if lowered.startswith("data:image/"):
+        return "image"
+    if lowered.startswith("data:audio/"):
+        return "audio"
+    return None

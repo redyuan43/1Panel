@@ -7,6 +7,7 @@ from typing import Any
 import httpx
 
 from .errors import RouterError
+from .token_counter import redact_media_payloads
 from .types import Evaluation
 
 
@@ -322,11 +323,21 @@ def _has_structured_output(body: dict[str, Any]) -> bool:
 def _request_excerpt(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages")
     if isinstance(messages, list):
-        return {"messages": messages[-4:], "tools": body.get("tools", [])}
+        return redact_media_payloads(
+            {
+                "messages": messages[-4:],
+                "tools": body.get("tools", []),
+            }
+        )
     value = body.get("input")
     if isinstance(value, list):
         value = value[-4:]
-    return {"input": value, "tools": body.get("tools", [])}
+    return redact_media_payloads(
+        {
+            "input": value,
+            "tools": body.get("tools", []),
+        }
+    )
 
 
 def _request_text(body: dict[str, Any]) -> str:

@@ -14,8 +14,10 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from ai_router.api import (
+    _acquire_internal_model,
     _acquire_route_capacity,
     _cache_metrics,
+    _filter_restart_draining_deployments,
     _mirror_responses_format,
     _prefix_cache_delta,
     _prepare_routed_body,
@@ -55,9 +57,10 @@ from ai_router.pilot import (
 )
 from ai_router.protocol import normalize_request
 from ai_router.runtime import build_runtime
-from ai_router.scheduler import Scheduler
+from ai_router.scheduler import ClientLimiter, Scheduler
 from ai_router.store import InMemoryStateStore
 from ai_router.token_counter import (
+    HuggingFaceTokenCounter,
     SimpleTokenCounter,
     request_modalities,
 )
@@ -85,11 +88,16 @@ class FakeHealth:
         self._statuses = statuses
         self.failed: list[str] = []
         self.prefix_counters = prefix_counters or {}
+        self.force_refreshes: list[str] = []
 
-    async def statuses(self, endpoints):
+    async def statuses(self, endpoints, *, force_refresh: bool = False):
+        if force_refresh:
+            self.force_refreshes.extend(item.id for item in endpoints)
         return {item.id: self._statuses[item.id] for item in endpoints}
 
-    async def status(self, endpoint):
+    async def status(self, endpoint, *, force_refresh: bool = False):
+        if force_refresh:
+            self.force_refreshes.append(endpoint.id)
         return self._statuses[endpoint.id]
 
     async def in_cooldown(self, _endpoint_id: str) -> bool:
@@ -355,6 +363,108 @@ def test_same_conversation_is_rejected_while_active() -> None:
     run(second.release())
 
 
+def test_instance_restart_cleanup_preserves_other_router_leases() -> None:
+    async def scenario() -> None:
+        store = InMemoryStateStore()
+        local = Scheduler(
+            store,
+            instance_id="router-api-local",
+            boot_id="boot-old",
+        )
+        tail = Scheduler(
+            store,
+            instance_id="router-api-tail",
+            boot_id="boot-tail",
+        )
+        limiter = ClientLimiter(store)
+
+        local_lease = await local.begin_request("conversation-local")
+        tail_lease = await tail.begin_request("conversation-tail")
+        await local.acquire_deployment(
+            local_lease,
+            "worker-local",
+            "request-local",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+        await tail.acquire_deployment(
+            tail_lease,
+            "worker-tail",
+            "request-tail",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+        assert await limiter.acquire_parallel(
+            "shared-client",
+            local_lease.owner_token,
+            2,
+        )
+        assert await limiter.acquire_parallel(
+            "shared-client",
+            tail_lease.owner_token,
+            2,
+        )
+        await store.enqueue(
+            "router:queue:test",
+            f"{local_lease.owner_token}:queued",
+            time.time(),
+        )
+
+        restarted = Scheduler(
+            store,
+            instance_id="router-api-local",
+            boot_id="boot-new",
+        )
+        cleanup = await restarted.cleanup_previous_instance_leases()
+
+        assert cleanup == {
+            "deployment_members": 1,
+            "client_members": 1,
+            "queue_members": 1,
+            "conversation_locks": 1,
+            "deployments": ["worker-local"],
+        }
+
+        new_local = await restarted.begin_request("conversation-local")
+        assert (
+            await restarted.try_acquire_deployment_candidates(
+                new_local,
+                ("worker-local",),
+            )
+            == "worker-local"
+        )
+        assert await limiter.acquire_parallel(
+            "shared-client",
+            new_local.owner_token,
+            2,
+        )
+
+        with pytest.raises(ConversationBusyError):
+            await tail.begin_request("conversation-tail")
+        blocked = await restarted.begin_request(None)
+        assert (
+            await restarted.try_acquire_deployment_candidates(
+                blocked,
+                ("worker-tail",),
+            )
+            is None
+        )
+
+        await new_local.release()
+        await blocked.release()
+        await tail_lease.release()
+        await limiter.release_parallel(
+            "shared-client",
+            new_local.owner_token,
+        )
+        await limiter.release_parallel(
+            "shared-client",
+            tail_lease.owner_token,
+        )
+
+    run(scenario())
+
+
 def test_deployment_capacity_allows_future_parallel_cloud_requests() -> None:
     async def scenario() -> None:
         store = InMemoryStateStore()
@@ -485,6 +595,256 @@ def test_nonblocking_capacity_uses_six_distinct_workers() -> None:
         await seventh.release()
 
     run(scenario())
+
+
+def test_runtime_start_cleans_previous_boot_and_marks_backend_draining(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+        monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+        monkeypatch.setenv(
+            "AI_ROUTER_AUDIT_PATH",
+            str(tmp_path / "audit.jsonl"),
+        )
+        store = InMemoryStateStore()
+        registry = Registry(ROOT / "config" / "registry.yaml")
+        value = settings(tmp_path)
+        first = build_runtime(
+            settings=value,
+            registry=registry,
+            store=store,
+            token_counter=SimpleTokenCounter(),
+            instance_id="router-api-local",
+            boot_id="boot-old",
+        )
+        await first.start()
+        lease = await first.scheduler.begin_request("conversation-restart")
+        await first.scheduler.acquire_deployment(
+            lease,
+            "ivan-qwen38-flash-128k",
+            "request-restart",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+        assert await first.limiter.acquire_parallel(
+            "1panel",
+            lease.owner_token,
+            8,
+        )
+        await first.track_request_started(
+            lease.owner_token,
+            "request-restart",
+            "conversation-restart",
+        )
+        await first.track_request_routed(
+            lease.owner_token,
+            requested_model="auto",
+            selected_model="model",
+            endpoint_id="ivan-qwen38-flash-128k",
+            deployment_id="ivan-qwen38-flash-128k",
+            node="ivan",
+            task="general",
+            reason="local_priority",
+            affinity="new",
+            prompt_tokens=100,
+            output_reserve_tokens=32,
+        )
+
+        second = build_runtime(
+            settings=value,
+            registry=registry,
+            store=store,
+            token_counter=SimpleTokenCounter(),
+            instance_id="router-api-local",
+            boot_id="boot-new",
+        )
+        await second.start()
+
+        assert second.startup_cleanup["deployment_members"] == 1
+        assert second.startup_cleanup["client_members"] == 1
+        assert second.startup_cleanup["conversation_locks"] == 1
+        marker = await second.draining_marker(
+            "ivan-qwen38-flash-128k"
+        )
+        assert marker is not None
+        assert marker["previous_boot_id"] == "boot-old"
+        state = await store.get_json(
+            "router:instance-state:router-api-local"
+        )
+        assert state is not None
+        assert state["boot_id"] == "boot-new"
+        assert state["startup_cleanup"]["deployment_members"] == 1
+        events = second.audit.recent(20)
+        interrupted = next(
+            item
+            for item in events
+            if item["event"] == "request_interrupted_by_restart"
+        )
+        assert interrupted["request_id"] == "request-restart"
+        assert interrupted["deployment_id"] == "ivan-qwen38-flash-128k"
+        await second.close()
+
+    run(scenario())
+
+
+def test_restart_drain_guard_waits_for_busy_backend_then_recovers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+        monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+        monkeypatch.setenv(
+            "AI_ROUTER_AUDIT_PATH",
+            str(tmp_path / "audit.jsonl"),
+        )
+        store = InMemoryStateStore()
+        registry = Registry(ROOT / "config" / "registry.yaml")
+        endpoint = registry.by_id("ivan-qwen38-flash-128k")
+        assert endpoint is not None
+        runtime = build_runtime(
+            settings=settings(tmp_path),
+            registry=registry,
+            store=store,
+            token_counter=SimpleTokenCounter(),
+        )
+        fake_health = FakeHealth(
+            {
+                endpoint.id: EndpointStatus(
+                    endpoint_id=endpoint.id,
+                    healthy=True,
+                    checked_at=time.time(),
+                    load_headroom=0,
+                    eligible_context_tokens=endpoint.safe_context_tokens,
+                    detail={"processing": 1},
+                )
+            }
+        )
+        runtime.health = fake_health
+        await store.set_json(
+            f"router:draining-deployment:{endpoint.id}",
+            {
+                "deployment_id": endpoint.id,
+                "instance_id": "router-api-local",
+                "previous_boot_id": "boot-old",
+                "cleared_at": time.time(),
+                "last_busy_audit_at": 0,
+            },
+            ttl_seconds=7200,
+        )
+        decision = RouteDecision(
+            endpoint=endpoint,
+            requested_model="auto",
+            task="general",
+            prompt_tokens=100,
+            output_reserve_tokens=32,
+            reason="local_priority",
+            affinity="new",
+            score=1,
+            deployment_id=endpoint.id,
+            upstream_api_base=endpoint.api_base,
+        )
+        excluded_endpoints: set[str] = set()
+        assert not await _filter_restart_draining_deployments(
+            runtime,
+            decision,
+            excluded_endpoints,
+            set(),
+        )
+        assert excluded_endpoints == {endpoint.id}
+        assert fake_health.force_refreshes == [endpoint.id]
+        assert await runtime.draining_marker(endpoint.id) is not None
+
+        fake_health._statuses[endpoint.id] = EndpointStatus(
+            endpoint_id=endpoint.id,
+            healthy=True,
+            checked_at=time.time(),
+            load_headroom=1,
+            eligible_context_tokens=endpoint.safe_context_tokens,
+            detail={"processing": 0},
+        )
+        recovered = RouteDecision(
+            endpoint=endpoint,
+            requested_model="auto",
+            task="general",
+            prompt_tokens=100,
+            output_reserve_tokens=32,
+            reason="local_priority",
+            affinity="new",
+            score=1,
+            deployment_id=endpoint.id,
+            upstream_api_base=endpoint.api_base,
+        )
+        assert await _filter_restart_draining_deployments(
+            runtime,
+            recovered,
+            set(),
+            set(),
+        )
+        assert await runtime.draining_marker(endpoint.id) is None
+        events = runtime.audit.recent(20)
+        assert any(
+            item["event"] == "backend_busy_after_restart"
+            for item in events
+        )
+        assert any(
+            item["event"] == "backend_available_after_drain"
+            for item in events
+        )
+
+    run(scenario())
+
+
+def test_router_drain_rejects_new_inference_but_keeps_status_available(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=Registry(ROOT / "config" / "registry.yaml"),
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+        instance_id="router-api-local",
+        boot_id="boot-drain",
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        drained = client.post(
+            "/internal/drain",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+        rejected = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        health = client.get("/health")
+        status = client.get(
+            "/internal/status",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+
+    assert drained.status_code == 200
+    assert drained.json()["instance"]["draining"] is True
+    assert rejected.status_code == 503
+    assert rejected.json()["error"]["code"] == "router_draining"
+    assert health.status_code == 200
+    assert health.json()["draining"] is True
+    assert status.status_code == 200
+    assert status.json()["instance"]["boot_id"] == "boot-drain"
 
 
 def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
@@ -1496,6 +1856,261 @@ def test_request_modalities_detects_chat_and_responses_images() -> None:
     assert responses == {"text", "image"}
 
 
+class CapturingTokenizer:
+    def __init__(self) -> None:
+        self.messages: list[dict] = []
+
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tools,
+        tokenize,
+        add_generation_prompt,
+    ):
+        self.messages = messages
+        assert tools is None
+        assert tokenize is True
+        assert add_generation_prompt is True
+        return [1] * 12
+
+
+def test_multimodal_token_counter_does_not_tokenize_base64() -> None:
+    tokenizer = CapturingTokenizer()
+    counter = HuggingFaceTokenCounter(
+        ROOT / "missing-tokenizer",
+        image_token_estimate=1024,
+    )
+    counter._tokenizer = tokenizer
+    encoded = "A" * 4_000_000
+    tokens = counter.count_request(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{encoded}",
+                                "detail": "high",
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+        "chat",
+    )
+    rendered = json.dumps(tokenizer.messages)
+    assert encoded not in rendered
+    assert "<image>" in rendered
+    assert tokens == 1036
+
+
+def test_simple_token_counter_bounds_large_image_payload() -> None:
+    counter = SimpleTokenCounter(image_token_estimate=1024)
+    small = counter.count_request(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "data:image/png;base64,AA=="
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+        "chat",
+    )
+    large = counter.count_request(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": (
+                                    "data:image/png;base64,"
+                                    + "A" * 4_000_000
+                                )
+                            },
+                        },
+                    ],
+                }
+            ]
+        },
+        "chat",
+    )
+    assert large == small
+    assert large < 2048
+
+
+def test_multimodal_token_counter_redacts_nested_source_data() -> None:
+    tokenizer = CapturingTokenizer()
+    counter = HuggingFaceTokenCounter(
+        ROOT / "missing-tokenizer",
+        image_token_estimate=1024,
+    )
+    counter._tokenizer = tokenizer
+    encoded = "B" * 1_000_000
+    tokens = counter.count_request(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": encoded,
+                            },
+                        }
+                    ],
+                }
+            ]
+        },
+        "chat",
+    )
+    rendered = json.dumps(tokenizer.messages)
+    assert encoded not in rendered
+    assert "<image>" in rendered
+    assert tokens == 1036
+
+
+def test_evaluator_does_not_forward_base64_media() -> None:
+    encoded = "C" * 4_000_000
+    captured: dict = {}
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "task": "general",
+                                    "required_tier": None,
+                                    "preferred_tier": None,
+                                    "confidence": 1,
+                                    "reason": "visual request",
+                                }
+                            )
+                        }
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(upstream))
+    evaluator = TaskEvaluator(
+        {
+            "enabled": True,
+            "model_id": "small-router",
+            "confidence_threshold": 0.9,
+            "evaluate_task_changes": True,
+        },
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+        client=client,
+    )
+    result = run(
+        evaluator.evaluate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": (
+                                        "data:image/png;base64,"
+                                        + encoded
+                                    )
+                                },
+                            },
+                        ],
+                    }
+                ]
+            },
+            headers={},
+            api_kind="chat",
+            prompt_tokens=1024,
+            current_task=None,
+            is_new_conversation=True,
+        )
+    )
+    evaluator_prompt = captured["messages"][1]["content"]
+    assert encoded not in evaluator_prompt
+    assert "<image>" in evaluator_prompt
+    assert len(evaluator_prompt) < 2000
+    assert result.task == "general"
+    run(client.aclose())
+
+
+def test_evaluator_capacity_acquisition_does_not_wait(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "evaluator-capacity-audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=Registry(ROOT / "config" / "registry.yaml"),
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    held = run(runtime.scheduler.begin_request(None))
+    run(
+        runtime.scheduler.acquire_deployment(
+            held,
+            "ai-qwen38-27b",
+            "held-request",
+            timeout_seconds=0,
+            affinity_priority=False,
+            capacity=1,
+        )
+    )
+    evaluator = run(runtime.scheduler.begin_request(None))
+    started = time.monotonic()
+    with pytest.raises(QueueTimeoutError):
+        run(
+            _acquire_internal_model(
+                runtime,
+                lease=evaluator,
+                request_id="evaluator-request",
+                model_id="ai-qwen38-27b",
+                wait=False,
+            )
+        )
+    assert time.monotonic() - started < 0.5
+    run(held.release())
+    run(evaluator.release())
+    run(runtime.close())
+
+
 def test_validated_vision_endpoints_are_registered_for_images() -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     expected = {
@@ -1542,8 +2157,164 @@ def test_models_endpoint_reports_vision_capabilities(
         "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
     ]["supportsImages"] is True
     assert models[
+        "huihui/Qwen3.8-27B-Q4-DFlash2"
+    ]["supportsImages"] is False
+    assert models[
         "RadixArk/Qwen3.8-Flash-Next-NVFP4"
     ]["supportsImages"] is False
+    run(runtime.close())
+
+
+def test_large_base64_image_bypasses_text_tpm_and_routes_to_vision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "vision-audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(image_token_estimate=1024),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers()
+                if endpoint.backend_type == "ai_pool"
+                else [
+                    {
+                        "worker_id": "codex-primary",
+                        "ready": True,
+                        "state": "available",
+                        "safe_context_tokens": 131072,
+                        "api_base": (
+                            "http://127.0.0.1:14010"
+                            "/v1/accounts/primary"
+                        ),
+                    }
+                ]
+                if endpoint.backend_type == "codex_pool"
+                else None,
+            )
+            for endpoint in registry.endpoints
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    encoded = "A" * 4_000_000
+    local_vision_models = {
+        "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF",
+        "Qwen/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-MTP",
+    }
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] in local_vision_models
+        image_url = payload["messages"][0]["content"][1]["image_url"]["url"]
+        assert image_url.endswith(encoded)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-vision",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "VISION_OK",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": (
+                                        "data:image/png;base64,"
+                                        + encoded
+                                    )
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "VISION_OK"
+    assert response.headers["x-1panel-route-node"] in {"ivan", "amd"}
+    run(runtime.internal_client.aclose())
+
+
+def test_request_body_size_limit_is_independent_from_tpm(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    value = settings(tmp_path)
+    value.write_runtime({"limits": {"max_request_bytes": 256}})
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "size-limit-audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=value,
+        registry=Registry(ROOT / "config" / "registry.yaml"),
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [
+                    {"role": "user", "content": "A" * 512}
+                ],
+            },
+        )
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "payload_too_large"
+    assert response.json()["error"]["details"] == {
+        "max_request_bytes": 256
+    }
     run(runtime.close())
 
 
@@ -1797,6 +2568,18 @@ def test_sse_accumulator_rebuilds_responses_function_call() -> None:
             "arguments": "{\"city\":\"Paris\"}",
         }
     ]
+
+
+def test_sse_accumulator_detects_protocol_completion_events() -> None:
+    chat = SSEAccumulator("chat")
+    chat.feed(b"data: [DONE]\n\n")
+    assert chat.completed is True
+
+    responses = SSEAccumulator("responses")
+    responses.feed(
+        b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
+    )
+    assert responses.completed is True
 
 
 def test_response_history_preserves_native_function_call_items() -> None:
@@ -3458,6 +4241,22 @@ def test_control_dashboard_aggregates_runtime_state(
             {"spent_usd": 1.25, "reservations": {}},
         )
     )
+    run(
+        store.set_json(
+            "router:instance-state:router-api-local",
+            {
+                "instance_id": "router-api-local",
+                "boot_id": "boot-local",
+                "status": "running",
+                "draining": False,
+                "started_at": time.time() - 60,
+                "updated_at": time.time(),
+                "active_request_count": 1,
+                "active_requests": [{"request_id": "running-request"}],
+                "startup_cleanup": {"deployment_members": 2},
+            },
+        )
+    )
 
     app = create_control_app(runtime)
     with TestClient(app) as client:
@@ -3475,6 +4274,10 @@ def test_control_dashboard_aggregates_runtime_state(
     assert payload["summary"]["active_requests"] == 1
     assert payload["summary"]["success_rate"] == 1
     assert payload["cloud_budget"]["spent_usd"] == 1.25
+    assert payload["router_instances"][0]["boot_id"] == "boot-local"
+    assert payload["router_instances"][0]["startup_cleanup"][
+        "deployment_members"
+    ] == 2
     assert payload["requests"][0]["request_id"] == "completed-request"
     assert payload["requests"][0]["capacity_attempts"] == 2
     assert payload["requests"][0]["queue_wait_ms"] == 12.5

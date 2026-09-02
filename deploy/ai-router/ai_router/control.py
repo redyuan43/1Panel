@@ -133,6 +133,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         requests = _request_rows(events, limit, current.settings.value)
         cloud = await _cloud_budget(current)
         workers = _worker_rows(endpoints)
+        router_instances = await current.instance_states()
         completed = [
             item for item in requests
             if item["status"] in {"succeeded", "failed"}
@@ -175,6 +176,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             },
             "endpoints": endpoints,
             "workers": workers,
+            "router_instances": router_instances,
             "requests": requests,
             "node_distribution": _node_distribution(completed),
             "cloud_budget": cloud,
@@ -253,11 +255,17 @@ def _request_rows(
         if not request_id or request_id in seen:
             continue
         kind = event.get("event")
-        if kind not in {"request_started", "request_completed"}:
+        if kind not in {
+            "request_started",
+            "request_completed",
+            "request_interrupted_by_restart",
+        }:
             continue
         seen.add(request_id)
         status_code = event.get("status_code")
-        if kind == "request_completed":
+        if kind == "request_interrupted_by_restart":
+            status = "stale"
+        elif kind == "request_completed":
             status = (
                 "succeeded"
                 if int(status_code or 500) < 400

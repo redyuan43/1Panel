@@ -12,12 +12,13 @@ from .store import StateStore
 @dataclass
 class Lease:
     store: StateStore
+    owner_token: str
     conversation_key: str | None
     conversation_token: str | None
     deployment_key: str | None = None
     deployment_token: str | None = None
     queue_key: str | None = None
-    request_id: str | None = None
+    queue_member: str | None = None
 
     async def release_deployment(self) -> None:
         if self.deployment_key and self.deployment_token:
@@ -25,11 +26,12 @@ class Lease:
                 self.deployment_key,
                 self.deployment_token,
             )
-        if self.queue_key and self.request_id:
-            await self.store.dequeue(self.queue_key, self.request_id)
+        if self.queue_key and self.queue_member:
+            await self.store.dequeue(self.queue_key, self.queue_member)
         self.deployment_key = None
         self.deployment_token = None
         self.queue_key = None
+        self.queue_member = None
 
     async def release(self) -> None:
         await self.release_deployment()
@@ -46,19 +48,33 @@ class Scheduler:
         *,
         lock_ttl_seconds: int = 900,
         max_priority_burst: int = 8,
+        instance_id: str = "standalone",
+        boot_id: str | None = None,
     ) -> None:
         self.store = store
         self.lock_ttl_seconds = lock_ttl_seconds
         self.max_priority_burst = max_priority_burst
+        self.instance_id = instance_id
+        self.boot_id = boot_id or uuid4().hex
+
+    @property
+    def token_prefix(self) -> str:
+        return f"{self.instance_id}:"
+
+    def _owner_token(self) -> str:
+        return f"{self.instance_id}:{self.boot_id}:{uuid4().hex}"
+
+    async def cleanup_previous_instance_leases(self) -> dict[str, object]:
+        return await self.store.cleanup_instance_leases(self.token_prefix)
 
     async def begin_request(self, conversation_id: str | None) -> Lease:
+        token = self._owner_token()
         if not conversation_id:
-            return Lease(self.store, None, None)
+            return Lease(self.store, token, None, None)
         key = f"router:conversation-lock:{conversation_id}"
-        token = uuid4().hex
         if not await self.store.acquire_lock(key, token, self.lock_ttl_seconds):
             raise ConversationBusyError()
-        return Lease(self.store, key, token)
+        return Lease(self.store, token, key, token)
 
     async def acquire_deployment(
         self,
@@ -90,7 +106,7 @@ class Scheduler:
         if not deployment_ids:
             raise ValueError("at least one deployment candidate is required")
         await lease.release_deployment()
-        token = uuid4().hex
+        token = lease.owner_token
         for deployment_id in deployment_ids:
             deployment_key = f"router:deployment-capacity:{deployment_id}"
             acquired = await self.store.acquire_semaphore(
@@ -121,7 +137,8 @@ class Scheduler:
             raise ValueError("at least one deployment candidate is required")
         await lease.release_deployment()
         queue_key = f"router:queue:{endpoint_id}"
-        token = uuid4().hex
+        token = lease.owner_token
+        queue_member = f"{token}:{request_id}"
         priority = False
         if affinity_priority:
             minute = int(time.time() // 60)
@@ -132,12 +149,12 @@ class Scheduler:
             )
             priority = burst <= self.max_priority_burst
         score = time.time() - (60.0 if priority else 0.0)
-        await self.store.enqueue(queue_key, request_id, score)
+        await self.store.enqueue(queue_key, queue_member, score)
         deadline = time.monotonic() + timeout_seconds
 
         try:
             while True:
-                if await self.store.queue_head(queue_key) == request_id:
+                if await self.store.queue_head(queue_key) == queue_member:
                     for deployment_id in deployment_ids:
                         deployment_key = (
                             f"router:deployment-capacity:{deployment_id}"
@@ -150,17 +167,17 @@ class Scheduler:
                         )
                         if not acquired:
                             continue
-                        await self.store.dequeue(queue_key, request_id)
+                        await self.store.dequeue(queue_key, queue_member)
                         lease.deployment_key = deployment_key
                         lease.deployment_token = token
                         lease.queue_key = None
-                        lease.request_id = request_id
+                        lease.queue_member = None
                         return deployment_id
                 if time.monotonic() >= deadline:
                     raise QueueTimeoutError()
                 await asyncio.sleep(0.1)
         except BaseException:
-            await self.store.dequeue(queue_key, request_id)
+            await self.store.dequeue(queue_key, queue_member)
             raise
 
 
@@ -169,16 +186,19 @@ class ClientLimiter:
         self.store = store
         self.request_ttl_seconds = request_ttl_seconds
 
-    async def acquire_parallel(self, client_id: str, request_id: str, limit: int) -> bool:
+    async def acquire_parallel(self, client_id: str, token: str, limit: int) -> bool:
         return await self.store.acquire_semaphore(
             f"router:client-parallel:{client_id}",
-            request_id,
+            token,
             limit,
             self.request_ttl_seconds,
         )
 
-    async def release_parallel(self, client_id: str, request_id: str) -> None:
-        await self.store.release_semaphore(f"router:client-parallel:{client_id}", request_id)
+    async def release_parallel(self, client_id: str, token: str) -> None:
+        await self.store.release_semaphore(
+            f"router:client-parallel:{client_id}",
+            token,
+        )
 
     async def check_rate_limits(
         self,

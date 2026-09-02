@@ -1,5 +1,10 @@
 version: 1
 
+limits:
+  max_request_bytes: 33554432
+  image_token_estimate: 1024
+  audio_token_estimate: 4096
+
 routing:
   default_output_reserve_tokens: 4096
   provider_priority: local_first

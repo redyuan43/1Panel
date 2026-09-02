@@ -200,6 +200,7 @@ class SSEAccumulator:
         self._completed_output: list[dict[str, Any]] | None = None
         self.response_id: str | None = None
         self.usage: dict[str, Any] | None = None
+        self.completed = False
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += self._decoder.decode(chunk)
@@ -281,7 +282,10 @@ class SSEAccumulator:
         if not line.startswith("data:"):
             return
         value = line[5:].strip()
-        if not value or value == "[DONE]":
+        if not value:
+            return
+        if value == "[DONE]":
+            self.completed = True
             return
         try:
             payload = json.loads(value)
@@ -404,6 +408,7 @@ class SSEAccumulator:
                 item["arguments"] = payload["arguments"]
             return
         if event_type == "response.completed":
+            self.completed = True
             response = payload.get("response")
             if isinstance(response, dict):
                 output = response.get("output")

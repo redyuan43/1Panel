@@ -127,6 +127,7 @@ function renderDashboard() {
   const data = state.dashboard;
   if (!data) return;
   renderSummary(data);
+  renderRouterInstances(data.router_instances || []);
   renderAlerts(data.alerts);
   renderNodeOverview(data.endpoints);
   renderDistribution(data.node_distribution);
@@ -136,6 +137,38 @@ function renderDashboard() {
   renderEndpointTable(data.endpoints);
   renderWorkerTable(data.workers);
   renderRequestTable();
+}
+
+function renderRouterInstances(instances) {
+  byId("router-instance-count").textContent =
+    instances.length ? `${instances.length} 个实例` : "暂无实例";
+  byId("router-instance-table").innerHTML = instances.length
+    ? instances.map((item) => {
+      const cleanup = item.startup_cleanup || {};
+      const cleanupCount = [
+        cleanup.deployment_members,
+        cleanup.client_members,
+        cleanup.queue_members,
+        cleanup.conversation_locks,
+      ].reduce((total, value) => total + Number(value || 0), 0);
+      const running = item.status === "running" && !item.draining;
+      const status = item.draining
+        ? "排空中"
+        : item.status === "stopped"
+          ? "已停止"
+          : "运行中";
+      return `
+        <tr>
+          <td>${healthBadge(running)} ${escapeHtml(status)}</td>
+          <td><code>${escapeHtml(item.instance_id || "—")}</code></td>
+          <td><code title="${escapeHtml(item.boot_id || "")}">${escapeHtml(shortId(item.boot_id || "—", 16))}</code></td>
+          <td>${Number(item.active_request_count || 0)}</td>
+          <td>${cleanupCount}</td>
+          <td>${formatTime(item.updated_at)}</td>
+        </tr>
+      `;
+    }).join("")
+    : emptyRow(6, "Router API 实例尚未上报状态");
 }
 
 function renderSummary(data) {

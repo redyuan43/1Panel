@@ -416,7 +416,7 @@ Traceback、HTTP 500 或 OOM。
 | Codex Pro Sol | Codex Responses 原生图像输入 | 通过，返回 `RED_BACKGROUND_WHITE_SQUARE` | `text,image` |
 | Ivan Qwen3.8 128K | `mmproj-F16.gguf` + 1024 image tokens | 白方块图命中，纯红图返回 `OTHER` | `text,image` |
 | AMD ROCmFP4 128K | `mmproj-F16.gguf` + 1024 image tokens | 白方块图命中，纯红图返回 `OTHER` | `text,image` |
-| AI P40/V100 池 | 已加入 mmproj，projector 暂留 CPU | 未完成，CUDA 初始化被主机故障阻塞 | 仅 `text` |
+| AI P40/V100 池 | `mmproj-model-bf16.gguf`，projector 暂留 CPU | 小图通过；更高分辨率图片在 P40/V100 均耗尽 mtmd decode workspace | 仅 `text` |
 | Edge Flash Next | 模型含 vision config | 失败，图像请求返回 500 后容器退出 | 仅 `text` |
 | DeepSeek | API 不支持当前模型的图像输入 | 返回 `This model does not support image` | 仅 `text` |
 
@@ -455,8 +455,8 @@ prefix cache 没有串用旧视觉状态。Ivan 冷图 prefill 明显慢于 AMD�
 | Sol 显式模型 | 200 | `codex-pro/codex-primary` | `RED_BACKGROUND_WHITE_SQUARE` |
 | `auto` | 200 | `ivan/ivan-qwen38-flash-128k` | `RED_BACKGROUND_WHITE_SQUARE` |
 
-生产控制台最终仅为 Ivan、AMD、Sol 显示图像能力。Edge 因 vLLM 图像请求退出
-问题保持文本；DeepSeek API 明确拒绝图像；AI 池等待 CUDA 运行时恢复后再验收。
+生产控制台仅为 Ivan、AMD、Sol 显示图像能力。AI 和 Edge 保持文本；
+DeepSeek API 明确拒绝图像。
 
 ## WorkBuddy 图像能力发现修复
 
@@ -480,9 +480,108 @@ Edge 的 vLLM 能识别模型视觉配置并初始化图像 encoder cache，但�
 原 systemd 服务恢复文本模型；在完成独立运行时修复与图像复验前，Edge 不进入
 视觉候选。
 
+## WorkBuddy 大图 TPM 修复
+
+2026-09-02 10:37:38，来自 `ivan-laptop` 的图片请求在模型选择前返回
+`429 tpm_limit_exceeded`。Router 日志和 Redis AOF 记录该请求被 tokenizer
+估算为 1167343 tokens，超过 `1panel` 客户端的 1000000 TPM。请求当时尚未
+进入路由评估，因此不是视觉模型、GPU 容量或云端配额故障。
+
+根因是多模态消息中的 `data:image/...;base64,...` 被完整当作普通文本送入
+tokenizer。修复后：
+
+- 图片、音频数据在计数副本中替换为媒体占位符，原始请求体仍完整转发。
+- 图片默认按每张 1024 tokens、音频按 4096 tokens 估算。
+- 请求体使用独立 32 MiB 上限，超限返回 `413 payload_too_large`。
+- AI 小图直连虽然通过，但高分辨率图像在 P40/V100 均出现 mtmd decode
+  workspace 不足，因此不加入生产 `auto` 视觉候选。
+
+生产复验使用 1024x1024 红色 BMP，Base64 请求体约 4 MiB：
+
+| 项目 | 结果 |
+| --- | --- |
+| Request ID | `vision-base64-live-20260902` |
+| Router 估算 | 1084 tokens |
+| 后端 usage | 1043 prompt tokens |
+| 路由节点 | `ai` |
+| deployment | `p40-GPU-759c6d34-886e-99d0-c407-a7227d2554ce` |
+| HTTP/内容 | `200` / `红色` |
+| Router 延迟 | 142107.65 ms |
+
+部署后 AI 模型池保持 `ready_workers=6/6`，请求结束后容量锁全部释放，内核日志
+未出现新 Xid、GPU reset 或 OOM。
+
 AI 池已完成最小代码接入：worker 启动时传入 mmproj，并使用
 `--no-mmproj-offload` 避免 P40 显存被 projector 进一步占用；同时补充了掉总线
 GPU 行的发现容错和服务优雅退出测试。单元测试 13 项通过。但此前 V100
 `Xid 79` 留下的不可杀 `llama-server` 线程仍占用旧 systemd cgroup，健康 P40
 的新进程均报 CUDA initialization error。该问题需要单独授权执行 NVIDIA
 运行时复位或主机重启；恢复并通过真实图片请求前，AI 仍只注册为文本能力。
+
+## 2026-09-02 Router 重启租约保护实现
+
+本轮已完成代码、自动测试和生产 Router 滚动部署。部署镜像为
+`sha256:4571d7d5c0646eca724a735b0f2e5cf5ab740536cc81b0c51c48e876c95c4a04`。
+真实强制中断注入尚未执行，仍需单独确认。
+
+- `router-api-local` 与 `router-api-tail` 使用固定实例 ID，每次启动生成新
+  boot ID。
+- 新租约 token 包含 `instance_id:boot_id` 前缀，覆盖物理 deployment、
+  conversation lock、客户端并发和队列成员。
+- 单实例启动只清理相同实例旧 boot留下的成员，不影响另一个 API 实例。
+- 被清理的 deployment 写入共享 `draining_old_request` 标记；后续调度绕过
+  健康缓存，实时检查 AI worker、llama.cpp slots、vLLM metrics 或 Codex
+  worker。
+- 后端仍忙时按容量繁忙处理，不写入故障 cooldown；空闲后自动删除保护标记
+  并恢复候选。
+- 旧实例状态中的在途请求写入
+  `request_interrupted_by_restart`，不持久化不完整的助手输出。
+- 新增管理接口 `/internal/drain` 和 `/internal/status`，以及控制台 Router
+  实例表。Uvicorn graceful shutdown 和 Compose stop grace分别为 900 秒和
+  910 秒。
+
+自动测试覆盖：
+
+- local 重启只清除 local租约，tail租约、会话锁和容量保持有效。
+- deployment、客户端并发、会话锁和队列孤儿成员均被精确清理。
+- 后端忙时阻止重新调度，空闲后自动恢复并写入对应审计事件。
+- 排空实例拒绝新推理，但健康与管理接口继续可用。
+- 原有非流式、流式、工具、结构化输出、容量分流和多模态测试全部继续通过。
+
+自动测试共 86 项通过，其中 `test_core.py` 81 项、
+`test_codex_adapter.py` 5 项；同时通过 Redis DB 15 隔离环境下的真实成员清理
+测试、Python 编译检查、前端 JavaScript 语法检查、Compose 配置检查和
+`git diff --check`。
+
+生产部署与实测结果：
+
+| 项目 | 结果 |
+| --- | --- |
+| local boot ID | `e629d1d0380647939913ce998d4f28f3` |
+| tail boot ID | `1feb4b2227574f59ab8a23a59cd4e21b` |
+| 两实例启动清理 | deployment/client/queue/conversation 均为 `0` |
+| Router/控制台 | 4 个容器均运行新镜像，restart count 为 `0` |
+| 模型健康 | endpoint `6/6`，AI worker `6/6`，Ivan/AMD 空闲，Codex 可用 |
+| GPU 日志 | 部署后无新 NVRM Xid、GPU fault、reset 或 OOM |
+
+真实显式 Ivan 请求 `restart-lease-ivan-20260902` 执行期间，Redis 容量成员
+为
+`router-api-local:e629d1d0380647939913ce998d4f28f3:cd37a983fa5849518172deda974ba18f`，
+控制台显示 local 活动请求数为 1，Ivan `/slots` 同时显示 processing。请求
+HTTP 200 完成后，三者同时恢复为空闲，证明正常响应结束会立即释放容量租约。
+
+滚动部署后还观察到一条真实 Tailnet 请求
+`84173c5d536345e4b41e68cc7bfd4f5d`。其租约前缀为
+`router-api-tail:1feb4b2227574f59ab8a23a59cd4e21b`；约 143 秒执行期间，
+tail 活动请求、Redis deployment 容量和 Ivan 物理 slot 始终一致为忙。HTTP
+200 完成后，三层状态同时归零，未留下孤儿成员。
+
+部署过程只滚动更新 Router API 和控制台，没有重启 LiteLLM、Codex adapter、
+Redis 或任何 GPU 模型服务。会话亲和与 prefix cache数据未被清理。
+
+仍需单独确认后执行的破坏性验收：
+
+1. 对单个 Router实例调用 `/internal/drain`，验证 900 秒优雅排空。
+2. 在真实长请求执行中强制终止一个 Router实例，验证请求被标记为
+   `interrupted_by_restart`。
+3. 验证旧后端仍忙时进入 `draining_old_request`，且物理后端空闲后自动恢复。

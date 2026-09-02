@@ -17,6 +17,8 @@ class StateStore(Protocol):
 
     async def delete(self, key: str) -> None: ...
 
+    async def list_json(self, prefix: str) -> list[dict[str, Any]]: ...
+
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool: ...
 
     async def release_lock(self, key: str, token: str) -> None: ...
@@ -32,6 +34,8 @@ class StateStore(Protocol):
     async def acquire_semaphore(self, key: str, token: str, limit: int, ttl_seconds: int) -> bool: ...
 
     async def release_semaphore(self, key: str, token: str) -> None: ...
+
+    async def cleanup_instance_leases(self, token_prefix: str) -> dict[str, Any]: ...
 
 
 @dataclass
@@ -72,6 +76,16 @@ class InMemoryStateStore:
     async def delete(self, key: str) -> None:
         async with self._lock:
             self._values.pop(key, None)
+
+    async def list_json(self, prefix: str) -> list[dict[str, Any]]:
+        async with self._lock:
+            self._purge_locked()
+            result = []
+            for key, item in self._values.items():
+                if not key.startswith(prefix) or not isinstance(item.value, dict):
+                    continue
+                result.append(json.loads(json.dumps(item.value)))
+            return result
 
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool:
         async with self._lock:
@@ -133,6 +147,56 @@ class InMemoryStateStore:
         async with self._lock:
             self._semaphores.get(key, {}).pop(token, None)
 
+    async def cleanup_instance_leases(self, token_prefix: str) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "deployment_members": 0,
+            "client_members": 0,
+            "queue_members": 0,
+            "conversation_locks": 0,
+            "deployments": [],
+        }
+        deployments: set[str] = set()
+        async with self._lock:
+            for key, values in self._semaphores.items():
+                members = [
+                    member
+                    for member in values
+                    if member.startswith(token_prefix)
+                ]
+                for member in members:
+                    values.pop(member, None)
+                if key.startswith("router:deployment-capacity:"):
+                    result["deployment_members"] += len(members)
+                    if members:
+                        deployments.add(
+                            key.removeprefix("router:deployment-capacity:")
+                        )
+                elif key.startswith("router:client-parallel:"):
+                    result["client_members"] += len(members)
+
+            for key, values in self._queues.items():
+                members = [
+                    member
+                    for member in values
+                    if member.startswith(token_prefix)
+                ]
+                for member in members:
+                    values.pop(member, None)
+                if key.startswith("router:queue:"):
+                    result["queue_members"] += len(members)
+
+            for key, item in list(self._values.items()):
+                if (
+                    key.startswith("router:conversation-lock:")
+                    and isinstance(item.value, str)
+                    and item.value.startswith(token_prefix)
+                ):
+                    self._values.pop(key, None)
+                    result["conversation_locks"] += 1
+
+        result["deployments"] = sorted(deployments)
+        return result
+
     def _purge_locked(self) -> None:
         now = time.time()
         expired = [key for key, item in self._values.items() if item.expired(now)]
@@ -164,6 +228,20 @@ class RedisStateStore:
 
     async def delete(self, key: str) -> None:
         await self._client.delete(key)
+
+    async def list_json(self, prefix: str) -> list[dict[str, Any]]:
+        result: list[dict[str, Any]] = []
+        async for key in self._client.scan_iter(match=f"{prefix}*"):
+            value = await self._client.get(key)
+            if not value:
+                continue
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                result.append(parsed)
+        return result
 
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool:
         return bool(await self._client.set(key, token, nx=True, ex=ttl_seconds))
@@ -231,3 +309,46 @@ class RedisStateStore:
 
     async def release_semaphore(self, key: str, token: str) -> None:
         await self._client.zrem(key, token)
+
+    async def cleanup_instance_leases(self, token_prefix: str) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "deployment_members": 0,
+            "client_members": 0,
+            "queue_members": 0,
+            "conversation_locks": 0,
+            "deployments": [],
+        }
+        deployments: set[str] = set()
+        for pattern, field in (
+            ("router:deployment-capacity:*", "deployment_members"),
+            ("router:client-parallel:*", "client_members"),
+            ("router:queue:*", "queue_members"),
+        ):
+            async for key in self._client.scan_iter(match=pattern):
+                members = [
+                    member
+                    async for member, _score in self._client.zscan_iter(
+                        key,
+                        match=f"{token_prefix}*",
+                    )
+                ]
+                if not members:
+                    continue
+                removed = int(await self._client.zrem(key, *members))
+                result[field] += removed
+                if pattern.startswith("router:deployment-capacity:"):
+                    deployments.add(
+                        key.removeprefix("router:deployment-capacity:")
+                    )
+
+        async for key in self._client.scan_iter(
+            match="router:conversation-lock:*"
+        ):
+            value = await self._client.get(key)
+            if not value or not value.startswith(token_prefix):
+                continue
+            removed = int(await self._client.delete(key))
+            result["conversation_locks"] += removed
+
+        result["deployments"] = sorted(deployments)
+        return result

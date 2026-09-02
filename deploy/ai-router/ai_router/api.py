@@ -30,7 +30,7 @@ from .policy import updated_conversation_state
 from .protocol import normalize_request
 from .runtime import RouterRuntime, build_runtime
 from .token_counter import output_reserve_tokens, request_modalities
-from .types import ConversationState, RouteDecision
+from .types import ConversationState, Endpoint, EndpointStatus, RouteDecision
 
 
 RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
@@ -51,6 +51,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = runtime is None
         app.state.runtime = runtime or build_runtime()
+        await app.state.runtime.start()
         yield
         if owned:
             await app.state.runtime.close()
@@ -77,7 +78,41 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             "ok": True,
             "state_store": await current.store.ping(),
             "registry_endpoints": len(current.registry.endpoints),
+            "instance_id": current.instance_id,
+            "boot_id": current.boot_id,
+            "draining": current.draining,
         }
+
+    @app.get("/internal/status")
+    async def internal_status(request: Request) -> dict[str, Any]:
+        current = _runtime(request)
+        current.auth.authenticate_admin(request.headers.get("authorization"))
+        states = await current.instance_states()
+        current_state = next(
+            (
+                item
+                for item in states
+                if item.get("instance_id") == current.instance_id
+            ),
+            {},
+        )
+        return {"instance": current_state, "instances": states}
+
+    @app.post("/internal/drain")
+    async def internal_drain(request: Request) -> dict[str, Any]:
+        current = _runtime(request)
+        current.auth.authenticate_admin(request.headers.get("authorization"))
+        await current.set_draining(True)
+        states = await current.instance_states()
+        current_state = next(
+            (
+                item
+                for item in states
+                if item.get("instance_id") == current.instance_id
+            ),
+            {},
+        )
+        return {"ok": True, "instance": current_state}
 
     @app.get("/v1/models")
     async def models(request: Request) -> JSONResponse:
@@ -148,8 +183,26 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     current = _runtime(request)
     current.reload_settings()
     request_id = request.headers.get("x-request-id") or uuid4().hex
+    max_request_bytes = int(
+        current.settings.section("limits").get(
+            "max_request_bytes",
+            32 * 1024 * 1024,
+        )
+    )
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > max_request_bytes:
+                raise _payload_too_large(max_request_bytes)
+        except ValueError:
+            pass
     try:
-        body = await request.json()
+        raw_body = await request.body()
+        if len(raw_body) > max_request_bytes:
+            raise _payload_too_large(max_request_bytes)
+        body = json.loads(raw_body)
+    except RouterError:
+        raise
     except Exception as exc:
         raise RouterError(
             "request body must be valid JSON",
@@ -169,9 +222,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             "model is required",
             status_code=400,
             code="model_required",
-        )
+    )
     authenticated = current.auth.authenticate(request.headers.get("authorization"))
     current.auth.ensure_model_access(authenticated, requested_model)
+    if current.draining:
+        raise RouterError(
+            "router instance is draining",
+            status_code=503,
+            code="router_draining",
+            details={"instance_id": current.instance_id},
+        )
     normalized = normalize_request(
         body,
         api_kind,
@@ -192,8 +252,15 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     lease = await current.scheduler.begin_request(conversation_id)
     parallel_acquired = False
     stream_owned = False
+    request_tracked = False
 
     try:
+        await current.track_request_started(
+            lease.owner_token,
+            request_id,
+            conversation_id,
+        )
+        request_tracked = True
         conversation = await current.conversations.get(conversation_id)
         effective_body = apply_stored_history(
             current.compactor,
@@ -219,7 +286,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         parallel_acquired = await current.limiter.acquire_parallel(
             authenticated.policy.id,
-            request_id,
+            lease.owner_token,
             authenticated.policy.max_parallel_requests,
         )
         if not parallel_acquired:
@@ -250,6 +317,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 model_id=str(
                     current.settings.section("evaluator").get("model_id", "")
                 ),
+                wait=False,
             )
 
         evaluation = await current.evaluator.evaluate(
@@ -314,6 +382,21 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     client_id=authenticated.policy.id,
                     conversation_id=conversation_id,
                     decision=decision,
+                )
+                await current.track_request_routed(
+                    lease.owner_token,
+                    requested_model=decision.requested_model,
+                    selected_model=decision.endpoint.public_model,
+                    endpoint_id=decision.endpoint.id,
+                    deployment_id=(
+                        decision.deployment_id or decision.endpoint.id
+                    ),
+                    node=decision.endpoint.node,
+                    task=decision.task,
+                    reason=decision.reason,
+                    affinity=decision.affinity,
+                    prompt_tokens=decision.prompt_tokens,
+                    output_reserve_tokens=decision.output_reserve_tokens,
                 )
                 cache_snapshot = await _prefix_cache_snapshot(
                     current,
@@ -496,8 +579,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             if parallel_acquired:
                 await current.limiter.release_parallel(
                     authenticated.policy.id,
-                    request_id,
+                    lease.owner_token,
                 )
+            if request_tracked:
+                await current.track_request_finished(lease.owner_token)
 
 
 async def _acquire_route_capacity(
@@ -547,6 +632,20 @@ async def _acquire_route_capacity(
 
         _apply_protocol_constraints(decision, api_kind)
         capacity_attempts += 1
+        if not await _filter_restart_draining_deployments(
+            current,
+            decision,
+            excluded_endpoints,
+            excluded_deployments,
+        ):
+            capacity_busy_seen = True
+            affinity_spilled = affinity_spilled or decision.affinity in {
+                "hit",
+                "logical-hit",
+            }
+            if requested_model != "auto":
+                raise CapacityBusyError()
+            continue
         initial_deployment = decision.deployment_id or decision.endpoint.id
         deployment_routes = dict(decision.deployment_candidates)
         deployment_ids = tuple(deployment_routes) or (initial_deployment,)
@@ -696,6 +795,101 @@ def _exclude_busy_decision(
         excluded_deployments.add(decision.deployment_id)
         return
     excluded_endpoints.add(decision.endpoint.id)
+
+
+async def _filter_restart_draining_deployments(
+    current: RouterRuntime,
+    decision: RouteDecision,
+    excluded_endpoints: set[str],
+    excluded_deployments: set[str],
+) -> bool:
+    endpoint = decision.endpoint
+    routes = dict(decision.deployment_candidates)
+    deployment_ids = list(routes) or [
+        decision.deployment_id or endpoint.id
+    ]
+    marker_ids = list(deployment_ids)
+    if (
+        endpoint.backend_type in {"ai_pool", "codex_pool"}
+        and endpoint.id not in marker_ids
+    ):
+        marker_ids.append(endpoint.id)
+    markers = {
+        deployment_id: marker
+        for deployment_id in marker_ids
+        if (
+            marker := await current.draining_marker(deployment_id)
+        )
+    }
+    if not markers:
+        return True
+
+    status = await current.health.status(endpoint, force_refresh=True)
+    blocked: set[str] = set()
+    for deployment_id, marker in markers.items():
+        if _deployment_available(endpoint, status, deployment_id):
+            await current.clear_draining_marker(deployment_id)
+            current.audit.write(
+                "backend_available_after_drain",
+                endpoint_id=endpoint.id,
+                deployment_id=deployment_id,
+                instance_id=current.instance_id,
+                boot_id=current.boot_id,
+                cleared_by_instance=marker.get("instance_id"),
+                previous_boot_id=marker.get("previous_boot_id"),
+            )
+            continue
+        await current.record_draining_busy(deployment_id, marker)
+        if deployment_id == endpoint.id:
+            blocked.update(deployment_ids)
+        else:
+            blocked.add(deployment_id)
+
+    if not blocked:
+        return True
+    if routes:
+        filtered = tuple(
+            (deployment_id, url)
+            for deployment_id, url in decision.deployment_candidates
+            if deployment_id not in blocked
+        )
+        excluded_deployments.update(blocked)
+        if not filtered:
+            return False
+        decision.deployment_candidates = filtered
+        decision.deployment_id = filtered[0][0]
+        decision.upstream_api_base = filtered[0][1]
+        if decision.affinity in {"hit", "logical-hit"}:
+            decision.affinity = "physical-failover"
+            decision.reason = "physical_worker_unavailable"
+        return True
+
+    excluded_endpoints.add(endpoint.id)
+    return False
+
+
+def _deployment_available(
+    endpoint: Endpoint,
+    status: EndpointStatus,
+    deployment_id: str,
+) -> bool:
+    if not status.healthy:
+        return False
+    if endpoint.backend_type in {"ai_pool", "codex_pool"}:
+        workers = status.detail.get("workers", [])
+        if deployment_id == endpoint.id:
+            return any(
+                item.get("ready")
+                and item.get("state") == "available"
+                for item in workers
+            )
+        return any(
+            str(item.get("worker_id", "")) == deployment_id
+            and item.get("ready")
+            and item.get("state") == "available"
+            for item in workers
+        )
+    return status.load_headroom > 0
 
 
 async def _send_upstream(
@@ -899,6 +1093,7 @@ async def _acquire_internal_model(
     lease: Any,
     request_id: str,
     model_id: str,
+    wait: bool = True,
 ) -> None:
     endpoint = current.registry.by_id(model_id)
     if endpoint is None or not endpoint.enabled:
@@ -907,16 +1102,28 @@ async def _acquire_internal_model(
             status_code=503,
             code="internal_model_unavailable",
         )
-    await current.scheduler.acquire_deployment(
+    if wait:
+        await current.scheduler.acquire_deployment(
+            lease,
+            endpoint.id,
+            request_id,
+            timeout_seconds=float(
+                current.settings.section("queue").get(
+                    "timeout_seconds",
+                    120,
+                )
+            ),
+            affinity_priority=False,
+            capacity=endpoint.max_concurrency,
+        )
+        return
+    acquired = await current.scheduler.try_acquire_deployment_candidates(
         lease,
-        endpoint.id,
-        request_id,
-        timeout_seconds=float(
-            current.settings.section("queue").get("timeout_seconds", 120)
-        ),
-        affinity_priority=False,
+        (endpoint.id,),
         capacity=endpoint.max_concurrency,
     )
+    if not acquired:
+        raise QueueTimeoutError()
 
 
 async def _save_conversation(
@@ -1016,7 +1223,11 @@ async def _stream_response(
         async for chunk in upstream.aiter_bytes():
             accumulator.feed(chunk)
             yield chunk
-        completed = True
+            if accumulator.completed:
+                completed = True
+                break
+        else:
+            completed = True
     finally:
         accumulator.finish()
         try:
@@ -1049,7 +1260,11 @@ async def _stream_response(
             )
         finally:
             await lease.release()
-            await current.limiter.release_parallel(client_id, request_id)
+            await current.limiter.release_parallel(
+                client_id,
+                lease.owner_token,
+            )
+            await current.track_request_finished(lease.owner_token)
 
 
 def _response_headers(
@@ -1123,6 +1338,8 @@ async def _audit(
         protocol=decision.protocol,
         native_or_adapter=decision.native_or_adapter,
         candidate_rejections=list(decision.candidate_rejections),
+        instance_id=current.instance_id,
+        boot_id=current.boot_id,
     )
 
 
@@ -1243,6 +1460,8 @@ def _audit_started(
         protocol=decision.protocol,
         native_or_adapter=decision.native_or_adapter,
         candidate_rejections=list(decision.candidate_rejections),
+        instance_id=current.instance_id,
+        boot_id=current.boot_id,
     )
 
 
@@ -1250,6 +1469,15 @@ def _runtime(request: Request) -> RouterRuntime:
     if not hasattr(request.state, "started_at"):
         request.state.started_at = time.monotonic()
     return request.app.state.runtime
+
+
+def _payload_too_large(max_request_bytes: int) -> RouterError:
+    return RouterError(
+        "request body exceeds the configured size limit",
+        status_code=413,
+        code="payload_too_large",
+        details={"max_request_bytes": max_request_bytes},
+    )
 
 
 def _error_response(exc: RouterError) -> JSONResponse:

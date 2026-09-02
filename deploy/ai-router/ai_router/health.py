@@ -36,18 +36,34 @@ class HealthMonitor:
         self.stale_after_seconds = stale_after_seconds
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=2.0))
 
-    async def statuses(self, endpoints: list[Endpoint] | tuple[Endpoint, ...]) -> dict[str, EndpointStatus]:
-        values = await asyncio.gather(*(self.status(item) for item in endpoints))
+    async def statuses(
+        self,
+        endpoints: list[Endpoint] | tuple[Endpoint, ...],
+        *,
+        force_refresh: bool = False,
+    ) -> dict[str, EndpointStatus]:
+        values = await asyncio.gather(
+            *(
+                self.status(item, force_refresh=force_refresh)
+                for item in endpoints
+            )
+        )
         return {item.endpoint_id: item for item in values}
 
-    async def status(self, endpoint: Endpoint) -> EndpointStatus:
+    async def status(
+        self,
+        endpoint: Endpoint,
+        *,
+        force_refresh: bool = False,
+    ) -> EndpointStatus:
         key = f"router:health:{endpoint.id}"
         now = time.time()
-        cached = await self.store.get_json(key)
-        if cached:
-            value = EndpointStatus.from_dict(cached)
-            if now - value.checked_at <= self.refresh_seconds:
-                return value
+        if not force_refresh:
+            cached = await self.store.get_json(key)
+            if cached:
+                value = EndpointStatus.from_dict(cached)
+                if now - value.checked_at <= self.refresh_seconds:
+                    return value
         value = await self._probe(endpoint)
         await self.store.set_json(key, value.to_dict(), ttl_seconds=max(30, int(self.stale_after_seconds * 3)))
         return value

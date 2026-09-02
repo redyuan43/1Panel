@@ -51,6 +51,10 @@ endpoints:
       quality_status: benchmarked-2026-09-01
       quality_report: /opt/1panel/ai-router/benchmarks/report-ai-20260901.json
       topology: logical-pool
+      vision_status: small-image-direct-validated-auto-disabled
+      vision_projector: mmproj-model-bf16.gguf
+      image_min_tokens: 1024
+      vision_limitation: high-resolution mtmd chunks can exhaust decode workspace
 
   - id: edge-qwen38-flash
     public_model: RadixArk/Qwen3.8-Flash-Next-NVFP4

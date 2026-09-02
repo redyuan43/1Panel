@@ -25,6 +25,8 @@ Agent 与第三方调用示例见
 - 自动刷新的运维控制台，展示运行中请求、路由结果、告警和最近流量
 - Redis 持久会话状态；LiteLLM 和 Redis 不暴露宿主端口
 - Codex Pro 订阅通过独立 OAuth 适配器接入，凭据不与桌面 Codex 共用
+- 图片和音频二进制数据不按 Base64 文本计入 TPM；媒体使用独立保守 Token
+  估算，请求体大小由 32 MiB 上限单独保护
 
 ## 多轮上下文与物理缓存
 
@@ -93,6 +95,40 @@ routing:
 
 云端关闭时，三种模式都只选择本地端点。
 
+## Router 重启与租约
+
+两个 API 实例使用固定 ID `router-api-local` 和 `router-api-tail`，每次启动
+生成新的 boot ID。容量、会话锁、客户端并发和队列成员均带有实例与 boot
+归属。
+
+某个 API 实例重启时，只清理该实例上一次运行留下的租约，不会删除另一个
+实例仍在使用的容量。被中断的请求记录为
+`request_interrupted_by_restart`，客户端应使用原会话 ID 重试；Router
+不会把未完成的助手输出写入会话历史。
+
+被清理租约对应的 deployment 会进入 `draining_old_request` 保护状态。下一次
+调度前，Router 绕过健康缓存直接读取具体后端：
+
+- AI 检查对应物理 worker。
+- Ivan/AMD 检查 llama.cpp slots。
+- Edge 检查 vLLM running/waiting。
+- Codex 检查订阅账号 worker。
+
+后端仍忙时不会写入故障 cooldown，也不会接收第二路请求；显示空闲后自动
+清除保护标记并恢复候选。该过程只处理容量，不清理 prefix cache、会话亲和
+或历史。
+
+计划内重启先调用当前实例的管理接口：
+
+```text
+POST /internal/drain
+GET  /internal/status
+```
+
+接口使用 `AI_ROUTER_ADMIN_KEY`。排空后实例拒绝新的推理请求，但健康和管理
+查询保持可用。Uvicorn 与 Compose 的优雅退出上限均配置为 900 秒，覆盖长
+上下文推理；重启操作仍需单独确认。
+
 复杂编程和安全分析可被评估器标记为软性的
 `subscription-frontier` 偏好。该偏好首先尝试
 `codex-pro/gpt-5.6-sol`；Sol 账号繁忙、冷却或不可用时立即恢复
@@ -145,6 +181,9 @@ ChatGPT Codex 订阅后端不接受 `previous_response_id`，Router 会用该 ID
 - 运行时覆盖保存在 `/opt/1panel/ai-router/settings.yaml`
 - 审计日志保存在 `/opt/1panel/ai-router/audit/router.jsonl`
 - 会话迁移胶囊使用 `AI_ROUTER_STATE_KEY` 加密
+- 请求体默认最大 32 MiB，超限返回 `413 payload_too_large`
+- 图片默认按每张 1024 tokens 参与上下文和 TPM 估算，Base64 原始字节不会
+  被 tokenizer 当作普通文本
 
 ## 质量分与 auto
 

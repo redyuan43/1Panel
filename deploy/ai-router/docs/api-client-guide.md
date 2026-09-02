@@ -191,7 +191,7 @@ curl --fail-with-body \
 | Ivan Qwen3.8 128K | 启用 | mmproj + 1024 image tokens，图像切换实测通过 |
 | AMD ROCmFP4 128K | 启用 | mmproj + 1024 image tokens，图像切换实测通过 |
 | Codex Pro Sol | 启用 | Codex Responses 图像输入真实通过 |
-| AI P40/V100 池 | 未启用 | 已配置 mmproj，但主机 CUDA 异常，待恢复后复验 |
+| AI P40/V100 池 | 未启用 | 小图通过，但高分辨率 mtmd chunk 在 P40/V100 均耗尽 decode workspace |
 | Edge Flash Next | 未启用 | 当前 vLLM 图像请求会导致容器退出 |
 | DeepSeek | 未启用 | API 明确返回 `This model does not support image` |
 
@@ -242,6 +242,11 @@ Responses API 使用 `input_image`：
 生产调用应控制图片尺寸和数量，并使用稳定的
 `X-1Panel-Conversation-ID`。同一对话仍会优先回到原 deployment，但视觉
 projector 和 prefix cache 都受后端容量与淘汰策略限制。
+
+Router 不会把 `data:image/...;base64,...` 的原始字节当成普通文本 Token。
+生产默认按每张图片 1024 tokens 参与上下文和 TPM 估算，原始图片仍完整转发
+给后端。请求体由独立的 32 MiB 上限保护，超过上限返回
+`413 payload_too_large`。
 
 ## 7. 流式输出
 
@@ -390,11 +395,32 @@ prompt。
 
 ## 12. 错误与重试
 
+Router API 由本地与 Tailnet 两个实例提供。计划内更新会先将单个实例切换为
+排空状态，再等待在途模型请求完成。排空实例返回：
+
+```json
+{
+  "error": {
+    "code": "router_draining",
+    "message": "router instance is draining"
+  }
+}
+```
+
+客户端可重试另一个 Router 地址。若 Router 在请求执行期间异常重启，原
+HTTP/SSE 数据流无法续传，客户端应使用相同的稳定会话 ID 重新发送请求。
+Router 只从最后一份完整持久化历史继续，不会加入中断的助手输出。
+
+重启后如果旧模型任务仍在底层 worker运行，显式模型可能暂时返回
+`429 model_capacity_busy` 和 `Retry-After: 1`；`auto` 会尝试其他兼容
+deployment。底层 worker显示空闲后会自动恢复，不需要客户端更换会话 ID。
+
 | HTTP 状态 | 稳定错误码或场景 | 客户端处理 |
 | --- | --- | --- |
 | `400` | `invalid_request`、`invalid_tool_history` | 修正请求，不自动重放工具链 |
 | `401` | `invalid_api_key` | 检查客户端密钥与权限 |
 | `409` | 同一会话已有请求运行 | 等待当前轮完成后重试 |
+| `413` | `payload_too_large` | 缩小图片、音频或请求历史 |
 | `429` | `all_local_capacity_busy` 或客户端限流 | 遵循 `Retry-After`，使用抖动退避 |
 | `503` | `no_eligible_model` | 缩小上下文/输出预留或调整所需能力 |
 | `502/504` | 上游暂时失败或超时 | 仅在请求可安全重放时有限重试 |

@@ -99,6 +99,10 @@ services:
 
   router-api-local:
     <<: *host-service
+    environment:
+      <<: *router-environment
+      AI_ROUTER_INSTANCE_ID: router-api-local
+    stop_grace_period: 910s
     command:
       - uvicorn
       - ai_router.api:app
@@ -109,6 +113,8 @@ services:
       - --proxy-headers
       - --forwarded-allow-ips
       - "*"
+      - --timeout-graceful-shutdown
+      - "900"
     depends_on:
       redis:
         condition: service_healthy
@@ -119,6 +125,10 @@ services:
 
   router-api-tail:
     <<: *host-service
+    environment:
+      <<: *router-environment
+      AI_ROUTER_INSTANCE_ID: router-api-tail
+    stop_grace_period: 910s
     command:
       - /bin/sh
       - -c
@@ -126,6 +136,7 @@ services:
         exec uvicorn ai_router.api:app
         --host "$$AI_ROUTER_TAILSCALE_IP" --port 4000
         --proxy-headers --forwarded-allow-ips "*"
+        --timeout-graceful-shutdown 900
     depends_on:
       redis:
         condition: service_healthy

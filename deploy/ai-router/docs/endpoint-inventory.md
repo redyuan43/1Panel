@@ -25,19 +25,19 @@
 | Draft 工件 | `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` |
 | 编排 | 健康信息报告 `ray_actor` |
 | Speculative | 健康信息报告 `draft-dflash`，`draft_n_max=5` |
-| 配置/安全上下文 | 池报告 262144；worker 分别为 196608、262144、65536 |
+| 配置/安全上下文 | 注册配置 262144；当前健康池上限 196608，P40 worker 为 65536 |
 | 路由并发 | 每个物理 worker 为 1；健康时池总并发上限为 6 |
 | API 兼容 | Chat Completions、Responses、流式、工具和结构化输出已验证 |
-| 模态 | 当前生产只开放文本；mmproj 已配置但受主机 CUDA 故障阻塞，待恢复复验 |
+| 模态 | 生产只开放文本；小图直连通过，但高分辨率 mtmd chunk 在 P40/V100 均失败 |
 | Responses | Router 直接绑定物理 worker，不经过 LiteLLM 逻辑池 |
-| 服务管理方式 | 原 `bonsai-local-pool.service` 被不可杀进程卡住；恢复前不宣称池健康 |
+| 服务管理方式 | `bonsai-local-pool-v2.service`，`active/enabled` |
 
 正常拓扑为 6 个物理 worker：
 
 | 端口 | GPU 拓扑 | KV cache | 安全上下文 |
 | --- | --- | --- | --- |
 | 18110 | Tesla V100-PCIE-32GB | F16/F16 | 196608 |
-| 18111 | Tesla V100-SXM2-16GB + Tesla P40 | Q8_0/Q8_0 | 262144 |
+| 18111 | Tesla P40 | Q8_0/Q8_0 | 65536 |
 | 18112 | Tesla P40 | Q8_0/Q8_0 | 65536 |
 | 18113 | Tesla P40 | Q8_0/Q8_0 | 65536 |
 | 18114 | Tesla P40 | Q8_0/Q8_0 | 65536 |
@@ -47,12 +47,19 @@
 Completions 会把同一会话固定到具体 `worker_id` 和端口；物理 worker
 不可用时，才会在同模型内切换 worker。
 
-2026-09-01 20:42:03，`18111` 使用的
+2026-09-01 20:42:03，原 `18111` 使用的
 `GPU-4c63c711-9570-75db-760d-c6679c760754` 再次出现 `Xid 79` 掉总线，
 随后 `Xid 154` 要求 GPU reset。2026-09-02 的恢复尝试确认旧
 `llama-server` 线程无法被 SIGKILL 清理，新 P40 worker 均报 CUDA
-initialization error。Router 会把 AI 端点视为不健康并分流到其他端点；
-执行 NVIDIA 运行时复位或主机重启前需要单独授权。
+initialization error。2026-09-02 物理移除该 V100 SXM2 16GB 后重新启动，
+系统稳定识别 5 张 P40 和 1 张 V100 PCIe 32GB；六个 worker 均完成真实
+文本生成，启动后未出现新 Xid、GPU reset 或 OOM。
+
+同日使用 271x210 PNG 直连 AI 池，模型正确返回“红色”；约 4 MiB Base64
+的 1024x1024 红色 BMP 也曾在 P40 worker 返回“红色”。但随后来自 nx4 的
+更高分辨率图片在 P40 和 V100 上均出现
+`failed to find a memory slot for batch of size 920`，因此 AI 保留 mmproj
+用于后续运行时修复，不进入生产视觉候选。
 
 ## SSH Edge
 
@@ -134,5 +141,5 @@ AMD 已参与 `auto`；尚未完成的同口径质量基准只影响排序分。
 
 - Edge/Ivan/AMD 的完整 GPU 拓扑和量化工件文件校验
 - 500K/262K 长上下文边界
-- AI 与 Edge 的稳定图像能力
+- AI 多图片和长时间视觉稳定性；Edge 图像运行时修复
 - 确定性质量基准分
