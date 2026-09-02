@@ -2,6 +2,9 @@ const state = {
   key: sessionStorage.getItem("ai-router-admin-key") || "",
   settings: null,
   dashboard: null,
+  clients: [],
+  editingClientId: null,
+  selectedClientId: null,
   view: "dashboard",
   timer: null,
 };
@@ -10,6 +13,7 @@ const viewTitles = {
   dashboard: "运行总览",
   nodes: "模型节点",
   requests: "请求记录",
+  clients: "客户端账号",
   settings: "策略设置",
 };
 
@@ -95,7 +99,7 @@ async function connect() {
   sessionStorage.setItem("ai-router-admin-key", state.key);
   notice("正在连接控制面...");
   try {
-    await Promise.all([loadDashboard(), loadSettings()]);
+    await Promise.all([loadDashboard(), loadSettings(), loadClients()]);
     setConnected(true);
     notice("");
     startPolling();
@@ -137,6 +141,265 @@ function renderDashboard() {
   renderEndpointTable(data.endpoints);
   renderWorkerTable(data.workers);
   renderRequestTable();
+}
+
+async function loadClients(silent = false) {
+  if (!state.key) return;
+  try {
+    const payload = await api("/api/clients");
+    state.clients = payload.clients || [];
+    renderClients();
+    if (!silent) notice("");
+  } catch (error) {
+    if (!silent) notice(error.message, true);
+  }
+}
+
+function renderClients() {
+  const status = byId("client-status-filter")?.value || "";
+  const clients = state.clients.filter((item) =>
+    !status || (status === "enabled" ? item.enabled : !item.enabled)
+  );
+  byId("client-count").textContent = `${clients.length} 个账号`;
+  byId("client-table").innerHTML = clients.length
+    ? clients.map((item) => {
+      const activeKeys = item.keys.filter((key) => key.status === "active");
+      const usage = item.usage_24h || {};
+      const lastUsed = item.keys.reduce(
+        (latest, key) => Math.max(latest, Number(key.last_used_at || 0)),
+        0,
+      );
+      return `
+        <tr>
+          <td>${accountStatusBadge(item.enabled)}</td>
+          <td>
+            <strong class="table-primary">${escapeHtml(item.name)}</strong>
+            <span class="table-secondary">${escapeHtml(item.id)} · ${escapeHtml(item.source)}</span>
+          </td>
+          <td>${clientModelSummary(item.models)}</td>
+          <td>
+            <strong class="table-primary">${formatTokens(item.tpm_limit)} TPM</strong>
+            <span class="table-secondary">${item.rpm_limit} RPM · ${item.max_parallel_requests} 并发</span>
+          </td>
+          <td>
+            <strong class="table-primary">${activeKeys.length} 把有效</strong>
+            <span class="table-secondary">${item.keys.length} 把总计</span>
+          </td>
+          <td>
+            <strong class="table-primary">${usage.requests || 0} 次 · ${formatTokens((usage.input_tokens || 0) + (usage.output_tokens || 0))}</strong>
+            <span class="table-secondary">${usage.errors || 0} 次错误</span>
+          </td>
+          <td>${lastUsed ? formatTime(lastUsed) : "—"}</td>
+          <td>
+            <div class="row-actions">
+              <button class="secondary compact" type="button" data-client-edit="${escapeHtml(item.id)}">编辑</button>
+              <button class="secondary compact" type="button" data-client-keys="${escapeHtml(item.id)}">Key</button>
+              <button class="secondary compact ${item.enabled ? "danger-action" : ""}" type="button" data-client-toggle="${escapeHtml(item.id)}">
+                ${item.enabled ? "停用" : "启用"}
+              </button>
+            </div>
+          </td>
+        </tr>`;
+    }).join("")
+    : emptyRow(8, "没有符合筛选条件的客户端账号");
+  bindClientActions();
+}
+
+function clientModelSummary(models = []) {
+  if (models.includes("*")) return '<span class="capability-chip">全部模型</span>';
+  return models
+    .map((model) => `<span class="capability-chip">${escapeHtml(shortModel(model))}</span>`)
+    .join(" ");
+}
+
+function accountStatusBadge(enabled) {
+  return `<span class="badge ${enabled ? "success" : "danger"}"><i></i>${enabled ? "已启用" : "已停用"}</span>`;
+}
+
+function keyStatusBadge(status) {
+  const active = status === "active";
+  return `<span class="badge ${active ? "success" : "danger"}"><i></i>${active ? "有效" : "已撤销"}</span>`;
+}
+
+function bindClientActions() {
+  document.querySelectorAll("[data-client-edit]").forEach((button) => {
+    button.addEventListener("click", () => openClientDialog(button.dataset.clientEdit));
+  });
+  document.querySelectorAll("[data-client-keys]").forEach((button) => {
+    button.addEventListener("click", () => openKeysDialog(button.dataset.clientKeys));
+  });
+  document.querySelectorAll("[data-client-toggle]").forEach((button) => {
+    button.addEventListener("click", () => toggleClient(button.dataset.clientToggle));
+  });
+}
+
+function availableClientModels() {
+  const values = ["auto"];
+  (state.dashboard?.endpoints || []).forEach(({endpoint}) => {
+    if (!values.includes(endpoint.public_model)) values.push(endpoint.public_model);
+  });
+  return values;
+}
+
+function renderClientModels(selected = ["auto"]) {
+  const target = byId("client-models");
+  const allSelected = selected.includes("*");
+  const values = [
+    {id: "*", label: "全部模型"},
+    ...availableClientModels().map((id) => ({id, label: shortModel(id)})),
+  ];
+  target.innerHTML = values.map((item) => `
+    <label>
+      <input type="checkbox" data-client-model="${escapeHtml(item.id)}" ${allSelected || selected.includes(item.id) ? "checked" : ""}>
+      <span>${escapeHtml(item.label)}</span>
+    </label>
+  `).join("");
+  target.querySelector('[data-client-model="*"]').addEventListener("change", (event) => {
+    target.querySelectorAll("[data-client-model]").forEach((input) => {
+      input.checked = event.target.checked;
+      input.disabled = event.target.checked && input !== event.target;
+    });
+  });
+  if (allSelected) {
+    target.querySelectorAll("[data-client-model]").forEach((input) => {
+      input.disabled = input.dataset.clientModel !== "*";
+    });
+  }
+}
+
+function openClientDialog(clientId = null) {
+  const client = state.clients.find((item) => item.id === clientId);
+  state.editingClientId = client?.id || null;
+  byId("client-dialog-title").textContent = client ? "编辑客户端账号" : "新建客户端账号";
+  byId("client-id").value = client?.id || "";
+  byId("client-id").disabled = Boolean(client);
+  byId("client-name").value = client?.name || "";
+  byId("client-rpm").value = client?.rpm_limit || 120;
+  byId("client-tpm").value = client?.tpm_limit || 1000000;
+  byId("client-parallel").value = client?.max_parallel_requests || 4;
+  byId("client-enabled").checked = client?.enabled ?? true;
+  renderClientModels(client?.models || ["auto"]);
+  byId("client-dialog").showModal();
+}
+
+function collectClient() {
+  const selected = [...document.querySelectorAll("[data-client-model]:checked")]
+    .map((input) => input.dataset.clientModel);
+  return {
+    id: byId("client-id").value.trim(),
+    name: byId("client-name").value.trim(),
+    enabled: byId("client-enabled").checked,
+    models: selected.includes("*") ? ["*"] : selected,
+    rpm_limit: Number(byId("client-rpm").value),
+    tpm_limit: Number(byId("client-tpm").value),
+    max_parallel_requests: Number(byId("client-parallel").value),
+  };
+}
+
+async function saveClient(event) {
+  event.preventDefault();
+  const value = collectClient();
+  if (!value.models.length) {
+    notice("至少选择一个允许模型。", true);
+    return;
+  }
+  const editing = state.editingClientId;
+  try {
+    await api(editing ? `/api/clients/${encodeURIComponent(editing)}` : "/api/clients", {
+      method: editing ? "PATCH" : "POST",
+      body: JSON.stringify(value),
+    });
+    byId("client-dialog").close();
+    await loadClients(true);
+    notice(editing ? "客户端账号已更新。" : "客户端账号已创建。");
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+async function toggleClient(clientId) {
+  const client = state.clients.find((item) => item.id === clientId);
+  if (!client) return;
+  const action = client.enabled ? "停用" : "启用";
+  if (!confirm(`${action}客户端账号 ${client.name}？`)) return;
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({...client, enabled: !client.enabled}),
+    });
+    await loadClients(true);
+    notice(`客户端账号已${action}。`);
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+function openKeysDialog(clientId) {
+  state.selectedClientId = clientId;
+  const client = state.clients.find((item) => item.id === clientId);
+  if (!client) return;
+  byId("keys-dialog-title").textContent = `${client.name} · API Key`;
+  byId("key-label").value = "";
+  renderKeys(client);
+  byId("keys-dialog").showModal();
+}
+
+function renderKeys(client) {
+  byId("key-table").innerHTML = client.keys.length
+    ? client.keys.map((key) => `
+      <tr>
+        <td>${keyStatusBadge(key.status)}</td>
+        <td>${escapeHtml(key.label)}</td>
+        <td><code>${escapeHtml(key.hint)}</code></td>
+        <td>${key.source === "legacy_env" ? "旧环境变量" : "管理台生成"}</td>
+        <td>${key.last_used_at ? formatTime(key.last_used_at) : "—"}</td>
+        <td>
+          ${key.status === "active"
+            ? `<button class="secondary compact danger-action" type="button" data-key-revoke="${escapeHtml(key.key_id)}">撤销</button>`
+            : "已撤销"}
+        </td>
+      </tr>
+    `).join("")
+    : emptyRow(6, "该账号还没有 API Key");
+  document.querySelectorAll("[data-key-revoke]").forEach((button) => {
+    button.addEventListener("click", () => revokeKey(button.dataset.keyRevoke));
+  });
+}
+
+async function createKey(event) {
+  event.preventDefault();
+  const clientId = state.selectedClientId;
+  if (!clientId) return;
+  try {
+    const payload = await api(`/api/clients/${encodeURIComponent(clientId)}/keys`, {
+      method: "POST",
+      body: JSON.stringify({label: byId("key-label").value.trim()}),
+    });
+    byId("generated-key").value = payload.api_key;
+    byId("secret-dialog").showModal();
+    await loadClients(true);
+    const client = state.clients.find((item) => item.id === clientId);
+    if (client) renderKeys(client);
+    notice("新 API Key 已生成。");
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+async function revokeKey(keyId) {
+  const clientId = state.selectedClientId;
+  if (!clientId || !confirm("撤销后该 Key 将立即失效，是否继续？")) return;
+  try {
+    await api(`/api/clients/${encodeURIComponent(clientId)}/keys/${encodeURIComponent(keyId)}/revoke`, {
+      method: "POST",
+    });
+    await loadClients(true);
+    const client = state.clients.find((item) => item.id === clientId);
+    if (client) renderKeys(client);
+    notice("API Key 已撤销。");
+  } catch (error) {
+    notice(error.message, true);
+  }
 }
 
 function renderRouterInstances(instances) {
@@ -575,13 +838,17 @@ function switchView(view) {
   });
   byId("view-title").textContent = viewTitles[view];
   if (view === "requests") renderRequestTable();
+  if (view === "clients") loadClients(true);
 }
 
 function startPolling() {
   clearInterval(state.timer);
   if (!byId("auto-refresh").checked) return;
   state.timer = setInterval(() => {
-    if (!document.hidden && state.key) loadDashboard(true);
+    if (!document.hidden && state.key) {
+      loadDashboard(true);
+      if (state.view === "clients") loadClients(true);
+    }
   }, 5000);
 }
 
@@ -737,6 +1004,30 @@ byId("settings-form").addEventListener("submit", saveSettings);
 byId("auto-refresh").addEventListener("change", startPolling);
 byId("node-filter").addEventListener("change", renderRequestTable);
 byId("status-filter").addEventListener("change", renderRequestTable);
+byId("client-status-filter").addEventListener("change", renderClients);
+byId("create-client").addEventListener("click", () => openClientDialog());
+byId("client-form").addEventListener("submit", saveClient);
+byId("key-form").addEventListener("submit", createKey);
+byId("copy-generated-key").addEventListener("click", async () => {
+  const field = byId("generated-key");
+  try {
+    await navigator.clipboard.writeText(field.value);
+  } catch (_error) {
+    field.select();
+    document.execCommand("copy");
+  }
+  notice("API Key 已复制。");
+});
+byId("secret-dialog").addEventListener("close", () => {
+  byId("generated-key").value = "";
+});
+document.querySelectorAll("[data-close-dialog]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const dialog = byId(button.dataset.closeDialog);
+    if (dialog.id === "secret-dialog") byId("generated-key").value = "";
+    dialog.close();
+  });
+});
 byId("admin-key").addEventListener("keydown", (event) => {
   if (event.key === "Enter") connect();
 });

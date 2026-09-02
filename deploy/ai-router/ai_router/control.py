@@ -32,6 +32,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = runtime is None
         app.state.runtime = runtime or build_runtime()
+        await app.state.runtime.start()
         yield
         if owned:
             await app.state.runtime.close()
@@ -121,6 +122,105 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         current = _authorized_runtime(request)
         return {"endpoints": await _endpoint_values(current)}
 
+    @app.get("/api/clients")
+    async def clients(request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        return {"clients": await current.clients.list_accounts()}
+
+    @app.post("/api/clients")
+    async def create_client(request: Request) -> JSONResponse:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        account = await current.clients.create_account(
+            value,
+            allowed_models=_allowed_client_models(current),
+        )
+        current.audit.write(
+            "client_created",
+            client_id=account["id"],
+            source=request.client.host if request.client else "unknown",
+        )
+        return JSONResponse(
+            {"client": account},
+            status_code=201,
+        )
+
+    @app.patch("/api/clients/{client_id}")
+    async def update_client(
+        client_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        account = await current.clients.update_account(
+            client_id,
+            value,
+            allowed_models=_allowed_client_models(current),
+        )
+        current.audit.write(
+            "client_updated",
+            client_id=client_id,
+            enabled=account["enabled"],
+            models=account["models"],
+            rpm_limit=account["rpm_limit"],
+            tpm_limit=account["tpm_limit"],
+            max_parallel_requests=account["max_parallel_requests"],
+            source=request.client.host if request.client else "unknown",
+        )
+        if not account["enabled"]:
+            current.audit.write(
+                "client_disabled",
+                client_id=client_id,
+                source=(
+                    request.client.host
+                    if request.client
+                    else "unknown"
+                ),
+            )
+        return {"client": account}
+
+    @app.post("/api/clients/{client_id}/keys")
+    async def create_client_key(
+        client_id: str,
+        request: Request,
+    ) -> JSONResponse:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        key, plaintext = await current.clients.create_key(
+            client_id,
+            str(value.get("label", "")),
+        )
+        current.audit.write(
+            "client_key_created",
+            client_id=client_id,
+            key_id=key["key_id"],
+            source=request.client.host if request.client else "unknown",
+        )
+        return JSONResponse(
+            {"key": key, "api_key": plaintext},
+            status_code=201,
+            headers={
+                "Cache-Control": "no-store",
+                "Pragma": "no-cache",
+            },
+        )
+
+    @app.post("/api/clients/{client_id}/keys/{key_id}/revoke")
+    async def revoke_client_key(
+        client_id: str,
+        key_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        key = await current.clients.revoke_key(client_id, key_id)
+        current.audit.write(
+            "client_key_revoked",
+            client_id=client_id,
+            key_id=key_id,
+            source=request.client.host if request.client else "unknown",
+        )
+        return {"key": key}
+
     @app.get("/api/dashboard")
     async def dashboard(
         request: Request,
@@ -200,6 +300,28 @@ def _authorized_runtime(request: Request) -> RouterRuntime:
     current = _runtime(request)
     current.auth.authenticate_admin(request.headers.get("authorization"))
     return current
+
+
+async def _json_body(request: Request) -> dict[str, Any]:
+    try:
+        value = await request.json()
+    except Exception as exc:
+        raise RouterError(
+            "request body must be valid JSON",
+            status_code=400,
+            code="invalid_json",
+        ) from exc
+    if not isinstance(value, dict):
+        raise RouterError(
+            "request body must be a JSON object",
+            status_code=400,
+            code="invalid_request",
+        )
+    return value
+
+
+def _allowed_client_models(current: RouterRuntime) -> set[str]:
+    return {"*", "auto", *current.registry.public_models()}
 
 
 def _editable(value: dict[str, Any]) -> dict[str, Any]:
@@ -284,6 +406,7 @@ def _request_rows(
                 "status": status,
                 "status_code": status_code,
                 "client_id": event.get("client_id"),
+                "key_id": event.get("key_id"),
                 "conversation_id": event.get("conversation_id"),
                 "requested_model": event.get("requested_model"),
                 "selected_model": event.get("selected_model"),

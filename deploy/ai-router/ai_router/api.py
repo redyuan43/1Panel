@@ -118,7 +118,9 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     async def models(request: Request) -> JSONResponse:
         current = _runtime(request)
         current.reload_settings()
-        client = current.auth.authenticate(request.headers.get("authorization"))
+        client = await current.auth.authenticate(
+            request.headers.get("authorization")
+        )
         values = []
         for model in ("auto", *current.registry.public_models()):
             if "*" not in client.policy.models and model not in client.policy.models:
@@ -223,7 +225,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             status_code=400,
             code="model_required",
     )
-    authenticated = current.auth.authenticate(request.headers.get("authorization"))
+    authenticated = await current.auth.authenticate(
+        request.headers.get("authorization")
+    )
     current.auth.ensure_model_access(authenticated, requested_model)
     if current.draining:
         raise RouterError(
@@ -380,6 +384,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current,
                     request_id=request_id,
                     client_id=authenticated.policy.id,
+                    key_id=authenticated.key_id,
                     conversation_id=conversation_id,
                     decision=decision,
                 )
@@ -455,6 +460,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         current,
                         request_id=request_id,
                         client_id=authenticated.policy.id,
+                        key_id=authenticated.key_id,
                         conversation_id=conversation_id,
                         decision=decision,
                         status_code=upstream.status_code,
@@ -485,6 +491,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             upstream,
                             lease=lease,
                             client_id=authenticated.policy.id,
+                            key_id=authenticated.key_id,
                             request_id=request_id,
                             conversation_id=conversation_id,
                             decision=decision,
@@ -515,6 +522,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current,
                     request_id=request_id,
                     client_id=authenticated.policy.id,
+                    key_id=authenticated.key_id,
                     conversation_id=conversation_id,
                     decision=decision,
                     status_code=upstream.status_code,
@@ -562,6 +570,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             current,
                             request_id=request_id,
                             client_id=authenticated.policy.id,
+                            key_id=authenticated.key_id,
                             conversation_id=conversation_id,
                             decision=decision,
                             status_code=last_error.status_code,
@@ -1207,6 +1216,7 @@ async def _stream_response(
     *,
     lease: Any,
     client_id: str,
+    key_id: str,
     request_id: str,
     conversation_id: str | None,
     decision: RouteDecision,
@@ -1251,6 +1261,7 @@ async def _stream_response(
                 current,
                 request_id=request_id,
                 client_id=client_id,
+                key_id=key_id,
                 conversation_id=conversation_id,
                 decision=decision,
                 status_code=status_code,
@@ -1292,6 +1303,7 @@ async def _audit(
     *,
     request_id: str,
     client_id: str,
+    key_id: str,
     conversation_id: str | None,
     decision: RouteDecision,
     status_code: int,
@@ -1311,10 +1323,16 @@ async def _audit(
         cached_prompt_tokens_fallback=cached_prompt_tokens_fallback,
         prompt_tokens_fallback=decision.prompt_tokens,
     )
+    input_tokens, output_tokens = _usage_totals(
+        response_payload,
+        usage,
+        prompt_tokens_fallback=decision.prompt_tokens,
+    )
     current.audit.write(
         "request_completed",
         request_id=request_id,
         client_id=client_id,
+        key_id=key_id,
         conversation_id=conversation_id,
         requested_model=decision.requested_model,
         selected_model=decision.endpoint.public_model,
@@ -1325,6 +1343,8 @@ async def _audit(
         reason=decision.reason,
         affinity=decision.affinity,
         prompt_tokens=decision.prompt_tokens,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         output_reserve_tokens=decision.output_reserve_tokens,
         attempts=decision.attempts,
         capacity_attempts=decision.capacity_attempts,
@@ -1341,6 +1361,57 @@ async def _audit(
         instance_id=current.instance_id,
         boot_id=current.boot_id,
     )
+    try:
+        await current.clients.record_usage(
+            client_id=client_id,
+            key_id=key_id,
+            status_code=status_code,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+    except Exception as exc:
+        current.audit.write(
+            "client_usage_record_failed",
+            client_id=client_id,
+            key_id=key_id,
+            request_id=request_id,
+            error=type(exc).__name__,
+        )
+
+
+def _usage_totals(
+    response_payload: bytes | None,
+    usage: dict[str, Any] | None,
+    *,
+    prompt_tokens_fallback: int,
+) -> tuple[int, int]:
+    current = usage
+    if current is None and response_payload:
+        try:
+            value = json.loads(response_payload)
+        except Exception:
+            value = {}
+        if isinstance(value, dict):
+            current = value.get("usage")
+            if not isinstance(current, dict):
+                response = value.get("response")
+                current = (
+                    response.get("usage")
+                    if isinstance(response, dict)
+                    else None
+                )
+    current = current if isinstance(current, dict) else {}
+    input_tokens = int(
+        current.get("prompt_tokens")
+        or current.get("input_tokens")
+        or prompt_tokens_fallback
+    )
+    output_tokens = int(
+        current.get("completion_tokens")
+        or current.get("output_tokens")
+        or 0
+    )
+    return max(0, input_tokens), max(0, output_tokens)
 
 
 def _cache_metrics(
@@ -1434,6 +1505,7 @@ def _audit_started(
     *,
     request_id: str,
     client_id: str,
+    key_id: str,
     conversation_id: str | None,
     decision: RouteDecision,
 ) -> None:
@@ -1441,6 +1513,7 @@ def _audit_started(
         "request_started",
         request_id=request_id,
         client_id=client_id,
+        key_id=key_id,
         conversation_id=conversation_id,
         requested_model=decision.requested_model,
         selected_model=decision.endpoint.public_model,

@@ -12,6 +12,7 @@ import httpx
 from .audit import AuditLog
 from .auth import AuthManager
 from .budget import CloudBudget
+from .client_accounts import ClientAccountManager
 from .compaction import CapsuleCipher, ContextCompactor
 from .config import Registry, Settings
 from .evaluator import TaskEvaluator
@@ -33,6 +34,7 @@ class RouterRuntime:
     scheduler: Scheduler
     limiter: ClientLimiter
     budget: CloudBudget
+    clients: ClientAccountManager
     auth: AuthManager
     evaluator: TaskEvaluator
     compactor: ContextCompactor
@@ -73,6 +75,13 @@ class RouterRuntime:
         if self._started:
             return
         self._started = True
+        imported = await self.clients.bootstrap_legacy()
+        for item in imported:
+            self.audit.write(
+                "legacy_client_imported",
+                client_id=item["client_id"],
+                key_id=item["key_id"],
+            )
         if not self.track_instance:
             return
         previous = await self.store.get_json(self._instance_state_key())
@@ -349,6 +358,11 @@ def build_runtime(
     )
     resolved_instance_id = configured_instance_id or "standalone"
     resolved_boot_id = boot_id or uuid4().hex
+    clients = ClientAccountManager(
+        store,
+        settings,
+        _required_env("AI_ROUTER_STATE_KEY"),
+    )
     return RouterRuntime(
         settings=settings,
         registry=registry,
@@ -369,7 +383,8 @@ def build_runtime(
         ),
         limiter=ClientLimiter(store),
         budget=CloudBudget(store, settings),
-        auth=AuthManager(settings),
+        clients=clients,
+        auth=AuthManager(settings, clients),
         evaluator=evaluator,
         compactor=compactor,
         policy=RoutingPolicy(registry, settings, health),

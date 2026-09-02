@@ -22,6 +22,10 @@
 `EnvironmentFile` 或其他密钥管理器注入，不得写入源码、Git、日志、URL
 或浏览器前端。
 
+管理员在 AI Router 控制台的“客户端账号”页创建服务账号并生成 Key。不同
+应用应使用不同账号，而不是仅为同一个 `1panel` 账号生成多把 Key；账号才是
+RPM、TPM、最大并发和模型权限的隔离边界。
+
 ```bash
 export AI_ROUTER_BASE_URL="http://ai-X10DRG.taild500c8.ts.net:4000/v1"
 export AI_ROUTER_API_KEY="<client-api-key>"
@@ -29,6 +33,10 @@ export AI_ROUTER_API_KEY="<client-api-key>"
 
 `AI_ROUTER_ADMIN_KEY` 是管理控制面的密钥，不能用于普通模型调用，也不能发给
 第三方。
+
+轮换 Key 时，先在同一账号下生成新 Key并更新调用方，确认新 Key工作后再撤销
+旧 Key。撤销对后续请求立即生效，但不会中断已经开始的模型推理。创建页面关闭
+后无法再次查看完整 Key。
 
 ## 2. 自动路由策略
 
@@ -423,6 +431,7 @@ deployment。底层 worker显示空闲后会自动恢复，不需要客户端更
 | `413` | `payload_too_large` | 缩小图片、音频或请求历史 |
 | `429` | `all_local_capacity_busy` 或客户端限流 | 遵循 `Retry-After`，使用抖动退避 |
 | `503` | `no_eligible_model` | 缩小上下文/输出预留或调整所需能力 |
+| `503` | `auth_store_unavailable` | 暂停重试并联系管理员检查 Redis，Router 不会绕过撤销状态 |
 | `502/504` | 上游暂时失败或超时 | 仅在请求可安全重放时有限重试 |
 
 推荐重试策略：

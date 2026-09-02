@@ -21,20 +21,24 @@ from ai_router.api import (
     _mirror_responses_format,
     _prefix_cache_delta,
     _prepare_routed_body,
+    _usage_totals,
     create_app,
 )
 from ai_router.budget import CloudBudget
+from ai_router.client_accounts import ClientAccountManager
 from ai_router.compaction import CapsuleCipher
 from ai_router.compaction import ContextCompactor, extract_messages
 from ai_router.config import Registry, Settings, client_policies
 from ai_router.control import create_app as create_control_app
 from ai_router.errors import (
     AllLocalCapacityBusyError,
+    AuthenticationError,
     CapacityBusyError,
     ConversationBusyError,
     InvalidToolHistoryError,
     NoEligibleModelError,
     QueueTimeoutError,
+    RouterError,
 )
 from ai_router.evaluator import TaskEvaluator
 from ai_router.history import (
@@ -4158,6 +4162,378 @@ def test_control_api_rejects_invalid_runtime_settings(
         )
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "invalid_settings"
+
+
+def test_legacy_client_key_import_and_revocation_survive_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = InMemoryStateStore()
+    value = settings(tmp_path)
+    state_key = Fernet.generate_key().decode()
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "legacy-client-key")
+    manager = ClientAccountManager(store, value, state_key)
+
+    imported = run(manager.bootstrap_legacy())
+    assert any(item["client_id"] == "1panel" for item in imported)
+    policy, key_id = run(manager.authenticate("legacy-client-key"))
+    assert policy.id == "1panel"
+    assert key_id.startswith("legacy-")
+
+    revoked = run(manager.revoke_key("1panel", key_id))
+    assert revoked["status"] == "revoked"
+    with pytest.raises(AuthenticationError):
+        run(manager.authenticate("legacy-client-key"))
+
+    restarted = ClientAccountManager(store, value, state_key)
+    assert run(restarted.bootstrap_legacy()) == []
+    with pytest.raises(AuthenticationError):
+        run(restarted.authenticate("legacy-client-key"))
+
+
+def test_managed_client_multiple_keys_share_policy_and_usage(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryStateStore()
+    manager = ClientAccountManager(
+        store,
+        settings(tmp_path),
+        Fernet.generate_key().decode(),
+    )
+    account = run(
+        manager.create_account(
+            {
+                "id": "home-assistant",
+                "name": "Home Assistant",
+                "enabled": True,
+                "models": ["auto"],
+                "rpm_limit": 30,
+                "tpm_limit": 200000,
+                "max_parallel_requests": 2,
+            },
+            allowed_models={"auto"},
+        )
+    )
+    assert account["id"] == "home-assistant"
+    first, first_secret = run(
+        manager.create_key("home-assistant", "front-door")
+    )
+    second, second_secret = run(
+        manager.create_key("home-assistant", "delivery")
+    )
+    assert first_secret.startswith("sk-1panel-")
+    assert second_secret.startswith("sk-1panel-")
+    assert first_secret != second_secret
+
+    first_policy, first_key_id = run(manager.authenticate(first_secret))
+    second_policy, second_key_id = run(manager.authenticate(second_secret))
+    assert first_policy == second_policy
+    assert first_policy.max_parallel_requests == 2
+    assert first_key_id != second_key_id
+    limiter = ClientLimiter(store)
+    assert run(
+        limiter.check_rate_limits(
+            first_policy.id,
+            prompt_tokens=100,
+            rpm_limit=1,
+            tpm_limit=1000,
+        )
+    ) == (True, None)
+    assert run(
+        limiter.check_rate_limits(
+            second_policy.id,
+            prompt_tokens=100,
+            rpm_limit=1,
+            tpm_limit=1000,
+        )
+    ) == (False, "rpm_limit_exceeded")
+
+    run(
+        manager.record_usage(
+            client_id="home-assistant",
+            key_id=first_key_id,
+            status_code=200,
+            input_tokens=120,
+            output_tokens=30,
+        )
+    )
+    run(
+        manager.record_usage(
+            client_id="home-assistant",
+            key_id=second_key_id,
+            status_code=429,
+            input_tokens=80,
+            output_tokens=0,
+        )
+    )
+    listed = run(manager.list_accounts())
+    current = next(item for item in listed if item["id"] == "home-assistant")
+    assert current["usage_24h"] == {
+        "requests": 2,
+        "input_tokens": 200,
+        "output_tokens": 30,
+        "errors": 1,
+    }
+    assert all(item["last_used_at"] for item in current["keys"])
+
+    stored = json.dumps(
+        [item.value for item in store._values.values()],
+        ensure_ascii=False,
+    )
+    assert first_secret not in stored
+    assert second_secret not in stored
+    assert "digest" not in json.dumps(listed)
+
+
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        (
+            {
+                "id": "INVALID",
+                "name": "Invalid",
+                "models": ["auto"],
+                "rpm_limit": 1,
+                "tpm_limit": 1,
+                "max_parallel_requests": 1,
+            },
+            "invalid_client_id",
+        ),
+        (
+            {
+                "id": "unknown-model",
+                "name": "Unknown model",
+                "models": ["missing"],
+                "rpm_limit": 1,
+                "tpm_limit": 1,
+                "max_parallel_requests": 1,
+            },
+            "invalid_client_models",
+        ),
+        (
+            {
+                "id": "invalid-limit",
+                "name": "Invalid limit",
+                "models": ["auto"],
+                "rpm_limit": 0,
+                "tpm_limit": 1,
+                "max_parallel_requests": 1,
+            },
+            "invalid_client_limits",
+        ),
+    ],
+)
+def test_client_account_validation(
+    tmp_path: Path,
+    payload: dict,
+    code: str,
+) -> None:
+    manager = ClientAccountManager(
+        InMemoryStateStore(),
+        settings(tmp_path),
+        Fernet.generate_key().decode(),
+    )
+    with pytest.raises(RouterError) as error:
+        run(
+            manager.create_account(
+                payload,
+                allowed_models={"auto"},
+            )
+        )
+    assert error.value.code == code
+
+
+def test_disabled_client_and_revoked_key_are_rejected_immediately(
+    tmp_path: Path,
+) -> None:
+    manager = ClientAccountManager(
+        InMemoryStateStore(),
+        settings(tmp_path),
+        Fernet.generate_key().decode(),
+    )
+    value = {
+        "id": "shared-client",
+        "name": "Shared Client",
+        "enabled": True,
+        "models": ["auto"],
+        "rpm_limit": 10,
+        "tpm_limit": 10000,
+        "max_parallel_requests": 1,
+    }
+    run(
+        manager.create_account(
+            value,
+            allowed_models={"auto"},
+        )
+    )
+    key, secret = run(manager.create_key("shared-client", "primary"))
+    run(manager.authenticate(secret))
+    run(
+        manager.update_account(
+            "shared-client",
+            {**value, "enabled": False},
+            allowed_models={"auto"},
+        )
+    )
+    with pytest.raises(AuthenticationError):
+        run(manager.authenticate(secret))
+    run(
+        manager.update_account(
+            "shared-client",
+            {**value, "enabled": True},
+            allowed_models={"auto"},
+        )
+    )
+    run(manager.revoke_key("shared-client", key["key_id"]))
+    with pytest.raises(AuthenticationError):
+        run(manager.authenticate(secret))
+
+
+def test_key_revocation_is_shared_by_independent_router_managers(
+    tmp_path: Path,
+) -> None:
+    store = InMemoryStateStore()
+    state_key = Fernet.generate_key().decode()
+    first = ClientAccountManager(store, settings(tmp_path), state_key)
+    second = ClientAccountManager(store, settings(tmp_path), state_key)
+    value = {
+        "id": "shared-router-client",
+        "name": "Shared Router Client",
+        "enabled": True,
+        "models": ["auto"],
+        "rpm_limit": 10,
+        "tpm_limit": 10000,
+        "max_parallel_requests": 1,
+    }
+    run(first.create_account(value, allowed_models={"auto"}))
+    key, secret = run(first.create_key(value["id"], "primary"))
+    assert run(second.authenticate(secret))[0].id == value["id"]
+    run(first.revoke_key(value["id"], key["key_id"]))
+    with pytest.raises(AuthenticationError):
+        run(second.authenticate(secret))
+
+
+def test_client_authentication_fails_closed_when_store_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    class FailingStore(InMemoryStateStore):
+        async def get_json(self, key: str):
+            raise OSError(f"unavailable: {key}")
+
+    manager = ClientAccountManager(
+        FailingStore(),
+        settings(tmp_path),
+        Fernet.generate_key().decode(),
+    )
+    with pytest.raises(RouterError) as error:
+        run(manager.authenticate("any-key"))
+    assert error.value.status_code == 503
+    assert error.value.code == "auth_store_unavailable"
+
+
+def test_usage_totals_normalize_chat_and_responses_usage() -> None:
+    assert _usage_totals(
+        json.dumps(
+            {
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 30,
+                }
+            }
+        ).encode(),
+        None,
+        prompt_tokens_fallback=1,
+    ) == (120, 30)
+    assert _usage_totals(
+        None,
+        {"input_tokens": 90, "output_tokens": 20},
+        prompt_tokens_fallback=1,
+    ) == (90, 20)
+
+
+def test_control_client_management_api_returns_secret_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "legacy-client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    control = create_control_app(runtime)
+    headers = {"Authorization": "Bearer admin-key"}
+    with TestClient(control) as client:
+        legacy = client.get("/api/clients", headers=headers)
+        assert legacy.status_code == 200
+        assert any(
+            item["id"] == "1panel"
+            for item in legacy.json()["clients"]
+        )
+        created = client.post(
+            "/api/clients",
+            headers=headers,
+            json={
+                "id": "ha-door",
+                "name": "HA Door",
+                "enabled": True,
+                "models": ["auto"],
+                "rpm_limit": 60,
+                "tpm_limit": 500000,
+                "max_parallel_requests": 2,
+            },
+        )
+        assert created.status_code == 201
+        generated = client.post(
+            "/api/clients/ha-door/keys",
+            headers=headers,
+            json={"label": "nx4"},
+        )
+        assert generated.status_code == 201
+        assert generated.headers["cache-control"] == "no-store"
+        secret = generated.json()["api_key"]
+        key_id = generated.json()["key"]["key_id"]
+        listed = client.get("/api/clients", headers=headers)
+        assert secret not in listed.text
+        assert "digest" not in listed.text
+
+    router = create_app(runtime)
+    with TestClient(router) as client:
+        accepted = client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {secret}"},
+        )
+        assert accepted.status_code == 200
+
+    with TestClient(control) as client:
+        revoked = client.post(
+            f"/api/clients/ha-door/keys/{key_id}/revoke",
+            headers=headers,
+        )
+        assert revoked.status_code == 200
+        repeated = client.post(
+            f"/api/clients/ha-door/keys/{key_id}/revoke",
+            headers=headers,
+        )
+        assert repeated.status_code == 409
+        assert repeated.json()["error"]["code"] == "client_key_revoked"
+
+    with TestClient(router) as client:
+        rejected = client.get(
+            "/v1/models",
+            headers={"Authorization": f"Bearer {secret}"},
+        )
+        assert rejected.status_code == 401
+    audit_text = (tmp_path / "audit.jsonl").read_text(encoding="utf-8")
+    assert secret not in audit_text
+    assert "client_key_created" in audit_text
+    assert "client_key_revoked" in audit_text
 
 
 def test_control_dashboard_aggregates_runtime_state(

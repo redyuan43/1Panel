@@ -4,7 +4,8 @@ import hmac
 import os
 from dataclasses import dataclass
 
-from .config import Settings, client_policies
+from .client_accounts import ClientAccountManager
+from .config import Settings
 from .errors import AuthenticationError
 from .types import ClientPolicy
 
@@ -12,21 +13,27 @@ from .types import ClientPolicy
 @dataclass(frozen=True)
 class AuthenticatedClient:
     policy: ClientPolicy
+    key_id: str
 
 
 class AuthManager:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        accounts: ClientAccountManager,
+    ) -> None:
         self.settings = settings
+        self.accounts = accounts
 
-    def authenticate(self, authorization: str | None) -> AuthenticatedClient:
+    async def authenticate(
+        self,
+        authorization: str | None,
+    ) -> AuthenticatedClient:
         if not authorization or not authorization.lower().startswith("bearer "):
             raise AuthenticationError()
         supplied = authorization.split(" ", 1)[1].strip()
-        for policy in client_policies(self.settings):
-            expected = os.environ.get(policy.key_env, "")
-            if expected and hmac.compare_digest(supplied, expected):
-                return AuthenticatedClient(policy)
-        raise AuthenticationError()
+        policy, key_id = await self.accounts.authenticate(supplied)
+        return AuthenticatedClient(policy=policy, key_id=key_id)
 
     def authenticate_admin(self, authorization: str | None) -> None:
         expected = os.environ.get("AI_ROUTER_ADMIN_KEY", "")

@@ -14,6 +14,7 @@ Agent 与第三方调用示例见
 - `POST /v1/responses`
 - `GET /v1/models`
 - `GET /api/dashboard`：控制面运行总览、节点、物理 worker、请求记录和云端预算
+- `GET/POST/PATCH /api/clients`：客户端账号、独立限额、模型权限和多 Key 管理
 - `model=auto` 的能力、上下文、健康、质量、负载和层级筛选
 - 显式模型严格匹配，不静默换成其他模型
 - 会话亲和、同会话并发 `409`、每个逻辑部署一路并发
@@ -27,6 +28,37 @@ Agent 与第三方调用示例见
 - Codex Pro 订阅通过独立 OAuth 适配器接入，凭据不与桌面 Codex 共用
 - 图片和音频二进制数据不按 Base64 文本计入 TPM；媒体使用独立保守 Token
   估算，请求体大小由 32 MiB 上限单独保护
+
+## 客户端账号与 API Key
+
+控制台的“客户端账号”页用于给 WorkBuddy、HA、Checkboard、AI Agent 和第三方
+服务分配独立服务账号。每个账号独立设置允许模型、RPM、TPM 和最大并发，避免
+不同业务共用 `client_id=1panel` 后互相占用限额。
+
+一个账号可以同时拥有多把 Key。账号限额由这些 Key 共享，但每把 Key 可独立
+记录标签、最后使用时间和撤销状态，从而支持无停机轮换。新 Key 明文只在创建
+响应中显示一次；列表、日志和审计只显示脱敏提示。
+
+账号和 Key 元数据保存在 Redis AOF。Key 使用由
+`AI_ROUTER_STATE_KEY` 派生的 HMAC-SHA256 摘要索引，Redis 中不保存可恢复
+明文。账号停用、模型权限修改和 Key 撤销由 local/tail Router 共享读取，对
+后续请求立即生效；已经开始的模型请求允许正常结束。
+
+`config/defaults.yaml` 中的 `clients.policies` 继续作为首次启动种子。对应环境
+变量 Key 会幂等导入为 `legacy_env` Key，保持原调用方可用；迁移到管理台生成
+的新 Key 后，可撤销旧 Key。撤销记录会持久保留，容器重启不会重新激活。
+
+控制面接口均使用 `AI_ROUTER_ADMIN_KEY`：
+
+```text
+GET   /api/clients
+POST  /api/clients
+PATCH /api/clients/{client_id}
+POST  /api/clients/{client_id}/keys
+POST  /api/clients/{client_id}/keys/{key_id}/revoke
+```
+
+不提供账号硬删除。停用账号会拒绝新请求，同时保留历史请求和审计关联。
 
 ## 多轮上下文与物理缓存
 
@@ -181,6 +213,7 @@ ChatGPT Codex 订阅后端不接受 `previous_response_id`，Router 会用该 ID
 - 运行时覆盖保存在 `/opt/1panel/ai-router/settings.yaml`
 - 审计日志保存在 `/opt/1panel/ai-router/audit/router.jsonl`
 - 会话迁移胶囊使用 `AI_ROUTER_STATE_KEY` 加密
+- 客户端 Key 仅保存派生 HMAC 摘要，创建明文响应使用 `Cache-Control: no-store`
 - 请求体默认最大 32 MiB，超限返回 `413 payload_too_large`
 - 图片默认按每张 1024 tokens 参与上下文和 TPM 估算，Base64 原始字节不会
   被 tokenizer 当作普通文本

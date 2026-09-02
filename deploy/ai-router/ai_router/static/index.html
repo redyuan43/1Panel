@@ -32,6 +32,7 @@
       <button class="tab active" type="button" data-view="dashboard">总览</button>
       <button class="tab" type="button" data-view="nodes">模型节点</button>
       <button class="tab" type="button" data-view="requests">请求记录</button>
+      <button class="tab" type="button" data-view="clients">客户端账号</button>
       <button class="tab" type="button" data-view="settings">策略设置</button>
     </nav>
 
@@ -233,6 +234,44 @@
         </section>
       </section>
 
+      <section id="clients-view" class="view">
+        <section class="section-block first">
+          <div class="request-toolbar">
+            <div class="filters">
+              <label>
+                <span>状态</span>
+                <select id="client-status-filter">
+                  <option value="">全部状态</option>
+                  <option value="enabled">已启用</option>
+                  <option value="disabled">已停用</option>
+                </select>
+              </label>
+            </div>
+            <div class="command-actions">
+              <span id="client-count" class="section-meta"></span>
+              <button id="create-client" type="button">新建账号</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>账号</th>
+                  <th>允许模型</th>
+                  <th>限额</th>
+                  <th>API Key</th>
+                  <th>24 小时用量</th>
+                  <th>最后使用</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody id="client-table"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
       <section id="settings-view" class="view">
         <form id="settings-form">
           <section class="settings-band">
@@ -356,6 +395,109 @@
         </form>
       </section>
     </main>
+
+    <dialog id="client-dialog">
+      <form id="client-form" method="dialog">
+        <div class="dialog-heading">
+          <div>
+            <span>Service account</span>
+            <h3 id="client-dialog-title">新建客户端账号</h3>
+          </div>
+          <button class="dialog-close secondary" type="button" data-close-dialog="client-dialog" aria-label="关闭">×</button>
+        </div>
+        <div class="dialog-body">
+          <div class="control-grid">
+            <label>
+              账号 ID
+              <input id="client-id" type="text" pattern="[a-z0-9][a-z0-9-]{1,62}" required>
+            </label>
+            <label>
+              显示名称
+              <input id="client-name" type="text" maxlength="80" required>
+            </label>
+            <label>
+              RPM
+              <input id="client-rpm" type="number" min="1" step="1" required>
+            </label>
+            <label>
+              TPM
+              <input id="client-tpm" type="number" min="1" step="1" required>
+            </label>
+            <label>
+              最大并发
+              <input id="client-parallel" type="number" min="1" step="1" required>
+            </label>
+            <label class="toggle-row">
+              <span>启用账号</span>
+              <input id="client-enabled" type="checkbox" checked>
+            </label>
+          </div>
+          <fieldset class="model-permissions">
+            <legend>允许模型</legend>
+            <div id="client-models" class="permission-grid"></div>
+          </fieldset>
+        </div>
+        <div class="dialog-actions">
+          <button class="secondary" type="button" data-close-dialog="client-dialog">取消</button>
+          <button type="submit">保存账号</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="keys-dialog">
+      <div class="dialog-heading">
+        <div>
+          <span>API keys</span>
+          <h3 id="keys-dialog-title">API Key 管理</h3>
+        </div>
+        <button class="dialog-close secondary" type="button" data-close-dialog="keys-dialog" aria-label="关闭">×</button>
+      </div>
+      <div class="dialog-body">
+        <form id="key-form" class="key-create-row">
+          <label>
+            Key 标签
+            <input id="key-label" type="text" maxlength="80" placeholder="例如 HA 门口服务" required>
+          </label>
+          <button type="submit">生成 Key</button>
+        </form>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>标签</th>
+                <th>Key</th>
+                <th>来源</th>
+                <th>最后使用</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="key-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog id="secret-dialog">
+      <div class="dialog-heading">
+        <div>
+          <span>One-time secret</span>
+          <h3>新 API Key</h3>
+        </div>
+        <button class="dialog-close secondary" type="button" data-close-dialog="secret-dialog" aria-label="关闭">×</button>
+      </div>
+      <div class="dialog-body">
+        <label class="secret-field">
+          API Key
+          <input id="generated-key" type="text" readonly>
+        </label>
+        <p class="secret-warning">关闭后无法再次查看。</p>
+      </div>
+      <div class="dialog-actions">
+        <button id="copy-generated-key" type="button">复制</button>
+        <button class="secondary" type="button" data-close-dialog="secret-dialog">完成</button>
+      </div>
+    </dialog>
 
     <script src="/assets/app.js"></script>
   </body>

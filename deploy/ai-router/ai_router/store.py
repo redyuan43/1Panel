@@ -19,6 +19,15 @@ class StateStore(Protocol):
 
     async def list_json(self, prefix: str) -> list[dict[str, Any]]: ...
 
+    async def increment_counters(
+        self,
+        key: str,
+        increments: dict[str, int],
+        ttl_seconds: int,
+    ) -> dict[str, int]: ...
+
+    async def get_counters(self, key: str) -> dict[str, int]: ...
+
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool: ...
 
     async def release_lock(self, key: str, token: str) -> None: ...
@@ -86,6 +95,42 @@ class InMemoryStateStore:
                     continue
                 result.append(json.loads(json.dumps(item.value)))
             return result
+
+    async def increment_counters(
+        self,
+        key: str,
+        increments: dict[str, int],
+        ttl_seconds: int,
+    ) -> dict[str, int]:
+        async with self._lock:
+            self._purge_locked()
+            item = self._values.get(key)
+            if item is None or not isinstance(item.value, dict):
+                item = _ExpiringValue(
+                    {},
+                    time.time() + ttl_seconds,
+                )
+                self._values[key] = item
+            for field, amount in increments.items():
+                item.value[field] = int(item.value.get(field, 0)) + int(
+                    amount
+                )
+            item.expires_at = time.time() + ttl_seconds
+            return {
+                str(field): int(amount)
+                for field, amount in item.value.items()
+            }
+
+    async def get_counters(self, key: str) -> dict[str, int]:
+        async with self._lock:
+            self._purge_locked()
+            item = self._values.get(key)
+            if item is None or not isinstance(item.value, dict):
+                return {}
+            return {
+                str(field): int(amount)
+                for field, amount in item.value.items()
+            }
 
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool:
         async with self._lock:
@@ -242,6 +287,41 @@ class RedisStateStore:
             if isinstance(parsed, dict):
                 result.append(parsed)
         return result
+
+    async def increment_counters(
+        self,
+        key: str,
+        increments: dict[str, int],
+        ttl_seconds: int,
+    ) -> dict[str, int]:
+        script = """
+        for index = 1, #ARGV - 1, 2 do
+          redis.call('hincrby', KEYS[1], ARGV[index], ARGV[index + 1])
+        end
+        redis.call('expire', KEYS[1], ARGV[#ARGV])
+        return redis.call('hgetall', KEYS[1])
+        """
+        arguments: list[Any] = []
+        for field, amount in increments.items():
+            arguments.extend((field, int(amount)))
+        arguments.append(ttl_seconds)
+        values = await self._client.eval(
+            script,
+            1,
+            key,
+            *arguments,
+        )
+        return {
+            str(values[index]): int(values[index + 1])
+            for index in range(0, len(values), 2)
+        }
+
+    async def get_counters(self, key: str) -> dict[str, int]:
+        values = await self._client.hgetall(key)
+        return {
+            str(field): int(amount)
+            for field, amount in values.items()
+        }
 
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool:
         return bool(await self._client.set(key, token, nx=True, ex=ttl_seconds))

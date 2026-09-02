@@ -585,3 +585,27 @@ Redis 或任何 GPU 模型服务。会话亲和与 prefix cache数据未被清�
 2. 在真实长请求执行中强制终止一个 Router实例，验证请求被标记为
    `interrupted_by_restart`。
 3. 验证旧后端仍忙时进入 `draining_old_request`，且物理后端空闲后自动恢复。
+
+## 2026-09-02 客户端账号与 API Key 管理实现
+
+本轮完成代码、96 项自动测试和隔离镜像验收，尚未部署生产 Router。最终构建
+镜像为
+`sha256:62970850b36b583716936d2e719bcd8cfe82f4b1132a36e663bbd62262945b92`。
+
+- 管理台新增“客户端账号”页，支持账号创建、编辑、启停、模型权限、RPM、
+  TPM、并发限制、多 Key生成和独立撤销。
+- Key 明文仅在创建响应中返回一次，并设置 `Cache-Control: no-store`。
+- Redis 只保存由 `AI_ROUTER_STATE_KEY` 派生的 HMAC-SHA256 摘要，不保存
+  可恢复明文。
+- `1panel` 和 `check-boards` 环境变量 Key 会作为 `legacy_env` Key幂等导入；
+  已撤销记录不会在 Router 重启后重新激活。
+- local 和 tail Router 通过共享 Redis读取账号和 Key 状态，撤销、停用和权限
+  修改对后续请求立即生效。
+- 请求审计增加 `key_id`、实际 input/output token；账号页显示最近 24 小时
+  请求数、token 和错误数。
+- 新镜像内部控制面 API 已完成账号创建、Key 生成、列表脱敏和撤销测试。
+- Redis DB 15 已验证两个独立 Router 管理器共享鉴权、跨实例即时撤销，以及
+  旧 Key 撤销后重启不恢复；测试结束后 DB 15 已清空。
+
+生产上线前仍需单独确认滚动更新 Router API和控制台，并完成现有旧 Key、
+新生成 Key、撤销和调用方切换验收。
