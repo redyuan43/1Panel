@@ -1,0 +1,77 @@
+version: 1
+
+routing:
+  default_output_reserve_tokens: 4096
+  provider_priority: local_first
+  affinity_capacity_wait_seconds: 3
+  new_request_capacity_wait_seconds: 0
+  all_local_busy_policy: cloud_or_429
+  weights:
+    quality: 0.50
+    load: 0.20
+    latency: 0.10
+    context: 0.10
+    cost: 0.05
+    locality: 0.05
+
+affinity:
+  ttl_seconds: 86400
+  max_priority_burst: 8
+
+queue:
+  timeout_seconds: 120
+  lock_ttl_seconds: 3600
+
+health:
+  refresh_seconds: 5
+  stale_after_seconds: 15
+
+failover:
+  max_attempts: 2
+  cooldown_seconds: 20
+
+evaluator:
+  enabled: false
+  model_id: ai-qwen38-27b
+  confidence_threshold: 0.85
+  evaluate_task_changes: true
+  long_context_threshold_tokens: 65536
+  prefer_frontier_for_code_tools: true
+  prefer_frontier_for_complex_code: true
+  tool_task_mappings:
+    home-automation:
+      - homeassistant
+      - hass
+    code:
+      - github
+      - git
+    batch:
+      - batch
+
+compaction:
+  enabled: true
+  model_id: ai-qwen38-27b
+
+cloud:
+  enabled: false
+  auto_escalate: false
+  monthly_budget: 0
+  allowed_providers: []
+  allowed_models: []
+
+clients:
+  policies:
+    - id: 1panel
+      key_env: AI_ROUTER_1PANEL_API_KEY
+      models:
+        - "*"
+      rpm_limit: 120
+      tpm_limit: 1000000
+      max_parallel_requests: 8
+    - id: check-boards
+      key_env: AI_ROUTER_CHECK_BOARDS_API_KEY
+      models:
+        - auto
+      rpm_limit: 240
+      tpm_limit: 2000000
+      max_parallel_requests: 4

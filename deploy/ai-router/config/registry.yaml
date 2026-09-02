@@ -1,0 +1,305 @@
+version: 1
+
+tier_ranks:
+  edge-small: 10
+  local-general: 20
+  local-large: 30
+  cloud-frontier: 40
+  subscription-frontier: 50
+
+endpoints:
+  - id: ai-qwen38-27b
+    public_model: huihui/Qwen3.8-27B-Q4-DFlash2
+    provider_model: huihui/Qwen3.8-27B-Q4-DFlash2
+    api_base: http://127.0.0.1:18103/v1
+    node: ai
+    role: responder
+    tier: local-general
+    tier_rank: 20
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 262144
+    configured_context_tokens: 262144
+    max_concurrency: 1
+    backend_type: ai_pool
+    health_url: http://127.0.0.1:18103/health
+    backend_api_key_env: AI_ROUTER_AI_BACKEND_KEY
+    enabled: true
+    auto_candidate: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      validation_status: live-validated-chat-responses-tools-structured
+      validated_at: "2026-09-01"
+    quality:
+      general: 50
+      code: 0
+      batch: 0
+    metadata:
+      context_status: health-reported
+      quality_status: benchmarked-2026-09-01
+      quality_report: /opt/1panel/ai-router/benchmarks/report-ai-20260901.json
+      topology: logical-pool
+
+  - id: edge-qwen38-flash
+    public_model: RadixArk/Qwen3.8-Flash-Next-NVFP4
+    provider_model: RadixArk/Qwen3.8-Flash-Next-NVFP4
+    api_base: http://edge.taild500c8.ts.net:18300/v1
+    node: edge
+    role: responder
+    tier: local-large
+    tier_rank: 30
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 262144
+    configured_context_tokens: 500000
+    max_concurrency: 1
+    backend_type: vllm
+    health_url: http://edge.taild500c8.ts.net:18300/health
+    load_url: http://edge.taild500c8.ts.net:18300/metrics
+    backend_api_key_env: AI_ROUTER_EDGE_BACKEND_KEY
+    enabled: true
+    auto_candidate: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      validation_status: live-validated-chat-responses-tools-structured
+      validated_at: "2026-09-01"
+    quality:
+      general: 100
+      code: 100
+      batch: 100
+    metadata:
+      context_status: safe-limit-pending-live-validation
+      quality_status: benchmarked-2026-09-01
+      quality_report: /opt/1panel/ai-router/benchmarks/report-edge-20260901.json
+
+  - id: ivan-qwen38-flash-128k
+    public_model: huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
+    provider_model: huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
+    api_base: http://ivan-ms-7b17.taild500c8.ts.net:18104/v1
+    node: ivan
+    role: responder
+    tier: local-large
+    tier_rank: 30
+    modalities:
+      - text
+      - image
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 131072
+    configured_context_tokens: 131072
+    max_concurrency: 1
+    backend_type: llama_cpp
+    health_url: http://ivan-ms-7b17.taild500c8.ts.net:18104/health
+    load_url: http://ivan-ms-7b17.taild500c8.ts.net:18104/slots
+    backend_api_key_env: AI_ROUTER_IVAN_BACKEND_KEY
+    enabled: true
+    auto_candidate: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      validation_status: live-validated-chat-responses-tools-structured
+      validated_at: "2026-09-01"
+    quality:
+      general: 100
+      code: 0
+      batch: 0
+    metadata:
+      context_status: configured-128k-short-chat-live-validated
+      quality_status: legacy-benchmark-pending-random-pilot
+      quality_report: /opt/1panel/ai-router/benchmarks/report-ivan-20260901.json
+      service_unit: qwen38-flash-next-mtp-128k.service
+      model_artifact: Qwen3.8-Flash-Next-UD-Q4_K_XL
+      quantization: UD-Q4_K_XL
+      kv_cache: Q8
+      speculative_method: mtp
+      speculative_tokens: 2
+      vision_status: live-validated-2026-09-02
+      vision_projector: mmproj-F16.gguf
+      image_min_tokens: 1024
+
+  - id: amd-qwen38-rocmfpx-128k
+    public_model: Qwen/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-MTP
+    provider_model: Qwen/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-MTP
+    api_base: http://ivan-superai.taild500c8.ts.net:18106/v1
+    node: amd
+    role: responder
+    tier: local-large
+    tier_rank: 30
+    modalities:
+      - text
+      - image
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 131072
+    configured_context_tokens: 131072
+    max_concurrency: 1
+    backend_type: llama_cpp
+    health_url: http://ivan-superai.taild500c8.ts.net:18106/health
+    load_url: http://ivan-superai.taild500c8.ts.net:18106/slots
+    backend_api_key_env: AI_ROUTER_AMD_BACKEND_KEY
+    enabled: true
+    auto_candidate: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      validation_status: live-validated-chat-responses-tools-structured
+      validated_at: "2026-09-01"
+    quality: {}
+    metadata:
+      context_status: live-120k-cold-cache-validated-2026-09-01
+      quality_status: unbenchmarked
+      performance_report: /home/admin/github/qwen3.8_flash_next/results/20260901-amd-rocmfpx/20260901T1544-rocmfpx-128k-120k-cold-cached.json
+      service_unit: qwen38-flash-next-amd-rocmfpx-128k.service
+      model_artifact: Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-MTP
+      quantization: ROCmFP4-FAST-imatrix
+      kv_cache: Q8
+      speculative_method: mtp
+      speculative_tokens: 3
+      gpu_memory_gib: 93.85
+      vision_status: live-validated-2026-09-02
+      vision_projector: mmproj-F16.gguf
+      image_min_tokens: 1024
+
+  - id: codex-pro-gpt-5.6-sol
+    public_model: codex-pro/gpt-5.6-sol
+    provider_model: gpt-5.6-sol
+    api_base: http://127.0.0.1:14010/v1
+    node: codex-pro
+    role: responder
+    tier: subscription-frontier
+    tier_rank: 50
+    modalities:
+      - text
+      - image
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 131072
+    configured_context_tokens: 272000
+    max_concurrency: 1
+    backend_type: codex_pool
+    health_url: http://127.0.0.1:14010/health
+    backend_api_key_env: AI_ROUTER_LITELLM_MASTER_KEY
+    enabled: true
+    auto_candidate: true
+    cloud: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      validation_status: live-validated-chat-responses-tools-streaming
+      validated_at: "2026-09-02"
+    quality:
+      general: 110
+      code: 110
+      batch: 110
+      long-context: 110
+    metadata:
+      provider: openai-codex
+      billing_mode: subscription
+      context_status: catalog-272k-safe-128k
+      quality_status: configured-frontier-priority-unbenchmarked
+      reasoning_effort_default: medium
+      model_catalog_required: true
+      catalog_context_tokens: 272000
+      catalog_max_context_tokens: 872000
+      vision_status: live-validated-2026-09-02
+
+  - id: cloud-deepseek-v4-flash
+    public_model: deepseek/deepseek-v4-flash
+    provider_model: deepseek-v4-flash
+    api_base: https://api.deepseek.com
+    node: cloud
+    role: responder
+    tier: cloud-frontier
+    tier_rank: 40
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 1000000
+    configured_context_tokens: 1000000
+    max_concurrency: 8
+    backend_type: openai
+    health_url: https://api.deepseek.com/models
+    backend_api_key_env: AI_ROUTER_DEEPSEEK_API_KEY
+    enabled: true
+    auto_candidate: true
+    cloud: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      validation_status: live-validated
+      validated_at: "2026-09-01"
+    quality:
+      general: 100
+      code: 100
+      batch: 100
+    metadata:
+      provider: deepseek
+      context_status: official-limit-unverified-boundary
+      quality_status: benchmarked-2026-09-01
+      quality_report: /opt/1panel/ai-router/benchmarks/report-deepseek-v4-flash-20260901.json
+      pricing_status: official-peak-2026-09-01
+      input_cost_per_million_usd: 0.44
+      output_cost_per_million_usd: 1.32
+      max_output_tokens: 384000
+      thinking_via_extra_body: true

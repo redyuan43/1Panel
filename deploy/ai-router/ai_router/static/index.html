@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>1Panel AI Router</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark">1P</span>
+        <div>
+          <p>1Panel Infrastructure</p>
+          <h1>AI Router</h1>
+        </div>
+      </div>
+      <div class="connection">
+        <span id="connection-state" class="connection-state">
+          <i></i>未连接
+        </span>
+        <label class="key-field">
+          <span>管理密钥</span>
+          <input id="admin-key" type="password" autocomplete="current-password">
+        </label>
+        <button id="connect" type="button">连接</button>
+      </div>
+    </header>
+
+    <nav class="primary-nav" aria-label="控制台视图">
+      <button class="tab active" type="button" data-view="dashboard">总览</button>
+      <button class="tab" type="button" data-view="nodes">模型节点</button>
+      <button class="tab" type="button" data-view="requests">请求记录</button>
+      <button class="tab" type="button" data-view="settings">策略设置</button>
+    </nav>
+
+    <main>
+      <div class="command-bar">
+        <div>
+          <h2 id="view-title">运行总览</h2>
+          <p id="last-updated">等待连接</p>
+        </div>
+        <div class="command-actions">
+          <label class="auto-refresh">
+            <input id="auto-refresh" type="checkbox" checked>
+            <span>自动刷新</span>
+          </label>
+          <button id="refresh" type="button" class="secondary">↻ 刷新</button>
+        </div>
+      </div>
+
+      <p id="notice" class="notice" role="status"></p>
+
+      <section id="dashboard-view" class="view active">
+        <div id="summary" class="metric-strip" aria-label="运行指标"></div>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <h3>运行告警</h3>
+            <span id="alert-count" class="section-meta"></span>
+          </div>
+          <div id="alerts" class="alert-list"></div>
+        </section>
+
+        <div class="dashboard-grid">
+          <section class="section-block">
+            <div class="section-heading">
+              <h3>节点概览</h3>
+              <span class="section-meta">实时健康检查</span>
+            </div>
+            <div id="node-overview" class="node-overview"></div>
+          </section>
+
+          <section class="section-block">
+            <div class="section-heading">
+              <h3>最近流量</h3>
+              <span class="section-meta">已完成请求</span>
+            </div>
+            <div id="distribution" class="distribution"></div>
+            <div id="budget" class="budget"></div>
+          </section>
+        </div>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <h3>运行中</h3>
+            <span id="active-count" class="section-meta"></span>
+          </div>
+          <div id="active-requests" class="active-list"></div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <h3>最近请求</h3>
+            <button type="button" class="text-button" data-open-view="requests">
+              查看全部
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>时间</th>
+                  <th>路由</th>
+                  <th>节点</th>
+                  <th>原因</th>
+                  <th>耗时</th>
+                </tr>
+              </thead>
+              <tbody id="recent-requests"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="nodes-view" class="view">
+        <section class="section-block first">
+          <div class="section-heading">
+            <h3>注册端点</h3>
+            <span id="endpoint-count" class="section-meta"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>节点</th>
+                  <th>模型</th>
+                  <th>等级</th>
+                  <th>安全上下文</th>
+                  <th>负载余量</th>
+                  <th>协议能力</th>
+                  <th>验证状态</th>
+                  <th>自动候选</th>
+                </tr>
+              </thead>
+              <tbody id="endpoint-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <h3>物理 Worker 与订阅槽位</h3>
+            <span id="worker-count" class="section-meta"></span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>端口 / 账号</th>
+                  <th>类别</th>
+                  <th>安全上下文</th>
+                  <th>Worker ID</th>
+                </tr>
+              </thead>
+              <tbody id="worker-table"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="requests-view" class="view">
+        <section class="section-block first">
+          <div class="request-toolbar">
+            <div class="filters">
+              <label>
+                <span>节点</span>
+                <select id="node-filter">
+                  <option value="">全部节点</option>
+                </select>
+              </label>
+              <label>
+                <span>状态</span>
+                <select id="status-filter">
+                  <option value="">全部状态</option>
+                  <option value="running">运行中</option>
+                  <option value="succeeded">成功</option>
+                  <option value="failed">失败</option>
+                  <option value="stale">已中断</option>
+                </select>
+              </label>
+            </div>
+            <span id="request-count" class="section-meta"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="request-table">
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>开始时间</th>
+                  <th>请求模型</th>
+                  <th>实际路由</th>
+                  <th>部署</th>
+                  <th>任务</th>
+                  <th>协议/修复</th>
+                  <th>亲和</th>
+                  <th>网络/容量尝试</th>
+                  <th>容量等待</th>
+                  <th>Token</th>
+                  <th>缓存命中</th>
+                  <th>耗时</th>
+                </tr>
+              </thead>
+              <tbody id="request-table"></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="settings-view" class="view">
+        <form id="settings-form">
+          <section class="settings-band">
+            <div class="settings-title">
+              <h3>云端升级</h3>
+              <span>Cloud escalation</span>
+            </div>
+            <div class="control-grid">
+              <label class="toggle-row">
+                <span>启用云端候选</span>
+                <input id="cloud-enabled" type="checkbox">
+              </label>
+              <label class="toggle-row">
+                <span>允许自动升级</span>
+                <input id="cloud-auto" type="checkbox">
+              </label>
+              <label>
+                月度预算（USD）
+                <input id="cloud-budget" type="number" min="0" step="1">
+              </label>
+              <label>
+                允许的 Provider
+                <input id="cloud-providers" type="text">
+              </label>
+              <label class="wide">
+                允许的模型 ID
+                <input id="cloud-models" type="text">
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-band">
+            <div class="settings-title">
+              <h3>任务评估</h3>
+              <span>Evaluation and compaction</span>
+            </div>
+            <div class="control-grid">
+              <label class="toggle-row">
+                <span>启用任务评估器</span>
+                <input id="evaluator-enabled" type="checkbox">
+              </label>
+              <label class="toggle-row">
+                <span>启用升级压缩</span>
+                <input id="compaction-enabled" type="checkbox">
+              </label>
+              <label>
+                评估器模型 ID
+                <input id="evaluator-model" type="text">
+              </label>
+              <label>
+                置信度阈值
+                <input id="evaluator-confidence" type="number" min="0" max="1" step="0.01">
+              </label>
+              <label class="wide">
+                压缩模型 ID
+                <input id="compaction-model" type="text">
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-band">
+            <div class="settings-title">
+              <h3>会话与队列</h3>
+              <span>Affinity and capacity</span>
+            </div>
+            <div class="control-grid">
+              <label>
+                缓存亲和租约（分钟）
+                <input id="affinity-ttl-minutes" type="number" min="5" max="1440" step="1">
+              </label>
+              <label>
+                亲和优先突发上限
+                <input id="affinity-burst" type="number" min="1" step="1">
+              </label>
+              <label>
+                队列超时（秒）
+                <input id="queue-timeout" type="number" min="1" step="1">
+              </label>
+              <label>
+                最大尝试次数
+                <input id="failover-attempts" type="number" min="1" max="3" step="1">
+              </label>
+              <label>
+                会话容量等待（秒）
+                <input id="affinity-capacity-wait" type="number" min="0" step="0.1">
+              </label>
+              <label>
+                新请求容量等待（秒）
+                <input id="new-request-capacity-wait" type="number" min="0" step="0.1">
+              </label>
+              <label>
+                Provider 优先级
+                <select id="provider-priority">
+                  <option value="local_first">本地优先</option>
+                  <option value="balanced">均衡评分</option>
+                  <option value="cloud_first">云端优先</option>
+                </select>
+              </label>
+              <label>
+                本地全满策略
+                <select id="all-local-busy-policy">
+                  <option value="cloud_or_429">预算内云端，否则 429</option>
+                  <option value="return_429">直接返回 429</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-band">
+            <div class="settings-title">
+              <h3>路由权重</h3>
+              <span>总和 1.00</span>
+            </div>
+            <div id="weights" class="weight-grid"></div>
+          </section>
+
+          <div class="settings-actions">
+            <button id="reload" type="button" class="secondary">重新加载</button>
+            <button type="submit">保存设置</button>
+          </div>
+        </form>
+      </section>
+    </main>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

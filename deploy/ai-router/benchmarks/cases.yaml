@@ -1,0 +1,43 @@
+version: 1
+
+cases:
+  - id: general-capital
+    task: general
+    messages:
+      - role: user
+        content: Return only JSON with the capital of France in the field answer.
+    expected:
+      answer: Paris
+
+  - id: general-arithmetic
+    task: general
+    messages:
+      - role: user
+        content: Return only JSON with the integer result of 19 + 23 in the field answer.
+    expected:
+      answer: 42
+
+  - id: code-off-by-one
+    task: code
+    messages:
+      - role: user
+        content: >-
+          The function `def identity(x): return x + 1` should return its input unchanged.
+          Return only JSON with fields bug and replacement. Set bug to off_by_one and
+          replacement to return x.
+    expected:
+      bug: off_by_one
+      replacement: return x
+
+  - id: batch-labels
+    task: batch
+    messages:
+      - role: user
+        content: >-
+          Classify ["paid invoice", "password reset", "refund requested"].
+          Return only JSON with labels exactly ["billing", "support", "billing"].
+    expected:
+      labels:
+        - billing
+        - support
+        - billing

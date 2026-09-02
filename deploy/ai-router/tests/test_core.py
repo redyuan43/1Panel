@@ -1,0 +1,3609 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+import httpx
+import pytest
+import yaml
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
+
+from ai_router.api import (
+    _acquire_route_capacity,
+    _cache_metrics,
+    _mirror_responses_format,
+    _prefix_cache_delta,
+    _prepare_routed_body,
+    create_app,
+)
+from ai_router.budget import CloudBudget
+from ai_router.compaction import CapsuleCipher
+from ai_router.compaction import ContextCompactor, extract_messages
+from ai_router.config import Registry, Settings, client_policies
+from ai_router.control import create_app as create_control_app
+from ai_router.errors import (
+    AllLocalCapacityBusyError,
+    CapacityBusyError,
+    ConversationBusyError,
+    InvalidToolHistoryError,
+    NoEligibleModelError,
+    QueueTimeoutError,
+)
+from ai_router.evaluator import TaskEvaluator
+from ai_router.history import (
+    SSEAccumulator,
+    assistant_items_from_response,
+    history_identities,
+)
+from ai_router.policy import (
+    ConversationRepository,
+    RoutingPolicy,
+    updated_conversation_state,
+)
+from ai_router.pilot import (
+    anonymize_results,
+    expand_case,
+    finalize_verdict,
+    oracle_result,
+    validate_manifest,
+    write_json,
+)
+from ai_router.protocol import normalize_request
+from ai_router.runtime import build_runtime
+from ai_router.scheduler import Scheduler
+from ai_router.store import InMemoryStateStore
+from ai_router.token_counter import (
+    SimpleTokenCounter,
+    request_modalities,
+)
+from ai_router.types import (
+    ConversationState,
+    EndpointCapabilities,
+    EndpointStatus,
+    Evaluation,
+    RequestCapabilities,
+    RouteDecision,
+)
+from ai_router.types import Endpoint
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeHealth:
+    def __init__(
+        self,
+        statuses: dict[str, EndpointStatus],
+        *,
+        prefix_counters: dict[str, list[dict[str, float]]] | None = None,
+    ) -> None:
+        self._statuses = statuses
+        self.failed: list[str] = []
+        self.prefix_counters = prefix_counters or {}
+
+    async def statuses(self, endpoints):
+        return {item.id: self._statuses[item.id] for item in endpoints}
+
+    async def status(self, endpoint):
+        return self._statuses[endpoint.id]
+
+    async def in_cooldown(self, _endpoint_id: str) -> bool:
+        return False
+
+    async def mark_failure(self, endpoint_id: str, _cooldown_seconds: int) -> None:
+        self.failed.append(endpoint_id)
+
+    async def prefix_cache_counters(self, endpoint):
+        values = self.prefix_counters.get(endpoint.id, [])
+        return values.pop(0) if values else None
+
+
+def run(value):
+    return asyncio.run(value)
+
+
+def settings(tmp_path: Path) -> Settings:
+    return Settings(
+        defaults_path=ROOT / "config" / "defaults.yaml",
+        runtime_path=tmp_path / "settings.yaml",
+    )
+
+
+def healthy(
+    endpoint_id: str,
+    *,
+    context: int,
+    workers: list[dict] | None = None,
+) -> EndpointStatus:
+    return EndpointStatus(
+        endpoint_id=endpoint_id,
+        healthy=True,
+        checked_at=time.time(),
+        load_headroom=1.0,
+        latency_score=1.0,
+        cache_generation="generation-1",
+        eligible_context_tokens=context,
+        detail={"workers": workers or []},
+    )
+
+
+def ai_workers() -> list[dict]:
+    return [
+        {
+            "worker_id": "worker-priority-0",
+            "port": 18110,
+            "priority": 0,
+            "ready": True,
+            "state": "available",
+            "safe_context_tokens": 196608,
+        },
+        {
+            "worker_id": "worker-priority-1",
+            "port": 18111,
+            "priority": 1,
+            "ready": True,
+            "state": "available",
+            "safe_context_tokens": 262144,
+        },
+    ]
+
+
+def six_ai_workers() -> list[dict]:
+    return [
+        {
+            "worker_id": f"worker-{index}",
+            "port": 18110 + index,
+            "priority": index,
+            "ready": True,
+            "state": "available",
+            "safe_context_tokens": 262144,
+        }
+        for index in range(6)
+    ]
+
+
+def pilot_manifest() -> dict:
+    cases = []
+    for task, count in (("general", 6), ("code", 5), ("batch", 5)):
+        for index in range(count):
+            cases.append(
+                {
+                    "id": f"{task}-{index}",
+                    "task": task,
+                    "max_tokens": 64,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": f"Return JSON with answer {task}-{index}.",
+                        }
+                    ],
+                    "grading": {
+                        "mode": "json_subset",
+                        "expected": {"answer": f"{task}-{index}"},
+                        "rubric": "The answer field must match exactly.",
+                    },
+                }
+            )
+    for index, target in enumerate((70000, 96000, 120000, 120000)):
+        value = {
+            "id": f"long-{index}",
+            "task": "long-context",
+            "max_tokens": 64,
+            "grading": {
+                "mode": "json_subset",
+                "expected": {"answer": f"value-{index}"},
+                "rubric": "Return the authoritative value.",
+            },
+            "long_context": {
+                "target_tokens": target,
+                "needle": {
+                    "key": f"key-{index}",
+                    "value": f"value-{index}",
+                },
+                "question": (
+                    f"Return JSON with answer equal to key-{index}."
+                ),
+            },
+        }
+        if index == 3:
+            value["long_context"]["follow_up"] = {
+                "question": "Return the same value again as JSON.",
+                "grading": {
+                    "mode": "json_subset",
+                    "expected": {"answer": "value-3"},
+                    "rubric": "Recall the same authoritative value.",
+                },
+            }
+        cases.append(value)
+    return {
+        "benchmark_version": 2,
+        "run_type": "pilot",
+        "generated_by": "gpt-5.6-luna",
+        "seed": "seed-123",
+        "cases": cases,
+    }
+
+
+def test_settings_and_registry_load(tmp_path: Path) -> None:
+    value = settings(tmp_path)
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    assert value.section("routing")["weights"]["quality"] == 0.50
+    assert len(registry.endpoints) == 6
+    assert all(
+        item.max_concurrency == 1
+        for item in registry.endpoints
+        if not item.cloud
+    )
+    ivan = registry.by_id("ivan-qwen38-flash-128k")
+    assert ivan is not None
+    assert ivan.public_model == "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
+    assert ivan.safe_context_tokens == 131072
+    assert ivan.max_concurrency == 1
+    assert ivan.auto_candidate is True
+    amd = registry.by_id("amd-qwen38-rocmfpx-128k")
+    assert amd is not None
+    assert amd.public_model == (
+        "Qwen/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-MTP"
+    )
+    assert amd.safe_context_tokens == 131072
+    assert amd.max_concurrency == 1
+    assert amd.auto_candidate is True
+    assert registry.by_id("ivan-qwen38-rocmfpx-128k") is None
+    assert registry.by_id("cloud-deepseek-v4-flash").max_concurrency == 8
+    codex = registry.by_id("codex-pro-gpt-5.6-sol")
+    assert codex is not None
+    assert codex.public_model == "codex-pro/gpt-5.6-sol"
+    assert codex.auto_candidate is True
+    assert codex.metadata["billing_mode"] == "subscription"
+    assert value.section("routing")["affinity_capacity_wait_seconds"] == 3
+    assert value.section("routing")["new_request_capacity_wait_seconds"] == 0
+    assert value.section("routing")["all_local_busy_policy"] == "cloud_or_429"
+    assert value.section("routing")["provider_priority"] == "local_first"
+    assert value.section("affinity")["ttl_seconds"] == 86400
+    policies = {
+        item.id: item
+        for item in client_policies(value)
+    }
+    assert policies["check-boards"].models == ("auto",)
+    assert policies["check-boards"].max_parallel_requests == 4
+    assert all(
+        endpoint.capabilities.chat
+        and endpoint.capabilities.responses == "native"
+        and endpoint.capabilities.tools == "parallel"
+        for endpoint in registry.endpoints
+    )
+
+
+def test_legacy_five_weight_runtime_remains_loadable(
+    tmp_path: Path,
+) -> None:
+    runtime_path = tmp_path / "settings.yaml"
+    runtime_path.write_text(
+        yaml.safe_dump(
+            {
+                "routing": {
+                    "weights": {
+                        "quality": 0.55,
+                        "load": 0.20,
+                        "latency": 0.10,
+                        "context": 0.10,
+                        "locality": 0.05,
+                    }
+                }
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    value = Settings(
+        defaults_path=ROOT / "config" / "defaults.yaml",
+        runtime_path=runtime_path,
+    )
+    assert value.section("routing")["weights"]["cost"] == 0
+    assert sum(value.section("routing")["weights"].values()) == 1
+
+
+@pytest.mark.parametrize("ttl_seconds", [299, 86401])
+def test_affinity_ttl_is_limited_to_cache_lease_range(
+    tmp_path: Path,
+    ttl_seconds: int,
+) -> None:
+    value = settings(tmp_path)
+    with pytest.raises(ValueError, match="between 300 and 86400"):
+        value.write_runtime(
+            {"affinity": {"ttl_seconds": ttl_seconds}}
+        )
+
+
+def test_expired_conversation_is_ignored_even_if_store_key_remains(
+    tmp_path: Path,
+) -> None:
+    value = settings(tmp_path)
+    store = InMemoryStateStore()
+    repository = ConversationRepository(store, value)
+    state = ConversationState(
+        conversation_id="expired-conversation",
+        public_model="model",
+        endpoint_id="endpoint",
+        tier_rank=1,
+        task="general",
+        last_seen=time.time() - 86401,
+    )
+    run(
+        store.set_json(
+            "router:conversation:expired-conversation",
+            state.to_dict(),
+            ttl_seconds=172800,
+        )
+    )
+    assert run(repository.get("expired-conversation")) is None
+
+
+def test_same_conversation_is_rejected_while_active() -> None:
+    store = InMemoryStateStore()
+    scheduler = Scheduler(store)
+    first = run(scheduler.begin_request("conversation-1"))
+    with pytest.raises(ConversationBusyError):
+        run(scheduler.begin_request("conversation-1"))
+    run(first.release())
+    second = run(scheduler.begin_request("conversation-1"))
+    run(second.release())
+
+
+def test_deployment_capacity_allows_future_parallel_cloud_requests() -> None:
+    async def scenario() -> None:
+        store = InMemoryStateStore()
+        scheduler = Scheduler(store)
+        first = await scheduler.begin_request(None)
+        second = await scheduler.begin_request(None)
+        third = await scheduler.begin_request(None)
+        await scheduler.acquire_deployment(
+            first,
+            "cloud-model",
+            "request-1",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+            capacity=2,
+        )
+        await scheduler.acquire_deployment(
+            second,
+            "cloud-model",
+            "request-2",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+            capacity=2,
+        )
+        with pytest.raises(QueueTimeoutError):
+            await scheduler.acquire_deployment(
+                third,
+                "cloud-model",
+                "request-3",
+                timeout_seconds=0.05,
+                affinity_priority=False,
+                capacity=2,
+            )
+        await first.release()
+        await second.release()
+        await third.release()
+
+    run(scenario())
+
+
+def test_pool_candidates_use_distinct_single_capacity_workers() -> None:
+    async def scenario() -> None:
+        store = InMemoryStateStore()
+        scheduler = Scheduler(store)
+        first = await scheduler.begin_request(None)
+        second = await scheduler.begin_request(None)
+        candidates = ("worker-a", "worker-b")
+        first_id = await scheduler.acquire_deployment_candidates(
+            first,
+            "local-pool",
+            candidates,
+            "request-1",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+        second_id = await scheduler.acquire_deployment_candidates(
+            second,
+            "local-pool",
+            candidates,
+            "request-2",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+        assert first_id == "worker-a"
+        assert second_id == "worker-b"
+        await first.release()
+        await second.release()
+
+    run(scenario())
+
+
+def test_nonblocking_capacity_skips_busy_deployments() -> None:
+    async def scenario() -> None:
+        store = InMemoryStateStore()
+        scheduler = Scheduler(store)
+        first = await scheduler.begin_request(None)
+        second = await scheduler.begin_request(None)
+        third = await scheduler.begin_request(None)
+        await scheduler.acquire_deployment(
+            first,
+            "worker-a",
+            "request-1",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+        selected = await scheduler.try_acquire_deployment_candidates(
+            second,
+            ("worker-a", "worker-b"),
+        )
+        assert selected == "worker-b"
+        unavailable = await scheduler.try_acquire_deployment_candidates(
+            third,
+            ("worker-a", "worker-b"),
+        )
+        assert unavailable is None
+        await first.release()
+        await second.release()
+        await third.release()
+
+    run(scenario())
+
+
+def test_nonblocking_capacity_uses_six_distinct_workers() -> None:
+    async def scenario() -> None:
+        scheduler = Scheduler(InMemoryStateStore())
+        workers = tuple(f"worker-{index}" for index in range(6))
+        leases = []
+        selected = []
+        for index in range(6):
+            lease = await scheduler.begin_request(None)
+            leases.append(lease)
+            selected.append(
+                await scheduler.try_acquire_deployment_candidates(
+                    lease,
+                    workers,
+                )
+            )
+        assert selected == list(workers)
+        seventh = await scheduler.begin_request(None)
+        assert (
+            await scheduler.try_acquire_deployment_candidates(
+                seventh,
+                workers,
+            )
+            is None
+        )
+        for lease in leases:
+            await lease.release()
+        await seventh.release()
+
+    run(scenario())
+
+
+def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    status = healthy(
+        endpoint.id,
+        context=262144,
+        workers=ai_workers(),
+    )
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth({endpoint.id: status}),
+    )
+    first = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert first.deployment_id == "worker-priority-0"
+    assert first.upstream_api_base == "http://127.0.0.1:18110/v1"
+    assert [item[0] for item in first.deployment_candidates] == [
+        "worker-priority-0",
+        "worker-priority-1",
+    ]
+    state = updated_conversation_state(
+        None,
+        conversation_id="conversation-1",
+        decision=first,
+        cache_generation="generation-1",
+    )
+    second = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=state,
+        )
+    )
+    assert second.deployment_id == first.deployment_id
+    assert second.affinity == "hit"
+    assert second.deployment_candidates == (
+        ("worker-priority-0", "http://127.0.0.1:18110/v1"),
+    )
+
+
+def test_ai_pool_fails_over_when_affinity_worker_is_externally_leased(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    workers = ai_workers()
+    status = healthy(endpoint.id, context=262144, workers=workers)
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth({endpoint.id: status}),
+    )
+    original = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    state = updated_conversation_state(
+        None,
+        conversation_id="conversation-1",
+        decision=original,
+        cache_generation="generation-1",
+    )
+    workers[0]["state"] = "leased"
+    changed = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=state,
+        )
+    )
+    assert changed.deployment_id == "worker-priority-1"
+    assert changed.affinity == "physical-failover"
+    assert changed.reason == "physical_worker_unavailable"
+
+
+def test_ai_pool_failure_excludes_only_the_failed_worker(tmp_path: Path) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    status = healthy(
+        endpoint.id,
+        context=262144,
+        workers=ai_workers(),
+    )
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth({endpoint.id: status}),
+    )
+    decision = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+            excluded_deployment_ids={"worker-priority-0"},
+        )
+    )
+    assert decision.endpoint.id == endpoint.id
+    assert decision.deployment_id == "worker-priority-1"
+
+
+def test_ai_pool_filters_workers_by_required_context(tmp_path: Path) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    status = healthy(
+        endpoint.id,
+        context=262144,
+        workers=ai_workers(),
+    )
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth({endpoint.id: status}),
+    )
+    decision = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("long-context", None, 1.0, "test"),
+            prompt_tokens=200000,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert decision.deployment_candidates == (
+        ("worker-priority-1", "http://127.0.0.1:18111/v1"),
+    )
+    with pytest.raises(NoEligibleModelError):
+        run(
+            policy.choose(
+                requested_model=endpoint.public_model,
+                evaluation=Evaluation("long-context", None, 1.0, "test"),
+                prompt_tokens=262100,
+                output_reserve_tokens=100,
+                modalities={"text"},
+                has_tools=False,
+                conversation=None,
+            )
+        )
+
+
+def test_explicit_model_change_is_marked_for_compaction(tmp_path: Path) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    ai = registry.by_id("ai-qwen38-27b")
+    edge = registry.by_id("edge-qwen38-flash")
+    assert ai is not None and edge is not None
+    statuses = {
+        ai.id: healthy(ai.id, context=262144, workers=ai_workers()),
+        edge.id: healthy(edge.id, context=262144),
+    }
+    policy = RoutingPolicy(registry, settings(tmp_path), FakeHealth(statuses))
+    original = run(
+        policy.choose(
+            requested_model=ai.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    state = updated_conversation_state(
+        None,
+        conversation_id="conversation-1",
+        decision=original,
+        cache_generation="generation-1",
+    )
+    changed = run(
+        policy.choose(
+            requested_model=edge.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=state,
+        )
+    )
+    assert changed.migration is True
+    assert changed.reason == "explicit_model_change"
+
+
+def test_auto_keeps_models_eligible_without_verified_quality(
+    tmp_path: Path,
+) -> None:
+    registry_value = yaml.safe_load(
+        (ROOT / "config" / "registry.yaml").read_text(encoding="utf-8")
+    )
+    for endpoint in registry_value["endpoints"]:
+        endpoint["quality"] = {}
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(registry_value, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    registry = Registry(registry_path)
+    statuses = {
+        item.id: healthy(
+            item.id,
+            context=item.safe_context_tokens,
+            workers=ai_workers() if item.backend_type == "ai_pool" else None,
+        )
+        for item in registry.endpoints
+    }
+    policy = RoutingPolicy(registry, settings(tmp_path), FakeHealth(statuses))
+    decision = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert decision.endpoint.cloud is False
+
+
+def test_auto_uses_context_and_capacity_when_task_quality_is_missing(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    statuses = {
+        item.id: healthy(
+            item.id,
+            context=item.safe_context_tokens,
+            workers=ai_workers() if item.backend_type == "ai_pool" else None,
+        )
+        for item in registry.endpoints
+    }
+    policy = RoutingPolicy(registry, settings(tmp_path), FakeHealth(statuses))
+    decision = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation("long-context", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert decision.endpoint.cloud is False
+
+
+def test_auto_prefers_local_unless_cloud_tier_is_required(
+    tmp_path: Path,
+) -> None:
+    registry_value = yaml.safe_load(
+        (ROOT / "config" / "registry.yaml").read_text(encoding="utf-8")
+    )
+    for endpoint in registry_value["endpoints"]:
+        if endpoint["id"] == "cloud-deepseek-v4-flash":
+            endpoint["quality"] = {"general": 100}
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(registry_value, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    registry = Registry(registry_path)
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["deepseek"],
+                "allowed_models": ["deepseek/deepseek-v4-flash"],
+            }
+        }
+    )
+    statuses = {
+        item.id: healthy(
+            item.id,
+            context=item.safe_context_tokens,
+            workers=ai_workers() if item.backend_type == "ai_pool" else None,
+        )
+        for item in registry.endpoints
+    }
+    policy = RoutingPolicy(registry, value, FakeHealth(statuses))
+    local = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    cloud = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "general",
+                "cloud-frontier",
+                1.0,
+                "test",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert local.endpoint.id == "edge-qwen38-flash"
+    assert cloud.endpoint.id == "cloud-deepseek-v4-flash"
+
+
+@pytest.mark.parametrize(
+    ("provider_priority", "expected_node"),
+    [
+        ("local_first", "edge"),
+        ("balanced", "edge"),
+        ("cloud_first", "cloud"),
+    ],
+)
+def test_provider_priority_modes_are_hot_configurable(
+    tmp_path: Path,
+    provider_priority: str,
+    expected_node: str,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["deepseek"],
+                "allowed_models": ["deepseek/deepseek-v4-flash"],
+            },
+            "routing": {"provider_priority": provider_priority},
+        }
+    )
+    statuses = {
+        item.id: healthy(
+            item.id,
+            context=item.safe_context_tokens,
+            workers=ai_workers()
+            if item.backend_type == "ai_pool"
+            else None,
+        )
+        for item in registry.endpoints
+    }
+    decision = run(
+        RoutingPolicy(
+            registry,
+            value,
+            FakeHealth(statuses),
+        ).choose(
+            requested_model="auto",
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="responses",
+                tools=True,
+                parallel_tools=True,
+            ),
+            conversation=None,
+        )
+    )
+    assert decision.endpoint.node == expected_node
+
+
+def test_cloud_first_uses_local_when_cloud_is_disabled(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    value.write_runtime(
+        {"routing": {"provider_priority": "cloud_first"}}
+    )
+    statuses = {
+        item.id: healthy(
+            item.id,
+            context=item.safe_context_tokens,
+            workers=ai_workers()
+            if item.backend_type == "ai_pool"
+            else None,
+        )
+        for item in registry.endpoints
+    }
+    decision = run(
+        RoutingPolicy(
+            registry,
+            value,
+            FakeHealth(statuses),
+        ).choose(
+            requested_model="auto",
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="chat",
+                tools=True,
+            ),
+            conversation=None,
+        )
+    )
+    assert decision.endpoint.cloud is False
+
+
+def test_subscription_frontier_is_a_soft_auto_preference(
+    tmp_path: Path,
+) -> None:
+    registry_value = yaml.safe_load(
+        (ROOT / "config" / "registry.yaml").read_text(encoding="utf-8")
+    )
+    for endpoint in registry_value["endpoints"]:
+        if endpoint["id"] == "codex-pro-gpt-5.6-sol":
+            endpoint["auto_candidate"] = True
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(
+            registry_value,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    registry = Registry(registry_path)
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["openai-codex", "deepseek"],
+                "allowed_models": [
+                    "codex-pro/gpt-5.6-sol",
+                    "deepseek/deepseek-v4-flash",
+                ],
+            }
+        }
+    )
+    statuses = {}
+    for endpoint in registry.endpoints:
+        workers = None
+        if endpoint.backend_type == "ai_pool":
+            workers = ai_workers()
+        elif endpoint.backend_type == "codex_pool":
+            workers = [
+                {
+                    "worker_id": "codex-primary",
+                    "ready": True,
+                    "state": "available",
+                    "safe_context_tokens": 131072,
+                    "api_base": (
+                        "http://127.0.0.1:14010"
+                        "/v1/accounts/primary"
+                    ),
+                }
+            ]
+        statuses[endpoint.id] = healthy(
+            endpoint.id,
+            context=endpoint.safe_context_tokens,
+            workers=workers,
+        )
+    policy = RoutingPolicy(registry, value, FakeHealth(statuses))
+    preferred = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "code",
+                None,
+                0.95,
+                "complex_code",
+                "subscription-frontier",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="chat",
+                tools=True,
+            ),
+            conversation=None,
+        )
+    )
+    fallback = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "code",
+                None,
+                0.95,
+                "complex_code",
+                "subscription-frontier",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="chat",
+                tools=True,
+            ),
+            conversation=None,
+            excluded_endpoint_ids={"codex-pro-gpt-5.6-sol"},
+        )
+    )
+    normal = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert preferred.endpoint.id == "codex-pro-gpt-5.6-sol"
+    assert preferred.deployment_id == "codex-primary"
+    assert preferred.reason == "preferred_tier"
+    assert fallback.endpoint.cloud is False
+    assert normal.endpoint.cloud is False
+
+
+def test_subscription_endpoint_does_not_reserve_usd_budget(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("codex-pro-gpt-5.6-sol")
+    assert endpoint is not None
+    value = settings(tmp_path)
+    budget = CloudBudget(InMemoryStateStore(), value)
+    reservation = run(
+        budget.reserve(
+            endpoint,
+            request_id="subscription-request",
+            prompt_tokens=100000,
+            output_reserve_tokens=10000,
+        )
+    )
+    assert reservation is None
+
+
+def test_auto_tool_request_falls_back_local_when_sol_is_rate_limited(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry_value = yaml.safe_load(
+        (ROOT / "config" / "registry.yaml").read_text(encoding="utf-8")
+    )
+    for endpoint in registry_value["endpoints"]:
+        if endpoint["id"] == "codex-pro-gpt-5.6-sol":
+            endpoint["auto_candidate"] = True
+    registry_path = tmp_path / "registry.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(
+            registry_value,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    registry = Registry(registry_path)
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["openai-codex", "deepseek"],
+                "allowed_models": [
+                    "codex-pro/gpt-5.6-sol",
+                    "deepseek/deepseek-v4-flash",
+                ],
+            }
+        }
+    )
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv(
+        "AI_ROUTER_LITELLM_MASTER_KEY",
+        "internal-key",
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_STATE_KEY",
+        Fernet.generate_key().decode(),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "subscription-fallback.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    statuses = {}
+    for endpoint in registry.endpoints:
+        workers = None
+        if endpoint.backend_type == "ai_pool":
+            workers = ai_workers()
+        elif endpoint.backend_type == "codex_pool":
+            workers = [
+                {
+                    "worker_id": "codex-primary",
+                    "ready": True,
+                    "state": "available",
+                    "safe_context_tokens": 131072,
+                    "api_base": (
+                        "http://127.0.0.1:14010"
+                        "/v1/accounts/primary"
+                    ),
+                }
+            ]
+        statuses[endpoint.id] = healthy(
+            endpoint.id,
+            context=endpoint.safe_context_tokens,
+            workers=workers,
+        )
+    fake_health = FakeHealth(statuses)
+    runtime.health = fake_health
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    calls = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.port == 14010:
+            return httpx.Response(
+                429,
+                json={
+                    "error": {
+                        "message": "quota",
+                        "code": "codex_rate_limited",
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-local",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "LOCAL_FALLBACK_OK",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [
+                    {"role": "user", "content": "Inspect this repository"}
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "git.status",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                            },
+                        },
+                    }
+                ],
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == (
+        "LOCAL_FALLBACK_OK"
+    )
+    assert response.headers["X-1Panel-Route-Node"] != "codex-pro"
+    assert len(calls) == 2
+    assert fake_health.failed == ["codex-primary"]
+    run(runtime.internal_client.aclose())
+
+
+def test_ai_responses_route_binds_a_physical_worker(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    status = healthy(
+        endpoint.id,
+        context=endpoint.safe_context_tokens,
+        workers=ai_workers(),
+    )
+    decision = run(
+        RoutingPolicy(
+            registry,
+            settings(tmp_path),
+            FakeHealth({endpoint.id: status}),
+        ).choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="responses",
+                tools=True,
+            ),
+            conversation=None,
+        )
+    )
+    assert decision.deployment_id == "worker-priority-0"
+    assert decision.upstream_api_base == "http://127.0.0.1:18110/v1"
+    assert decision.native_or_adapter == "native"
+
+
+def test_ai_large_context_excludes_64k_physical_worker(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    workers = [
+        {
+            "worker_id": "worker-64k",
+            "port": 18110,
+            "priority": 0,
+            "ready": True,
+            "state": "available",
+            "safe_context_tokens": 65536,
+        },
+        {
+            "worker_id": "worker-256k",
+            "port": 18111,
+            "priority": 1,
+            "ready": True,
+            "state": "available",
+            "safe_context_tokens": 262144,
+        },
+    ]
+    decision = run(
+        RoutingPolicy(
+            registry,
+            settings(tmp_path),
+            FakeHealth(
+                {
+                    endpoint.id: healthy(
+                        endpoint.id,
+                        context=262144,
+                        workers=workers,
+                    )
+                }
+            ),
+        ).choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("long-context", None, 1.0, "test"),
+            prompt_tokens=110000,
+            output_reserve_tokens=1024,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="chat",
+                tools=True,
+            ),
+            conversation=None,
+        )
+    )
+    assert decision.deployment_candidates == (
+        ("worker-256k", "http://127.0.0.1:18111/v1"),
+    )
+
+
+def test_existing_conversation_does_not_call_evaluator_each_turn() -> None:
+    async def fail_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("evaluator should not be called")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_request))
+    evaluator = TaskEvaluator(
+        {
+            "enabled": True,
+            "model_id": "small-router",
+            "evaluate_task_changes": True,
+        },
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+        client=client,
+    )
+    result = run(
+        evaluator.evaluate(
+            {"messages": [{"role": "user", "content": "continue"}]},
+            headers={},
+            api_kind="chat",
+            prompt_tokens=10,
+            current_task="code",
+            is_new_conversation=False,
+        )
+    )
+    assert result.task == "code"
+    assert result.reason == "conversation_task"
+    run(client.aclose())
+
+
+def test_complex_code_heuristic_prefers_subscription_frontier() -> None:
+    async def fail_request(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("strong complex-code signals should not call the model")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(fail_request))
+    evaluator = TaskEvaluator(
+        {
+            "enabled": True,
+            "model_id": "small-router",
+            "prefer_frontier_for_complex_code": True,
+        },
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+        client=client,
+    )
+    result = run(
+        evaluator.evaluate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": (
+                            "Review a complex multi-file security-sensitive "
+                            "distributed system change."
+                        ),
+                    }
+                ]
+            },
+            headers={},
+            api_kind="chat",
+            prompt_tokens=30,
+            current_task=None,
+            is_new_conversation=True,
+        )
+    )
+    assert result.task == "code"
+    assert result.preferred_tier == "subscription-frontier"
+    assert result.reason == "complex_code_heuristic"
+    run(client.aclose())
+
+
+def test_code_tool_mapping_precedes_long_context_classification() -> None:
+    evaluator = TaskEvaluator(
+        {
+            "enabled": True,
+            "model_id": "small-router",
+            "long_context_threshold_tokens": 65536,
+            "prefer_frontier_for_code_tools": True,
+            "tool_task_mappings": {"code": ["git"]},
+        },
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+    )
+    result = run(
+        evaluator.evaluate(
+            {
+                "messages": [{"role": "user", "content": "Inspect the repository."}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {"name": "git.status", "parameters": {}},
+                    }
+                ],
+            },
+            headers={},
+            api_kind="chat",
+            prompt_tokens=100000,
+            current_task=None,
+            is_new_conversation=True,
+        )
+    )
+    assert result.task == "code"
+    assert result.preferred_tier == "subscription-frontier"
+    assert result.reason == "tool_mapping"
+    run(evaluator.client.aclose())
+
+
+def test_explicit_route_tier_is_validated() -> None:
+    evaluator = TaskEvaluator(
+        {"enabled": False},
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+    )
+    result = run(
+        evaluator.evaluate(
+            {"messages": [{"role": "user", "content": "hello"}]},
+            headers={
+                "x-1panel-route-task": "general",
+                "x-1panel-route-tier": "cloud-frontier",
+            },
+            api_kind="chat",
+            prompt_tokens=10,
+            current_task=None,
+            is_new_conversation=True,
+        )
+    )
+    assert result.required_tier == "cloud-frontier"
+    with pytest.raises(Exception):
+        run(
+            evaluator.evaluate(
+                {"messages": [{"role": "user", "content": "hello"}]},
+                headers={"x-1panel-route-tier": "invalid"},
+                api_kind="chat",
+                prompt_tokens=10,
+                current_task=None,
+                is_new_conversation=True,
+            )
+        )
+    run(evaluator.client.aclose())
+
+
+def test_request_modalities_detects_chat_and_responses_images() -> None:
+    chat = request_modalities(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "describe"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,AA=="},
+                        },
+                    ],
+                }
+            ]
+        },
+        "chat",
+    )
+    responses = request_modalities(
+        {
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,AA==",
+                        },
+                    ],
+                }
+            ]
+        },
+        "responses",
+    )
+    assert chat == {"text", "image"}
+    assert responses == {"text", "image"}
+
+
+def test_validated_vision_endpoints_are_registered_for_images() -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    expected = {
+        "ivan-qwen38-flash-128k",
+        "amd-qwen38-rocmfpx-128k",
+        "codex-pro-gpt-5.6-sol",
+    }
+    actual = {
+        endpoint.id
+        for endpoint in registry.endpoints
+        if "image" in endpoint.modalities
+    }
+    assert actual == expected
+
+
+def test_models_endpoint_reports_vision_capabilities(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=Registry(ROOT / "config" / "registry.yaml"),
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer client-key"},
+        )
+    assert response.status_code == 200
+    models = {
+        item["id"]: item
+        for item in response.json()["data"]
+    }
+    assert models["auto"]["supportsImages"] is True
+    assert "image" in models["auto"]["input_modalities"]
+    assert models[
+        "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
+    ]["supportsImages"] is True
+    assert models[
+        "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+    ]["supportsImages"] is False
+    run(runtime.close())
+
+
+def test_sse_accumulator_handles_split_events() -> None:
+    accumulator = SSEAccumulator()
+    accumulator.feed(b'data: {"id":"chat-1","choices":[{"delta":{"content":"hel')
+    accumulator.feed(b'lo"}}]}\n\n')
+    accumulator.feed(
+        b'data: {"id":"chat-1","choices":[{"delta":{"content":" world"}}]}\n\n'
+    )
+    accumulator.finish()
+    assert accumulator.response_id == "chat-1"
+    assert accumulator.assistant_message() == {
+        "role": "assistant",
+        "content": "hello world",
+    }
+
+
+def test_chat_tool_history_repairs_unique_missing_id() -> None:
+    normalized = normalize_request(
+        {
+            "tools": [{"type": "function", "function": {"name": "search"}}],
+            "messages": [
+                {"role": "user", "content": "find it"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-search",
+                            "type": "function",
+                            "function": {
+                                "name": "search",
+                                "arguments": "{}",
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "name": "search",
+                    "content": "found",
+                },
+            ],
+        },
+        "chat",
+    )
+    assert normalized.repairs == 1
+    assert normalized.body["messages"][2]["tool_call_id"] == "call-search"
+    assert normalized.required.tools is True
+
+
+def test_chat_tool_history_uses_function_name_before_global_match() -> None:
+    normalized = normalize_request(
+        {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": "call-a",
+                            "type": "function",
+                            "function": {"name": "alpha", "arguments": "{}"},
+                        },
+                        {
+                            "id": "call-b",
+                            "type": "function",
+                            "function": {"name": "beta", "arguments": "{}"},
+                        },
+                    ],
+                },
+                {"role": "tool", "name": "beta", "content": "b"},
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-a",
+                    "content": "a",
+                },
+            ]
+        },
+        "chat",
+    )
+    assert normalized.repairs == 1
+    assert normalized.body["messages"][1]["tool_call_id"] == "call-b"
+
+
+def test_chat_tool_history_rejects_parallel_ambiguity() -> None:
+    with pytest.raises(InvalidToolHistoryError) as captured:
+        normalize_request(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-a",
+                                "type": "function",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": "{\"secret\":\"a\"}",
+                                },
+                            },
+                            {
+                                "id": "call-b",
+                                "type": "function",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": "{\"secret\":\"b\"}",
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "name": "search",
+                        "content": "result",
+                    },
+                ]
+            },
+            "chat",
+        )
+    assert captured.value.details == {
+        "item_index": 1,
+        "candidate_count": 2,
+        "reason": "ambiguous_missing_tool_call_id",
+    }
+    assert "secret" not in str(captured.value.details)
+
+
+def test_chat_tool_history_rejects_duplicate_result() -> None:
+    with pytest.raises(InvalidToolHistoryError) as captured:
+        normalize_request(
+            {
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-a",
+                                "type": "function",
+                                "function": {
+                                    "name": "search",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-a",
+                        "content": "first",
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-a",
+                        "content": "duplicate",
+                    },
+                ]
+            },
+            "chat",
+        )
+    assert captured.value.details["reason"] == (
+        "unknown_or_duplicate_tool_result"
+    )
+
+
+def test_responses_tool_history_repairs_unique_call_id() -> None:
+    normalized = normalize_request(
+        {
+            "input": [
+                {
+                    "type": "function_call",
+                    "id": "fc-1",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "output": "done",
+                },
+            ]
+        },
+        "responses",
+    )
+    assert normalized.repairs == 1
+    assert normalized.body["input"][1]["call_id"] == "call-1"
+
+
+def test_sse_accumulator_rebuilds_chat_tool_calls() -> None:
+    accumulator = SSEAccumulator("chat")
+    accumulator.feed(
+        (
+            'data: {"id":"chat-tools","choices":[{"delta":{"tool_calls":'
+            '[{"index":0,"id":"call-1","type":"function","function":'
+            '{"name":"lookup","arguments":"{\\\"city\\\":"}}]}}]}\n\n'
+        ).encode()
+    )
+    accumulator.feed(
+        (
+            'data: {"id":"chat-tools","choices":[{"delta":{"tool_calls":'
+            '[{"index":0,"function":{"arguments":"\\\"Paris\\\"}"}}]}}]}\n\n'
+        ).encode()
+    )
+    accumulator.finish()
+    assert accumulator.assistant_items() == [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{\"city\":\"Paris\"}",
+                    },
+                }
+            ],
+        }
+    ]
+
+
+def test_sse_accumulator_rebuilds_responses_function_call() -> None:
+    accumulator = SSEAccumulator("responses")
+    accumulator.feed(
+        (
+            'data: {"type":"response.output_item.added","output_index":0,'
+            '"item":{"type":"function_call","id":"fc-1","call_id":"call-1",'
+            '"name":"lookup","arguments":""}}\n\n'
+        ).encode()
+    )
+    accumulator.feed(
+        (
+            'data: {"type":"response.function_call_arguments.delta",'
+            '"item_id":"fc-1","output_index":0,"delta":"{\\\"city\\\":"}\n\n'
+        ).encode()
+    )
+    accumulator.feed(
+        (
+            'data: {"type":"response.function_call_arguments.delta",'
+            '"item_id":"fc-1","output_index":0,"delta":"\\\"Paris\\\"}"}\n\n'
+        ).encode()
+    )
+    accumulator.finish()
+    assert accumulator.assistant_items() == [
+        {
+            "type": "function_call",
+            "id": "fc-1",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": "{\"city\":\"Paris\"}",
+        }
+    ]
+
+
+def test_response_history_preserves_native_function_call_items() -> None:
+    payload = json.dumps(
+        {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc-1",
+                    "call_id": "call-1",
+                    "name": "lookup",
+                    "arguments": "{}",
+                }
+            ]
+        }
+    ).encode()
+    assert assistant_items_from_response(payload, "responses") == [
+        {
+            "type": "function_call",
+            "id": "fc-1",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": "{}",
+        }
+    ]
+
+
+def test_history_identity_includes_tool_call_ids() -> None:
+    first = [
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call-a",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": "{}"},
+                }
+            ],
+        }
+    ]
+    second = json.loads(json.dumps(first))
+    second[0]["tool_calls"][0]["id"] = "call-b"
+    assert history_identities(first) != history_identities(second)
+
+
+def test_compaction_recent_window_keeps_tool_transaction_atomic() -> None:
+    compactor = ContextCompactor(
+        SimpleTokenCounter(),
+        CapsuleCipher(Fernet.generate_key().decode()),
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+        model_id="compactor",
+    )
+    messages = [
+        {"role": "user", "content": "x" * 6000}
+        for _index in range(5)
+    ]
+    messages.extend(
+        [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call-a",
+                        "type": "function",
+                        "function": {"name": "a", "arguments": "{}"},
+                    },
+                    {
+                        "id": "call-b",
+                        "type": "function",
+                        "function": {"name": "b", "arguments": "{}"},
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-a",
+                "content": "a",
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-b",
+                "content": "b",
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    )
+    older, recent = compactor._partition_recent(messages, 2048, "chat")
+    assert [item.get("role") for item in recent[-4:]] == [
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+    ]
+    assert not any(item.get("role") == "assistant" for item in older)
+    run(compactor.client.aclose())
+
+
+def test_endpoint_capability_matrix_is_protocol_aware() -> None:
+    capabilities = EndpointCapabilities(
+        chat=True,
+        responses="native",
+        tools="parallel",
+        tool_choice=True,
+        structured_output=("json_object", "json_schema"),
+        streaming=True,
+    )
+    assert capabilities.supports(
+        RequestCapabilities(
+            protocol="responses",
+            tools=True,
+            parallel_tools=True,
+            tool_choice=True,
+            structured_output="json_schema",
+            streaming=True,
+        )
+    )
+    assert not EndpointCapabilities(
+        chat=True,
+        responses="none",
+    ).supports(RequestCapabilities(protocol="responses"))
+
+
+def test_local_responses_format_is_mirrored_for_backend_compatibility() -> None:
+    payload = {
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "result",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "status": {"type": "string"},
+                    },
+                },
+            }
+        }
+    }
+    _mirror_responses_format(payload)
+    assert payload["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "result",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string"},
+                },
+            },
+            "strict": True,
+        },
+    }
+
+
+def test_capsule_cipher_rejects_wrong_key() -> None:
+    first = CapsuleCipher(Fernet.generate_key().decode())
+    second = CapsuleCipher(Fernet.generate_key().decode())
+    encrypted = first.encrypt([{"role": "user", "content": "state"}])
+    with pytest.raises(Exception):
+        second.decrypt(encrypted)
+
+
+def test_cloud_budget_reserves_commits_and_caps(tmp_path: Path) -> None:
+    value = settings(tmp_path)
+    runtime_override = value.value
+    runtime_override["cloud"] = {
+        "enabled": True,
+        "auto_escalate": True,
+        "monthly_budget": 0.001,
+        "allowed_providers": ["test"],
+        "allowed_models": ["cloud/test"],
+    }
+    value.write_runtime(runtime_override)
+    store = InMemoryStateStore()
+    budget = CloudBudget(store, value)
+    endpoint = Endpoint(
+        id="cloud-test",
+        public_model="cloud/test",
+        provider_model="cloud/test",
+        api_base="https://example.invalid/v1",
+        node="cloud",
+        role="responder",
+        tier="cloud-frontier",
+        tier_rank=40,
+        modalities=("text",),
+        tasks=("general",),
+        safe_context_tokens=1000000,
+        configured_context_tokens=1000000,
+        max_concurrency=10,
+        backend_type="openai",
+        health_url="https://example.invalid/health",
+        cloud=True,
+        quality={"general": 100},
+        metadata={
+            "provider": "test",
+            "input_cost_per_million_usd": 1,
+            "output_cost_per_million_usd": 1,
+        },
+    )
+    reservation = run(
+        budget.reserve(
+            endpoint,
+            request_id="request-1",
+            prompt_tokens=400,
+            output_reserve_tokens=400,
+        )
+    )
+    run(budget.commit(reservation))
+    with pytest.raises(Exception):
+        run(
+            budget.reserve(
+                endpoint,
+                request_id="request-2",
+                prompt_tokens=400,
+                output_reserve_tokens=400,
+            )
+        )
+
+
+def test_public_api_explicit_model_proxy(tmp_path: Path, monkeypatch) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("edge-qwen38-flash")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == endpoint.provider_model
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "ok"
+    assert response.headers["x-1panel-route-node"] == "edge"
+    assert response.headers["x-1panel-conversation-mode"] == "inferred"
+    assert response.headers["x-1panel-conversation-id"].startswith(
+        "inferred-"
+    )
+    run(runtime.internal_client.aclose())
+
+
+def test_workbuddy_missing_tool_call_id_is_repaired_and_stays_local(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers()
+                if endpoint.backend_type == "ai_pool"
+                else None,
+            )
+            for endpoint in registry.endpoints
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == (
+            "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+        )
+        assert payload["messages"][2]["tool_call_id"] == "call-lookup"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-workbuddy",
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "LOCAL_TOOL_CHAIN_OK",
+                        }
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {},
+                            },
+                        },
+                    }
+                ],
+                "messages": [
+                    {"role": "user", "content": "run lookup"},
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": "call-lookup",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "name": "lookup",
+                        "content": "{\"ok\":true}",
+                    },
+                ],
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["x-1panel-route-node"] == "edge"
+    assert response.headers["x-1panel-tool-history-repaired"] == "1"
+    assert response.headers["x-1panel-protocol"] == "chat"
+    run(runtime.internal_client.aclose())
+
+
+def test_workbuddy_ambiguous_tool_history_is_rejected_before_upstream(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    called = False
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        raise AssertionError("ambiguous history must not reach upstream")
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": "call-a",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": "{}",
+                                },
+                            },
+                            {
+                                "id": "call-b",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup",
+                                    "arguments": "{}",
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "name": "lookup",
+                        "content": "result",
+                    },
+                ],
+            },
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_tool_history"
+    assert response.json()["error"]["details"]["candidate_count"] == 2
+    assert called is False
+    run(runtime.internal_client.aclose())
+
+
+def test_auto_spills_busy_edge_to_next_local_without_cooldown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "routing": {
+                "new_request_capacity_wait_seconds": 0,
+            }
+        }
+    )
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    statuses = {
+        endpoint.id: healthy(
+            endpoint.id,
+            context=endpoint.safe_context_tokens,
+            workers=ai_workers()
+            if endpoint.backend_type == "ai_pool"
+            else None,
+        )
+        for endpoint in registry.endpoints
+    }
+    fake_health = FakeHealth(statuses)
+    runtime.health = fake_health
+    runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
+    edge = registry.by_id("edge-qwen38-flash")
+    assert edge is not None
+    holder = run(runtime.scheduler.begin_request(None))
+    run(
+        runtime.scheduler.acquire_deployment(
+            holder,
+            edge.id,
+            "edge-holder",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+    )
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == (
+            "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
+        )
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-spill",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "SPILLED_TO_AI",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["x-1panel-route-node"] == "ivan"
+    assert response.headers["x-1panel-route-reason"] == "capacity_spillover"
+    assert response.headers["x-1panel-capacity-attempts"] == "2"
+    assert float(response.headers["x-1panel-queue-wait-ms"]) < 1000
+    assert fake_health.failed == []
+    run(holder.release())
+    run(runtime.internal_client.aclose())
+
+
+def test_explicit_busy_model_returns_429_without_cooldown(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "routing": {
+                "affinity_capacity_wait_seconds": 0.01,
+            }
+        }
+    )
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    edge = registry.by_id("edge-qwen38-flash")
+    assert edge is not None
+    fake_health = FakeHealth(
+        {
+            edge.id: healthy(
+                edge.id,
+                context=edge.safe_context_tokens,
+            )
+        }
+    )
+    runtime.health = fake_health
+    runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
+    holder = run(runtime.scheduler.begin_request(None))
+    run(
+        runtime.scheduler.acquire_deployment(
+            holder,
+            edge.id,
+            "edge-holder",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": edge.public_model,
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "model_capacity_busy"
+    assert response.headers["retry-after"] == "1"
+    assert fake_health.failed == []
+    run(holder.release())
+    run(runtime.internal_client.aclose())
+
+
+def test_auto_uses_cloud_after_all_local_capacity_is_busy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["deepseek"],
+                "allowed_models": ["deepseek/deepseek-v4-flash"],
+            },
+            "routing": {
+                "new_request_capacity_wait_seconds": 0,
+                "all_local_busy_policy": "cloud_or_429",
+            },
+        }
+    )
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    statuses = {
+        endpoint.id: healthy(
+            endpoint.id,
+            context=endpoint.safe_context_tokens,
+            workers=ai_workers()
+            if endpoint.backend_type == "ai_pool"
+            else None,
+        )
+        for endpoint in registry.endpoints
+    }
+    fake_health = FakeHealth(statuses)
+    runtime.health = fake_health
+    runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
+    edge = registry.by_id("edge-qwen38-flash")
+    assert edge is not None
+    holders = []
+    for deployment_id in (
+        edge.id,
+        "ivan-qwen38-flash-128k",
+        "amd-qwen38-rocmfpx-128k",
+        "worker-priority-0",
+        "worker-priority-1",
+    ):
+        holder = run(runtime.scheduler.begin_request(None))
+        run(
+            runtime.scheduler.acquire_deployment(
+                holder,
+                deployment_id,
+                f"holder-{deployment_id}",
+                timeout_seconds=0.2,
+                affinity_priority=False,
+            )
+        )
+        holders.append(holder)
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == "cloud-deepseek-v4-flash"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-cloud-fallback",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "CLOUD_CAPACITY_OK",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["x-1panel-route-node"] == "cloud"
+    assert (
+        response.headers["x-1panel-route-reason"]
+        == "cloud_capacity_fallback"
+    )
+    assert response.headers["x-1panel-capacity-attempts"] == "5"
+    assert fake_health.failed == []
+    for holder in holders:
+        run(holder.release())
+    run(runtime.internal_client.aclose())
+
+
+def test_auto_returns_429_when_all_local_busy_and_cloud_disabled(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        registry = Registry(ROOT / "config" / "registry.yaml")
+        value = settings(tmp_path)
+        monkeypatch.setenv(
+            "AI_ROUTER_LITELLM_MASTER_KEY",
+            "internal-key",
+        )
+        monkeypatch.setenv(
+            "AI_ROUTER_STATE_KEY",
+            Fernet.generate_key().decode(),
+        )
+        monkeypatch.setenv(
+            "AI_ROUTER_AUDIT_PATH",
+            str(tmp_path / "local-busy-audit.jsonl"),
+        )
+        runtime = build_runtime(
+            settings=value,
+            registry=registry,
+            store=InMemoryStateStore(),
+            token_counter=SimpleTokenCounter(),
+        )
+        runtime.health = FakeHealth(
+            {
+                endpoint.id: healthy(
+                    endpoint.id,
+                    context=endpoint.safe_context_tokens,
+                    workers=ai_workers()
+                    if endpoint.backend_type == "ai_pool"
+                    else None,
+                )
+                for endpoint in registry.endpoints
+            }
+        )
+        runtime.policy = RoutingPolicy(
+            registry,
+            runtime.settings,
+            runtime.health,
+        )
+        holders = []
+        for deployment_id in (
+            "edge-qwen38-flash",
+            "ivan-qwen38-flash-128k",
+            "amd-qwen38-rocmfpx-128k",
+            "worker-priority-0",
+            "worker-priority-1",
+        ):
+            holder = await runtime.scheduler.begin_request(None)
+            await runtime.scheduler.acquire_deployment(
+                holder,
+                deployment_id,
+                f"holder-{deployment_id}",
+                timeout_seconds=0.2,
+                affinity_priority=False,
+            )
+            holders.append(holder)
+        lease = await runtime.scheduler.begin_request(None)
+        try:
+            with pytest.raises(AllLocalCapacityBusyError):
+                await _acquire_route_capacity(
+                    runtime,
+                    request_id="all-local-busy",
+                    requested_model="auto",
+                    evaluation=Evaluation("general", None, 1, "test"),
+                    prompt_tokens=100,
+                    output_reserve_tokens=16,
+                    modalities={"text"},
+                    has_tools=True,
+                    required_capabilities=RequestCapabilities(
+                        protocol="chat",
+                        tools=True,
+                    ),
+                    conversation=None,
+                    body={
+                        "model": "auto",
+                        "messages": [
+                            {"role": "user", "content": "hello"}
+                        ],
+                    },
+                    api_kind="chat",
+                    lease=lease,
+                    excluded_endpoints=set(),
+                    excluded_deployments=set(),
+                    capacity_attempts=0,
+                    queue_wait_ms=0,
+                )
+        finally:
+            await lease.release()
+            for holder in holders:
+                await holder.release()
+            await runtime.internal_client.aclose()
+
+    run(scenario())
+
+
+def test_eight_parallel_auto_capacity_selections_stay_local(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        registry = Registry(ROOT / "config" / "registry.yaml")
+        value = settings(tmp_path)
+        value.write_runtime(
+            {
+                "cloud": {
+                    "enabled": True,
+                    "auto_escalate": True,
+                    "monthly_budget": 5,
+                    "allowed_providers": ["deepseek"],
+                    "allowed_models": ["deepseek/deepseek-v4-flash"],
+                },
+                "routing": {
+                    "new_request_capacity_wait_seconds": 0,
+                    "all_local_busy_policy": "cloud_or_429",
+                },
+            }
+        )
+        monkeypatch.setenv(
+            "AI_ROUTER_LITELLM_MASTER_KEY",
+            "internal-key",
+        )
+        monkeypatch.setenv(
+            "AI_ROUTER_STATE_KEY",
+            Fernet.generate_key().decode(),
+        )
+        monkeypatch.setenv(
+            "AI_ROUTER_AUDIT_PATH",
+            str(tmp_path / "parallel-audit.jsonl"),
+        )
+        runtime = build_runtime(
+            settings=value,
+            registry=registry,
+            store=InMemoryStateStore(),
+            token_counter=SimpleTokenCounter(),
+        )
+        statuses = {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=six_ai_workers()
+                if endpoint.backend_type == "ai_pool"
+                else None,
+            )
+            for endpoint in registry.endpoints
+        }
+        runtime.health = FakeHealth(statuses)
+        runtime.policy = RoutingPolicy(
+            registry,
+            runtime.settings,
+            runtime.health,
+        )
+
+        async def select(index: int):
+            lease = await runtime.scheduler.begin_request(None)
+            result = await _acquire_route_capacity(
+                runtime,
+                request_id=f"parallel-{index}",
+                requested_model="auto",
+                evaluation=Evaluation("general", None, 1, "test"),
+                prompt_tokens=100,
+                output_reserve_tokens=16,
+                modalities={"text"},
+                has_tools=False,
+                required_capabilities=RequestCapabilities(
+                    protocol="chat",
+                ),
+                conversation=None,
+                body={
+                    "model": "auto",
+                    "messages": [
+                        {"role": "user", "content": f"request {index}"}
+                    ],
+                },
+                api_kind="chat",
+                lease=lease,
+                excluded_endpoints=set(),
+                excluded_deployments=set(),
+                capacity_attempts=0,
+                queue_wait_ms=0,
+            )
+            return lease, result
+
+        selections = await asyncio.gather(
+            *(select(index) for index in range(8))
+        )
+        nodes = Counter(
+            result[0].endpoint.node
+            for _lease, result in selections
+        )
+        assert nodes == Counter({"ai": 6, "edge": 1, "ivan": 1})
+        ai_deployments = {
+            result[0].deployment_id
+            for _lease, result in selections
+            if result[0].endpoint.node == "ai"
+        }
+        assert ai_deployments == {
+            f"worker-{index}" for index in range(6)
+        }
+        for lease, result in selections:
+            await runtime.budget.release(result[3])
+            await lease.release()
+        await runtime.internal_client.aclose()
+
+    run(scenario())
+
+
+def test_cloud_thinking_parameter_is_forwarded_via_extra_body(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("cloud-deepseek-v4-flash")
+    assert endpoint is not None
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["deepseek"],
+                "allowed_models": [endpoint.public_model],
+            }
+        }
+    )
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert "thinking" not in payload
+        assert payload["extra_body"]["thinking"] == {"type": "disabled"}
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-cloud",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "CLOUD_OK",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "messages": [{"role": "user", "content": "hello"}],
+                "thinking": {"type": "disabled"},
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == "CLOUD_OK"
+    run(runtime.internal_client.aclose())
+
+
+def test_chat_model_migration_preserves_full_history_without_compaction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("edge-qwen38-flash")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    body = {
+        "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "answer"},
+            {"role": "user", "content": "second"},
+        ]
+    }
+    decision = RouteDecision(
+        endpoint=endpoint,
+        requested_model="auto",
+        task="general",
+        prompt_tokens=100,
+        output_reserve_tokens=16,
+        reason="affinity_spillover",
+        affinity="migrated",
+        score=1,
+        migration=True,
+    )
+    routed, capsule = run(
+        _prepare_routed_body(
+            runtime,
+            body,
+            api_kind="chat",
+            decision=decision,
+            request_id="migration-test",
+        )
+    )
+    assert routed == body
+    assert capsule is None
+    run(runtime.internal_client.aclose())
+
+
+def test_chat_history_infers_same_conversation_and_worker(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(audit_path))
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers()
+                if endpoint.backend_type == "ai_pool"
+                else None,
+            )
+            for endpoint in registry.endpoints
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        assert payload["model"] == (
+            "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+        )
+        if calls == 1:
+            assert len(payload["messages"]) == 1
+            answer = "CACHE-ANCHOR"
+            cached_tokens = 0
+        else:
+            assert len(payload["messages"]) == 3
+            answer = "SECOND"
+            cached_tokens = 60
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": f"chatcmpl-{calls}",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": answer,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 10,
+                    "total_tokens": 110,
+                    "prompt_tokens_details": {
+                        "cached_tokens": cached_tokens,
+                    },
+                },
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "first"}],
+                "max_tokens": 16,
+            },
+        )
+        assert first.status_code == 200
+        conversation_id = first.headers["x-1panel-conversation-id"]
+        second = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [
+                    {"role": "user", "content": "first"},
+                    {
+                        "role": "assistant",
+                        "content": "CACHE-ANCHOR",
+                    },
+                    {"role": "user", "content": "second"},
+                ],
+                "max_tokens": 16,
+            },
+        )
+    assert second.status_code == 200
+    assert second.headers["x-1panel-conversation-id"] == conversation_id
+    assert second.headers["x-1panel-conversation-mode"] == "inferred"
+    assert second.headers["x-1panel-affinity"] == "hit"
+    assert second.headers["x-1panel-route-deployment"] == (
+        first.headers["x-1panel-route-deployment"]
+    )
+    events = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    completed = [
+        event
+        for event in events
+        if event["event"] == "request_completed"
+    ]
+    assert completed[-1]["cached_prompt_tokens"] == 60
+    assert completed[-1]["cache_hit_ratio"] == 0.6
+    run(runtime.internal_client.aclose())
+
+
+def test_cache_metrics_accepts_common_usage_shapes() -> None:
+    assert _cache_metrics(
+        json.dumps(
+            {
+                "usage": {
+                    "prompt_tokens": 100,
+                    "prompt_tokens_details": {"cached_tokens": 75},
+                }
+            }
+        ).encode(),
+        None,
+    ) == (75, 0.75)
+    assert _cache_metrics(
+        None,
+        {
+            "input_tokens": 200,
+            "cache_read_input_tokens": 120,
+        },
+    ) == (120, 0.6)
+    assert _cache_metrics(
+        json.dumps({"usage": {"prompt_tokens": 100}}).encode(),
+        None,
+        cached_prompt_tokens_fallback=64,
+    ) == (64, 0.64)
+
+
+def test_vllm_prefix_cache_delta_uses_native_counters(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("edge-qwen38-flash")
+    assert endpoint is not None
+    fake_health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+        },
+        prefix_counters={
+            endpoint.id: [
+                {"queries": 1080, "hits": 564},
+            ]
+        },
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = fake_health
+    decision = RouteDecision(
+        endpoint=endpoint,
+        requested_model=endpoint.public_model,
+        task="general",
+        prompt_tokens=100,
+        output_reserve_tokens=16,
+        reason="explicit_model",
+        affinity="explicit",
+        score=1,
+    )
+    assert run(
+        _prefix_cache_delta(
+            runtime,
+            decision,
+            {"queries": 1000, "hits": 500},
+        )
+    ) == 64
+    run(runtime.internal_client.aclose())
+
+
+def test_responses_previous_id_rebuilds_encrypted_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("edge-qwen38-flash")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
+    calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        assert "previous_response_id" not in payload
+        if calls == 1:
+            assert payload["input"] == "first question"
+            response_id = "resp-first"
+            answer = "first answer"
+        else:
+            assert len(payload["input"]) == 3
+            assert payload["input"][0]["role"] == "user"
+            assert payload["input"][1]["role"] == "assistant"
+            assert payload["input"][2]["role"] == "user"
+            response_id = "resp-second"
+            answer = "second answer"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": response_id,
+                "object": "response",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": answer}
+                        ],
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/responses",
+            headers={
+                "Authorization": "Bearer client-key",
+                "X-1Panel-Conversation-ID": "conversation-1",
+            },
+            json={
+                "model": endpoint.public_model,
+                "input": "first question",
+                "max_output_tokens": 16,
+            },
+        )
+        assert first.status_code == 200
+        second = client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "previous_response_id": "resp-first",
+                "input": "second question",
+                "max_output_tokens": 16,
+            },
+        )
+    assert second.status_code == 200
+    assert calls == 2
+    run(runtime.internal_client.aclose())
+
+
+def test_responses_previous_id_repairs_function_call_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("edge-qwen38-flash")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "responses-tools-audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        if calls == 1:
+            assert payload["input"] == "lookup weather"
+            return httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                json={
+                    "id": "resp-tool-first",
+                    "object": "response",
+                    "output": [
+                        {
+                            "type": "function_call",
+                            "id": "fc-weather",
+                            "call_id": "call-weather",
+                            "name": "weather",
+                            "arguments": "{\"city\":\"Paris\"}",
+                        }
+                    ],
+                },
+            )
+        assert "previous_response_id" not in payload
+        assert [item["type"] for item in payload["input"]] == [
+            "message",
+            "function_call",
+            "function_call_output",
+        ]
+        assert payload["input"][2]["call_id"] == "call-weather"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "resp-tool-second",
+                "object": "response",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Weather is clear.",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    tools = [
+        {
+            "type": "function",
+            "name": "weather",
+            "description": "Get weather",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                },
+            },
+        }
+    ]
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/responses",
+            headers={
+                "Authorization": "Bearer client-key",
+                "X-1Panel-Conversation-ID": "responses-tool-chain",
+            },
+            json={
+                "model": endpoint.public_model,
+                "input": "lookup weather",
+                "tools": tools,
+            },
+        )
+        assert first.status_code == 200
+        second = client.post(
+            "/v1/responses",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "previous_response_id": "resp-tool-first",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "output": "{\"temperature\":20}",
+                    }
+                ],
+                "tools": tools,
+            },
+        )
+    assert second.status_code == 200
+    assert second.headers["x-1panel-tool-history-repaired"] == "1"
+    assert second.headers["x-1panel-protocol"] == "responses"
+    assert second.headers["x-1panel-protocol-mode"] == "native"
+    assert calls == 2
+    run(runtime.internal_client.aclose())
+
+
+def test_control_api_rejects_invalid_runtime_settings(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    app = create_control_app(runtime)
+    with TestClient(app) as client:
+        unauthorized = client.get("/api/settings")
+        assert unauthorized.status_code == 401
+        current = client.get(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+        assert current.status_code == 200
+        payload = current.json()["settings"]
+        payload["routing"]["provider_priority"] = "balanced"
+        valid = client.put(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+            json=payload,
+        )
+        assert valid.status_code == 200
+        assert (
+            valid.json()["settings"]["routing"]["provider_priority"]
+            == "balanced"
+        )
+        payload = valid.json()["settings"]
+        payload["routing"]["weights"]["quality"] = 1
+        invalid = client.put(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+            json=payload,
+        )
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "invalid_settings"
+
+
+def test_control_dashboard_aggregates_runtime_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["deepseek"],
+                "allowed_models": ["deepseek/deepseek-v4-flash"],
+            }
+        }
+    )
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    store = InMemoryStateStore()
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=store,
+        token_counter=SimpleTokenCounter(),
+    )
+    statuses = {}
+    for endpoint in registry.endpoints:
+        statuses[endpoint.id] = healthy(
+            endpoint.id,
+            context=endpoint.safe_context_tokens,
+            workers=ai_workers() if endpoint.node == "ai" else None,
+        )
+    runtime.health = FakeHealth(statuses)
+    runtime.audit.write(
+        "request_started",
+        request_id="running-request",
+        client_id="1panel",
+        requested_model="auto",
+        selected_model="model-a",
+        endpoint_id="endpoint-a",
+        deployment_id="worker-a",
+        node="ai",
+        task="general",
+        reason="quality_score",
+        affinity="new",
+        prompt_tokens=100,
+        output_reserve_tokens=32,
+        attempts=1,
+    )
+    runtime.audit.write(
+        "request_completed",
+        request_id="completed-request",
+        client_id="1panel",
+        requested_model="auto",
+        selected_model="model-b",
+        endpoint_id="endpoint-b",
+        deployment_id="worker-b",
+        node="edge",
+        task="code",
+        reason="quality_score",
+        affinity="hit",
+        prompt_tokens=200,
+        output_reserve_tokens=64,
+        attempts=1,
+        capacity_attempts=2,
+        queue_wait_ms=12.5,
+        status_code=200,
+        latency_ms=250.5,
+    )
+    run(
+        store.set_json(
+            f"router:cloud-budget:{datetime.now(timezone.utc):%Y-%m}",
+            {"spent_usd": 1.25, "reservations": {}},
+        )
+    )
+
+    app = create_control_app(runtime)
+    with TestClient(app) as client:
+        unauthorized = client.get("/api/dashboard")
+        assert unauthorized.status_code == 401
+        response = client.get(
+            "/api/dashboard",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["summary"]["healthy_endpoints"] == 6
+    assert payload["summary"]["ready_workers"] == 2
+    assert payload["summary"]["active_requests"] == 1
+    assert payload["summary"]["success_rate"] == 1
+    assert payload["cloud_budget"]["spent_usd"] == 1.25
+    assert payload["requests"][0]["request_id"] == "completed-request"
+    assert payload["requests"][0]["capacity_attempts"] == 2
+    assert payload["requests"][0]["queue_wait_ms"] == 12.5
+    assert payload["requests"][1]["status"] == "running"
+
+
+class CharacterTokenCounter:
+    def count_request(self, body: dict, _api_kind: str) -> int:
+        return len(
+            json.dumps(body.get("messages", []), ensure_ascii=False)
+        )
+
+
+def test_pilot_manifest_is_reproducible_and_expands_long_context() -> None:
+    first = validate_manifest(pilot_manifest())
+    second = validate_manifest(pilot_manifest())
+    assert first["manifest_hash"] == second["manifest_hash"]
+    assert len(first["cases"]) == 20
+    long_case = next(
+        item for item in first["cases"]
+        if item["task"] == "long-context"
+    )
+    counter = CharacterTokenCounter()
+    first_body, _ = expand_case(
+        long_case,
+        seed=first["seed"],
+        token_counter=counter,
+    )
+    second_body, _ = expand_case(
+        long_case,
+        seed=first["seed"],
+        token_counter=counter,
+    )
+    assert first_body == second_body
+    assert counter.count_request(first_body, "chat") <= 70000
+    assert "authoritative-record:" in first_body["messages"][0]["content"]
+
+
+def test_pilot_oracle_accepts_json_code_fences() -> None:
+    case = {
+        "grading": {
+            "mode": "json_subset",
+            "expected": {"answer": 42},
+            "rubric": "Exact integer answer.",
+        }
+    }
+    assert oracle_result(case, "```json\n{\"answer\": 42}\n```") is True
+
+
+def test_pilot_anonymization_and_terra_finalize(tmp_path: Path) -> None:
+    manifest = validate_manifest(pilot_manifest())
+    run_dir = tmp_path / "pilot-run"
+    run_dir.mkdir()
+    raw = {
+        "benchmark_version": 2,
+        "run_type": "pilot",
+        "run_id": run_dir.name,
+        "manifest_hash": manifest["manifest_hash"],
+        "seed": manifest["seed"],
+        "models": ["model-a", "model-b"],
+        "anonymization_map": {"A": "model-b", "B": "model-a"},
+        "projected_cloud_cost_usd": 0,
+        "results": [
+            {
+                "case_id": "general-0",
+                "task": "general",
+                "turn": 1,
+                "model": "model-a",
+                "status_code": 200,
+                "content": "{\"answer\":\"ok\"}",
+                "error": None,
+                "oracle_passed": True,
+            },
+            {
+                "case_id": "general-0",
+                "task": "general",
+                "turn": 1,
+                "model": "model-b",
+                "status_code": 200,
+                "content": "{\"answer\":\"ok\"}",
+                "error": None,
+                "oracle_passed": True,
+            },
+        ],
+    }
+    write_json(run_dir / "raw-results.json", raw)
+    anonymous = anonymize_results(raw)
+    write_json(run_dir / "anonymous-results.json", anonymous)
+    assert "model-a" not in json.dumps(anonymous)
+    verdict = {
+        "judge_model": "gpt-5.6-terra",
+        "manifest_hash": manifest["manifest_hash"],
+        "confidence": 0.6,
+        "case_reviews": [
+            {
+                "case_id": "general-0",
+                "candidate": "A",
+                "score": 80,
+                "valid_case": True,
+                "reason": "valid",
+            }
+        ],
+        "candidate_scores": {
+            "A": {
+                "general": 80,
+                "code": 70,
+                "batch": 75,
+                "long-context": 85,
+            },
+            "B": {
+                "general": 90,
+                "code": 85,
+                "batch": 80,
+                "long-context": 88,
+            },
+        },
+        "routing_recommendation": {
+            task: ["B", "A"]
+            for task in ("general", "code", "batch", "long-context")
+        },
+        "judge_notes": ["pilot only"],
+    }
+    recommendation = finalize_verdict(
+        run_dir=run_dir,
+        verdict=verdict,
+    )
+    assert recommendation["apply_to_production"] is False
+    assert recommendation["status"] == "provisional"
+    assert recommendation["routing_recommendation"]["general"] == [
+        "model-a",
+        "model-b",
+    ]

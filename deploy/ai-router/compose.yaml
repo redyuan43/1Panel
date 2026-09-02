@@ -1,0 +1,164 @@
+name: 1panel-ai-router
+
+x-router-environment: &router-environment
+  AI_ROUTER_DEFAULTS_PATH: /app/config/defaults.yaml
+  AI_ROUTER_REGISTRY_PATH: /app/config/registry.yaml
+  AI_ROUTER_RUNTIME_SETTINGS_PATH: /data/settings.yaml
+  AI_ROUTER_AUDIT_PATH: /data/audit/router.jsonl
+  AI_ROUTER_TOKENIZER_PATH: /models/tokenizer
+  AI_ROUTER_REDIS_URL: redis://127.0.0.1:16379/0
+  AI_ROUTER_LITELLM_URL: http://127.0.0.1:14000
+  AI_ROUTER_STATE_BACKEND: redis
+
+x-host-service: &host-service
+  build:
+    context: .
+  env_file:
+    - path: /opt/1panel/ai-router/router.env
+      required: true
+  environment: *router-environment
+  volumes:
+    - /opt/1panel/ai-router:/data
+    - /opt/1panel/ai-router/tokenizer:/models/tokenizer:ro
+  restart: unless-stopped
+  network_mode: host
+
+services:
+  codex-adapter:
+    <<: *host-service
+    environment:
+      <<: *router-environment
+      HTTP_PROXY: http://127.0.0.1:10808/
+      HTTPS_PROXY: http://127.0.0.1:10808/
+      NO_PROXY: localhost,127.0.0.0/8,::1
+    command:
+      - uvicorn
+      - ai_router.codex_adapter:app
+      - --host
+      - 127.0.0.1
+      - --port
+      - "14010"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - 127.0.0.1
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:14010/health', timeout=5)
+      interval: 10s
+      timeout: 6s
+      retries: 30
+
+  redis:
+    image: redis:7.4.2-alpine
+    user: "10001:10001"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --save
+      - "60"
+      - "1"
+    volumes:
+      - /opt/1panel/ai-router/redis:/data
+    ports:
+      - 127.0.0.1:16379:6379
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  litellm:
+    <<: *host-service
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        python -m ai_router.bootstrap_litellm --output /data/litellm.yaml
+        && exec litellm --config /data/litellm.yaml --host 127.0.0.1 --port 14000
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:14000/health/readiness', timeout=2)
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  router-api-local:
+    <<: *host-service
+    command:
+      - uvicorn
+      - ai_router.api:app
+      - --host
+      - 127.0.0.1
+      - --port
+      - "4000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    depends_on:
+      redis:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+      codex-adapter:
+        condition: service_started
+
+  router-api-tail:
+    <<: *host-service
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        exec uvicorn ai_router.api:app
+        --host "$$AI_ROUTER_TAILSCALE_IP" --port 4000
+        --proxy-headers --forwarded-allow-ips "*"
+    depends_on:
+      redis:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+      codex-adapter:
+        condition: service_started
+
+  router-control-local:
+    <<: *host-service
+    command:
+      - uvicorn
+      - ai_router.control:app
+      - --host
+      - 127.0.0.1
+      - --port
+      - "4001"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  router-control-tail:
+    <<: *host-service
+    command:
+      - /bin/sh
+      - -c
+      - >-
+        exec uvicorn ai_router.control:app
+        --host "$$AI_ROUTER_TAILSCALE_IP" --port 4001
+        --proxy-headers --forwarded-allow-ips "*"
+    depends_on:
+      redis:
+        condition: service_healthy
