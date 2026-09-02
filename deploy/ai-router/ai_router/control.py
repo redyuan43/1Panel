@@ -122,7 +122,186 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     @app.get("/api/endpoints")
     async def endpoints(request: Request) -> dict[str, Any]:
         current = _authorized_runtime(request)
+        await current.reload_endpoint_config()
         return {"endpoints": await _endpoint_values(current)}
+
+    @app.patch("/api/endpoints/{endpoint_id}")
+    async def update_endpoint_draft(
+        endpoint_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        changes = value.get("changes", {})
+        if not isinstance(changes, dict):
+            raise RouterError(
+                "endpoint changes must be a JSON object",
+                status_code=400,
+                code="invalid_endpoint_config",
+            )
+        source = request.client.host if request.client else "unknown"
+        draft = await current.endpoint_configs.save_draft(
+            endpoint_id,
+            changes,
+            expected_revision=_optional_int(
+                value.get("expected_revision")
+            ),
+            source=source,
+        )
+        current.audit.write(
+            "endpoint_draft_updated",
+            endpoint_id=endpoint_id,
+            revision=draft["revision"],
+            fields=sorted(changes),
+            source=source,
+        )
+        return {"draft": draft}
+
+    @app.post("/api/endpoints/{endpoint_id}/validate")
+    async def validate_endpoint_draft(
+        endpoint_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        await current.reload_endpoint_config()
+        endpoint = current.registry.by_id(endpoint_id)
+        if endpoint is None:
+            raise RouterError(
+                f"unknown endpoint: {endpoint_id}",
+                status_code=404,
+                code="endpoint_not_found",
+            )
+        source = request.client.host if request.client else "unknown"
+        current.audit.write(
+            "endpoint_validation_started",
+            endpoint_id=endpoint_id,
+            source=source,
+        )
+        status = await current.health.status(
+            endpoint,
+            force_refresh=True,
+        )
+        draft = await current.endpoint_configs.validate_draft(
+            endpoint_id,
+            expected_revision=_optional_int(
+                value.get("expected_revision")
+            ),
+            status=status,
+            source=source,
+        )
+        current.audit.write(
+            "endpoint_validation_completed",
+            endpoint_id=endpoint_id,
+            revision=draft["revision"],
+            status=draft["validation"]["status"],
+            errors=draft["validation"]["errors"],
+            source=source,
+        )
+        return {"draft": draft}
+
+    @app.post("/api/endpoints/{endpoint_id}/activate")
+    async def activate_endpoint_draft(
+        endpoint_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        source = request.client.host if request.client else "unknown"
+        active = await current.endpoint_configs.activate(
+            endpoint_id,
+            expected_revision=_optional_int(
+                value.get("expected_revision")
+            ),
+            source=source,
+        )
+        await current.reload_endpoint_config(force=True)
+        current.audit.write(
+            "endpoint_activated",
+            endpoint_id=endpoint_id,
+            revision=active["revision"],
+            source=source,
+        )
+        return {"active": active}
+
+    @app.delete("/api/endpoints/{endpoint_id}/draft")
+    async def discard_endpoint_draft(
+        endpoint_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        revision = await current.endpoint_configs.discard_draft(
+            endpoint_id,
+            expected_revision=_optional_int(
+                value.get("expected_revision")
+            ),
+        )
+        current.audit.write(
+            "endpoint_draft_discarded",
+            endpoint_id=endpoint_id,
+            revision=revision,
+            source=request.client.host
+            if request.client
+            else "unknown",
+        )
+        return {"ok": True, "revision": revision}
+
+    @app.post("/api/endpoints/{endpoint_id}/actions/{action}")
+    async def endpoint_action(
+        endpoint_id: str,
+        action: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        source = request.client.host if request.client else "unknown"
+        active = await current.endpoint_configs.action(
+            endpoint_id,
+            action,
+            expected_revision=_optional_int(
+                value.get("expected_revision")
+            ),
+            source=source,
+        )
+        await current.reload_endpoint_config(force=True)
+        event = {
+            "enable": "endpoint_enabled",
+            "disable": "endpoint_disabled",
+            "auto-enable": "endpoint_auto_enabled",
+            "auto-disable": "endpoint_auto_disabled",
+        }.get(action, "endpoint_updated")
+        current.audit.write(
+            event,
+            endpoint_id=endpoint_id,
+            revision=active["revision"],
+            source=source,
+        )
+        return {"active": active}
+
+    @app.post("/api/endpoints/{endpoint_id}/reset")
+    async def reset_endpoint(
+        endpoint_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        revision = await current.endpoint_configs.reset(
+            endpoint_id,
+            expected_revision=_optional_int(
+                value.get("expected_revision")
+            ),
+        )
+        await current.reload_endpoint_config(force=True)
+        current.audit.write(
+            "endpoint_reset",
+            endpoint_id=endpoint_id,
+            revision=revision,
+            source=request.client.host
+            if request.client
+            else "unknown",
+        )
+        return {"ok": True, "revision": revision}
 
     @app.get("/api/clients")
     async def clients(request: Request) -> dict[str, Any]:
@@ -333,6 +512,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         current = _authorized_runtime(request)
         current.reload_settings()
+        await current.reload_endpoint_config()
         endpoints = await _endpoint_values(current)
         events = current.audit.recent(max(1000, limit * 8))
         requests = _request_rows(events, limit, current.settings.value)
@@ -430,7 +610,11 @@ async def _json_body(request: Request) -> dict[str, Any]:
 
 
 def _allowed_client_models(current: RouterRuntime) -> set[str]:
-    return {"*", "auto", *current.registry.public_models()}
+    return {
+        "*",
+        "auto",
+        *current.base_registry.public_models(),
+    }
 
 
 def _query_text(value: str | None) -> str | None:
@@ -448,13 +632,28 @@ def _editable(value: dict[str, Any]) -> dict[str, Any]:
 
 async def _endpoint_values(current: RouterRuntime) -> list[dict[str, Any]]:
     statuses = await current.health.statuses(current.registry.endpoints)
+    records = await current.endpoint_configs.records()
     return [
         {
             "endpoint": endpoint.to_dict(),
             "status": statuses[endpoint.id].to_dict(),
+            "management": records[endpoint.id],
         }
         for endpoint in current.registry.endpoints
     ]
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise RouterError(
+            "expected_revision must be an integer",
+            status_code=400,
+            code="invalid_endpoint_config",
+        ) from exc
 
 
 def _worker_rows(endpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:

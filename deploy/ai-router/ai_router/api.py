@@ -145,11 +145,15 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     async def models(request: Request) -> JSONResponse:
         current = _runtime(request)
         current.reload_settings()
+        await current.reload_endpoint_config()
         client = await current.auth.authenticate(
             request.headers.get("authorization")
         )
         values = []
-        for model in ("auto", *current.registry.public_models()):
+        for model in (
+            "auto",
+            *current.registry.enabled_public_models(),
+        ):
             if "*" not in client.policy.models and model not in client.policy.models:
                 continue
             values.append(await _model_descriptor(current, model))
@@ -177,7 +181,11 @@ async def _model_descriptor(
             if endpoint.enabled and endpoint.auto_candidate
         )
         if model == "auto"
-        else current.registry.by_public_model(model)
+        else tuple(
+            endpoint
+            for endpoint in current.registry.by_public_model(model)
+            if endpoint.enabled
+        )
     )
     statuses = await current.health.statuses(endpoints)
     modalities = sorted(
@@ -255,6 +263,7 @@ async def _model_descriptor(
 async def _proxy(request: Request, api_kind: str) -> Response:
     current = _runtime(request)
     current.reload_settings()
+    await current.reload_endpoint_config()
     request_id = request.headers.get("x-request-id") or uuid4().hex
     max_request_bytes = int(
         current.settings.section("limits").get(

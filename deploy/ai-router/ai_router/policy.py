@@ -145,6 +145,15 @@ class RoutingPolicy:
                 status_code=404,
                 code="model_not_found",
             )
+        if (
+            requested_model != "auto"
+            and not any(item.enabled for item in endpoints)
+        ):
+            raise RouterError(
+                f"endpoint is disabled: {requested_model}",
+                status_code=503,
+                code="endpoint_disabled",
+            )
         statuses = await self.health.statuses(endpoints)
         candidates: list[Endpoint] = []
         rejections: list[str] = []

@@ -30,7 +30,7 @@
 
     <nav class="primary-nav" aria-label="控制台视图">
       <button class="tab active" type="button" data-view="dashboard">总览</button>
-      <button class="tab" type="button" data-view="nodes">模型节点</button>
+      <button class="tab" type="button" data-view="nodes">端点管理</button>
       <button class="tab" type="button" data-view="requests">请求记录</button>
       <button class="tab" type="button" data-view="audit">路由审计</button>
       <button class="tab" type="button" data-view="clients">客户端账号</button>
@@ -91,7 +91,9 @@
           <section class="section-block">
             <div class="section-heading">
               <h3>节点概览</h3>
-              <span class="section-meta">实时健康检查</span>
+              <button type="button" class="text-button" data-open-view="nodes">
+                管理端点
+              </button>
             </div>
             <div id="node-overview" class="node-overview"></div>
           </section>
@@ -158,6 +160,8 @@
                   <th>协议能力</th>
                   <th>验证状态</th>
                   <th>自动候选</th>
+                  <th>配置</th>
+                  <th>操作</th>
                 </tr>
               </thead>
               <tbody id="endpoint-table"></tbody>
@@ -680,6 +684,88 @@
         <button id="copy-generated-key" type="button">复制</button>
         <button class="secondary" type="button" data-close-dialog="secret-dialog">完成</button>
       </div>
+    </dialog>
+
+    <dialog id="endpoint-dialog" class="wide-dialog">
+      <form id="endpoint-form">
+        <div class="dialog-heading">
+          <div>
+            <span>Endpoint configuration</span>
+            <h3 id="endpoint-dialog-title">编辑端点</h3>
+          </div>
+          <button class="dialog-close secondary" type="button" data-close-dialog="endpoint-dialog" aria-label="关闭">×</button>
+        </div>
+        <div class="dialog-body">
+          <div id="endpoint-readonly" class="endpoint-readonly-grid"></div>
+          <div class="control-grid endpoint-numeric-grid">
+            <label>
+              安全上下文
+              <input id="endpoint-safe-context" type="number" min="1" step="1" required>
+            </label>
+            <label>
+              配置上下文
+              <input id="endpoint-configured-context" type="number" min="1" step="1" required>
+            </label>
+            <label>
+              最大并发
+              <input id="endpoint-max-concurrency" type="number" min="1" step="1" required>
+            </label>
+            <label>
+              Responses
+              <select id="endpoint-responses">
+                <option value="none">不支持</option>
+                <option value="native">原生</option>
+                <option value="adapter">适配器</option>
+              </select>
+            </label>
+            <label>
+              工具调用
+              <select id="endpoint-tools">
+                <option value="none">不支持</option>
+                <option value="single">单工具</option>
+                <option value="parallel">并行工具</option>
+              </select>
+            </label>
+            <label class="toggle-row">
+              <span>Chat Completions</span>
+              <input id="endpoint-chat" type="checkbox">
+            </label>
+            <label class="toggle-row">
+              <span>流式输出</span>
+              <input id="endpoint-streaming" type="checkbox">
+            </label>
+            <label class="toggle-row">
+              <span>tool_choice</span>
+              <input id="endpoint-tool-choice" type="checkbox">
+            </label>
+          </div>
+          <fieldset class="model-permissions">
+            <legend>任务类型</legend>
+            <div id="endpoint-tasks" class="permission-grid"></div>
+          </fieldset>
+          <fieldset class="model-permissions">
+            <legend>输入模态</legend>
+            <div id="endpoint-modalities" class="permission-grid"></div>
+          </fieldset>
+          <fieldset class="model-permissions">
+            <legend>tool_choice 模式</legend>
+            <div id="endpoint-tool-choice-modes" class="permission-grid"></div>
+          </fieldset>
+          <fieldset class="model-permissions">
+            <legend>结构化输出</legend>
+            <div id="endpoint-structured-output" class="permission-grid"></div>
+          </fieldset>
+          <div id="endpoint-validation" class="endpoint-validation"></div>
+        </div>
+        <div class="dialog-actions endpoint-dialog-actions">
+          <button id="endpoint-reset" class="secondary danger-action" type="button">恢复基线</button>
+          <span class="dialog-action-spacer"></span>
+          <button id="endpoint-discard" class="secondary" type="button">放弃草稿</button>
+          <button id="endpoint-validate" class="secondary" type="button">验证草稿</button>
+          <button id="endpoint-activate" class="secondary" type="button">激活草稿</button>
+          <button type="submit">保存草稿</button>
+        </div>
+      </form>
     </dialog>
 
     <script src="/assets/vendor/mermaid/mermaid.min.js"></script>

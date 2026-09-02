@@ -10,6 +10,7 @@ const state = {
   selectedTrace: null,
   selectedTraceAttempt: 1,
   selectedTraceNodeId: null,
+  editingEndpointId: null,
   editingClientId: null,
   selectedClientId: null,
   view: "dashboard",
@@ -18,7 +19,7 @@ const state = {
 
 const viewTitles = {
   dashboard: "运行总览",
-  nodes: "模型节点",
+  nodes: "端点管理",
   requests: "请求记录",
   audit: "路由审计",
   clients: "客户端账号",
@@ -627,11 +628,12 @@ function renderRecentRequests(requests) {
 }
 
 function renderEndpointTable(endpoints) {
+  const enabled = endpoints.filter(({endpoint}) => endpoint.enabled).length;
   byId("endpoint-count").textContent =
-    `${endpoints.filter((item) => item.status.healthy).length}/${endpoints.length} 健康`;
-  byId("endpoint-table").innerHTML = endpoints.map(({endpoint, status}) => `
+    `${endpoints.filter((item) => item.status.healthy).length}/${endpoints.length} 健康 · ${enabled} 启用`;
+  byId("endpoint-table").innerHTML = endpoints.map(({endpoint, status, management}) => `
     <tr>
-      <td>${healthBadge(status.healthy)}</td>
+      <td>${endpointStatusBadge(endpoint, status)}</td>
       <td><span class="node-label node-${escapeHtml(endpoint.node)}">${escapeHtml(endpoint.node.toUpperCase())}</span></td>
       <td>
         <strong class="table-primary">${escapeHtml(endpoint.public_model)}</strong>
@@ -649,8 +651,346 @@ function renderEndpointTable(endpoints) {
         <span class="table-secondary">${escapeHtml(endpoint.capabilities?.validated_at || "—")}</span>
       </td>
       <td>${endpoint.auto_candidate ? "是" : "否"}</td>
+      <td>${endpointConfigStatus(management)}</td>
+      <td>
+        <div class="row-actions">
+          <button class="secondary compact" type="button" data-endpoint-edit="${escapeHtml(endpoint.id)}">编辑</button>
+          <button class="secondary compact" type="button" data-endpoint-auto="${escapeHtml(endpoint.id)}">
+            ${endpoint.auto_candidate ? "退出自动" : "加入自动"}
+          </button>
+          <button class="secondary compact ${endpoint.enabled ? "danger-action" : ""}" type="button" data-endpoint-toggle="${escapeHtml(endpoint.id)}">
+            ${endpoint.enabled ? "停用" : "启用"}
+          </button>
+        </div>
+      </td>
     </tr>
   `).join("");
+  bindEndpointActions();
+}
+
+function endpointStatusBadge(endpoint, status) {
+  if (!endpoint.enabled) {
+    return '<span class="badge danger"><i></i>已停用</span>';
+  }
+  return healthBadge(status.healthy);
+}
+
+function endpointConfigStatus(management = {}) {
+  const draft = management.draft;
+  if (draft) {
+    const status = draft.validation?.status || "pending";
+    const label = status === "passed"
+      ? "草稿已验证"
+      : status === "failed"
+        ? "草稿失败"
+        : "草稿待验证";
+    const tone = status === "passed"
+      ? "success"
+      : status === "failed"
+        ? "danger"
+        : "warning";
+    return `<span class="badge ${tone}"><i></i>${label}</span><span class="table-secondary">rev ${management.revision}</span>`;
+  }
+  return `
+    <strong class="table-primary">${management.has_override ? "动态配置" : "注册表基线"}</strong>
+    <span class="table-secondary">rev ${management.revision ?? 0}</span>
+  `;
+}
+
+function bindEndpointActions() {
+  document.querySelectorAll("[data-endpoint-edit]").forEach((button) => {
+    button.addEventListener("click", () => {
+      openEndpointDialog(button.dataset.endpointEdit);
+    });
+  });
+  document.querySelectorAll("[data-endpoint-toggle]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runEndpointAction(button.dataset.endpointToggle, "enabled");
+    });
+  });
+  document.querySelectorAll("[data-endpoint-auto]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runEndpointAction(button.dataset.endpointAuto, "auto");
+    });
+  });
+}
+
+function endpointItem(endpointId) {
+  return (state.dashboard?.endpoints || []).find(
+    ({endpoint}) => endpoint.id === endpointId,
+  );
+}
+
+function openEndpointDialog(endpointId) {
+  const item = endpointItem(endpointId);
+  if (!item) return;
+  state.editingEndpointId = endpointId;
+  const {endpoint, management} = item;
+  const baseline = management.baseline;
+  const values = management.draft?.values || management.effective;
+  const capabilities = values.capabilities || {};
+  byId("endpoint-dialog-title").textContent = endpoint.public_model;
+  byId("endpoint-readonly").innerHTML = [
+    ["端点 ID", endpoint.id],
+    ["节点", endpoint.node],
+    ["后端类型", endpoint.backend_type],
+    ["API 地址", endpoint.api_base],
+  ].map(([label, value]) => `
+    <div><span>${escapeHtml(label)}</span><strong title="${escapeHtml(value)}">${escapeHtml(value)}</strong></div>
+  `).join("");
+  setNumberField(
+    "endpoint-safe-context",
+    values.safe_context_tokens,
+    baseline.safe_context_tokens,
+  );
+  setNumberField(
+    "endpoint-configured-context",
+    values.configured_context_tokens,
+    baseline.configured_context_tokens,
+  );
+  setNumberField(
+    "endpoint-max-concurrency",
+    values.max_concurrency,
+    baseline.max_concurrency,
+  );
+  byId("endpoint-responses").value = capabilities.responses || "none";
+  byId("endpoint-tools").value = capabilities.tools || "none";
+  byId("endpoint-chat").checked = Boolean(capabilities.chat);
+  byId("endpoint-chat").disabled =
+    !baseline.capabilities?.chat;
+  byId("endpoint-streaming").checked = Boolean(capabilities.streaming);
+  byId("endpoint-streaming").disabled =
+    !baseline.capabilities?.streaming;
+  byId("endpoint-tool-choice").checked = Boolean(capabilities.tool_choice);
+  byId("endpoint-tool-choice").disabled =
+    !baseline.capabilities?.tool_choice;
+  restrictEndpointSelect(
+    "endpoint-responses",
+    ["none", baseline.capabilities?.responses || "none"],
+  );
+  const toolRank = {"none": 0, "single": 1, "parallel": 2};
+  restrictEndpointSelect(
+    "endpoint-tools",
+    Object.keys(toolRank).filter(
+      (value) => (
+        toolRank[value]
+        <= toolRank[baseline.capabilities?.tools || "none"]
+      ),
+    ),
+  );
+  renderEndpointOptions(
+    "endpoint-tasks",
+    baseline.tasks,
+    values.tasks,
+    endpointTaskLabel,
+  );
+  renderEndpointOptions(
+    "endpoint-modalities",
+    baseline.modalities,
+    values.modalities,
+    endpointModalityLabel,
+  );
+  renderEndpointOptions(
+    "endpoint-tool-choice-modes",
+    baseline.capabilities?.tool_choice_modes || [],
+    capabilities.tool_choice_modes || [],
+    (value) => value,
+  );
+  renderEndpointOptions(
+    "endpoint-structured-output",
+    baseline.capabilities?.structured_output || [],
+    capabilities.structured_output || [],
+    (value) => value,
+  );
+  const validation = management.draft?.validation;
+  byId("endpoint-validation").innerHTML = validation
+    ? `<strong>草稿验证：${escapeHtml(validation.status || "pending")}</strong><span>${escapeHtml((validation.errors || []).join(", ") || "没有错误")}</span>`
+    : "<strong>当前没有草稿</strong><span>保存后先验证，再激活到生产路由。</span>";
+  byId("endpoint-discard").disabled = !management.draft;
+  byId("endpoint-validate").disabled = !management.draft;
+  byId("endpoint-activate").disabled =
+    validation?.status !== "passed";
+  byId("endpoint-reset").disabled =
+    !management.has_override && !management.draft;
+  byId("endpoint-dialog").showModal();
+}
+
+function restrictEndpointSelect(id, allowed) {
+  const values = new Set(allowed);
+  [...byId(id).options].forEach((option) => {
+    option.disabled = !values.has(option.value);
+  });
+}
+
+function setNumberField(id, value, maximum) {
+  const field = byId(id);
+  field.value = Number(value);
+  field.max = Number(maximum);
+}
+
+function renderEndpointOptions(
+  targetId,
+  available = [],
+  selected = [],
+  label = (value) => value,
+) {
+  const current = new Set(selected || []);
+  byId(targetId).innerHTML = available.length
+    ? available.map((value) => `
+      <label>
+        <input type="checkbox" value="${escapeHtml(value)}" ${current.has(value) ? "checked" : ""}>
+        <span>${escapeHtml(label(value))}</span>
+      </label>
+    `).join("")
+    : '<span class="table-secondary">注册表未声明可选项</span>';
+}
+
+function endpointTaskLabel(value) {
+  return {
+    general: "通用",
+    code: "代码",
+    batch: "批处理",
+    "long-context": "长上下文",
+  }[value] || value;
+}
+
+function endpointModalityLabel(value) {
+  return {
+    text: "文本",
+    image: "图像",
+    audio: "音频",
+  }[value] || value;
+}
+
+function checkedValues(targetId) {
+  return [...byId(targetId).querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => input.value);
+}
+
+function collectEndpointDraft() {
+  return {
+    safe_context_tokens: Number(byId("endpoint-safe-context").value),
+    configured_context_tokens: Number(byId("endpoint-configured-context").value),
+    max_concurrency: Number(byId("endpoint-max-concurrency").value),
+    tasks: checkedValues("endpoint-tasks"),
+    modalities: checkedValues("endpoint-modalities"),
+    capabilities: {
+      chat: byId("endpoint-chat").checked,
+      responses: byId("endpoint-responses").value,
+      tools: byId("endpoint-tools").value,
+      tool_choice: byId("endpoint-tool-choice").checked,
+      tool_choice_modes: checkedValues("endpoint-tool-choice-modes"),
+      structured_output: checkedValues("endpoint-structured-output"),
+      streaming: byId("endpoint-streaming").checked,
+    },
+  };
+}
+
+async function saveEndpointDraft(event) {
+  event.preventDefault();
+  const item = endpointItem(state.editingEndpointId);
+  if (!item) return;
+  try {
+    await api(`/api/endpoints/${encodeURIComponent(state.editingEndpointId)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        expected_revision: item.management.revision,
+        changes: collectEndpointDraft(),
+      }),
+    });
+    await refreshEndpointDialog("端点草稿已保存。");
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+async function runEndpointDraftCommand(command) {
+  const item = endpointItem(state.editingEndpointId);
+  if (!item) return;
+  const endpointId = state.editingEndpointId;
+  try {
+    if (command === "activate" && !window.confirm("激活后会立即改变生产路由能力，确认继续？")) return;
+    const options = command === "discard"
+      ? {
+          method: "DELETE",
+          body: JSON.stringify({
+            expected_revision: item.management.revision,
+          }),
+        }
+      : {
+          method: "POST",
+          body: JSON.stringify({
+            expected_revision: item.management.revision,
+          }),
+        };
+    const path = command === "discard"
+      ? `/api/endpoints/${encodeURIComponent(endpointId)}/draft`
+      : `/api/endpoints/${encodeURIComponent(endpointId)}/${command}`;
+    await api(path, options);
+    await refreshEndpointDialog({
+      validate: "端点草稿验证完成。",
+      activate: "端点配置已激活。",
+      discard: "端点草稿已放弃。",
+    }[command]);
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+async function resetEndpoint() {
+  const item = endpointItem(state.editingEndpointId);
+  if (!item || !window.confirm("恢复注册表基线会清除动态配置和草稿，确认继续？")) return;
+  try {
+    await api(`/api/endpoints/${encodeURIComponent(state.editingEndpointId)}/reset`, {
+      method: "POST",
+      body: JSON.stringify({
+        expected_revision: item.management.revision,
+      }),
+    });
+    await refreshEndpointDialog("端点已恢复注册表基线。");
+  } catch (error) {
+    notice(error.message, true);
+  }
+}
+
+async function refreshEndpointDialog(message) {
+  const endpointId = state.editingEndpointId;
+  byId("endpoint-dialog").close();
+  await loadDashboard(true);
+  openEndpointDialog(endpointId);
+  notice(message);
+}
+
+async function runEndpointAction(endpointId, kind) {
+  const item = endpointItem(endpointId);
+  if (!item) return;
+  const enabled = item.endpoint.enabled;
+  const auto = item.endpoint.auto_candidate;
+  const action = kind === "enabled"
+    ? (enabled ? "disable" : "enable")
+    : (auto ? "auto-disable" : "auto-enable");
+  if (
+    action === "disable"
+    && !window.confirm("停用后新请求将不再进入此端点，正在运行的请求会继续完成。确认停用？")
+  ) return;
+  try {
+    await api(`/api/endpoints/${encodeURIComponent(endpointId)}/actions/${action}`, {
+      method: "POST",
+      body: JSON.stringify({
+        expected_revision: item.management.revision,
+      }),
+    });
+    await loadDashboard(true);
+    notice(action === "disable"
+      ? "端点已停用。"
+      : action === "enable"
+        ? "端点已启用。"
+        : action === "auto-enable"
+          ? "端点已加入自动路由。"
+          : "端点已退出自动路由。");
+  } catch (error) {
+    notice(error.message, true);
+  }
 }
 
 function renderWorkerTable(workers) {
@@ -1997,6 +2337,19 @@ byId("client-status-filter").addEventListener("change", renderClients);
 byId("create-client").addEventListener("click", () => openClientDialog());
 byId("client-form").addEventListener("submit", saveClient);
 byId("key-form").addEventListener("submit", createKey);
+byId("endpoint-form").addEventListener("submit", saveEndpointDraft);
+byId("endpoint-validate").addEventListener("click", () => {
+  void runEndpointDraftCommand("validate");
+});
+byId("endpoint-activate").addEventListener("click", () => {
+  void runEndpointDraftCommand("activate");
+});
+byId("endpoint-discard").addEventListener("click", () => {
+  void runEndpointDraftCommand("discard");
+});
+byId("endpoint-reset").addEventListener("click", () => {
+  void resetEndpoint();
+});
 byId("copy-generated-key").addEventListener("click", async () => {
   const field = byId("generated-key");
   try {

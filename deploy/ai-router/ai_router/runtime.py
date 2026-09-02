@@ -17,6 +17,7 @@ from .client_accounts import ClientAccountManager
 from .compaction import CapsuleCipher, ContextCompactor
 from .config import Registry, Settings
 from .evaluator import TaskEvaluator
+from .endpoint_config import EndpointConfigManager
 from .health import HealthMonitor
 from .policy import ConversationRepository, RoutingPolicy
 from .route_trace import RouteTraceStore
@@ -29,7 +30,9 @@ from .training_archive import TrainingArchive
 @dataclass
 class RouterRuntime:
     settings: Settings
+    base_registry: Registry
     registry: Registry
+    endpoint_configs: EndpointConfigManager
     store: StateStore
     token_counter: TokenCounter
     health: HealthMonitor
@@ -66,6 +69,16 @@ class RouterRuntime:
         repr=False,
     )
     _started: bool = field(default=False, init=False, repr=False)
+    _endpoint_config_revision: int = field(
+        default=-1,
+        init=False,
+        repr=False,
+    )
+    _endpoint_config_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+    )
 
     def reload_settings(self) -> None:
         self.settings.reload()
@@ -77,9 +90,28 @@ class RouterRuntime:
             self.settings.section("affinity").get("max_priority_burst", 8)
         )
 
+    async def reload_endpoint_config(
+        self,
+        *,
+        force: bool = False,
+    ) -> int:
+        revision = await self.endpoint_configs.revision()
+        if not force and revision == self._endpoint_config_revision:
+            return revision
+        async with self._endpoint_config_lock:
+            revision = await self.endpoint_configs.revision()
+            if not force and revision == self._endpoint_config_revision:
+                return revision
+            registry = await self.endpoint_configs.effective_registry()
+            self.registry = registry
+            self.policy.registry = registry
+            self._endpoint_config_revision = revision
+            return revision
+
     async def start(self) -> None:
         if self._started:
             return
+        await self.reload_endpoint_config(force=True)
         self._started = True
         imported = await self.clients.bootstrap_legacy()
         for item in imported:
@@ -353,6 +385,7 @@ def build_runtime(
     settings = settings or Settings()
     registry = registry or Registry()
     store = store or _build_store()
+    endpoint_configs = EndpointConfigManager(store, registry)
     limits = settings.section("limits")
     token_counter = token_counter or HuggingFaceTokenCounter(
         _required_env("AI_ROUTER_TOKENIZER_PATH"),
@@ -414,7 +447,9 @@ def build_runtime(
         )
     return RouterRuntime(
         settings=settings,
+        base_registry=registry,
         registry=registry,
+        endpoint_configs=endpoint_configs,
         store=store,
         token_counter=token_counter,
         health=health,

@@ -129,6 +129,23 @@ class Registry:
             for key, value in (raw.get("tier_ranks", {}) or {}).items()
         }
 
+    def with_endpoints(
+        self,
+        endpoints: list[Endpoint] | tuple[Endpoint, ...],
+    ) -> "Registry":
+        value = object.__new__(Registry)
+        value.path = self.path
+        value.endpoints = tuple(endpoints)
+        value._by_id = {item.id: item for item in value.endpoints}
+        value._by_public_model = {}
+        for endpoint in value.endpoints:
+            value._by_public_model.setdefault(
+                endpoint.public_model,
+                [],
+            ).append(endpoint)
+        value.tier_ranks = dict(self.tier_ranks)
+        return value
+
     def by_id(self, endpoint_id: str) -> Endpoint | None:
         return self._by_id.get(endpoint_id)
 
@@ -137,6 +154,17 @@ class Registry:
 
     def public_models(self) -> tuple[str, ...]:
         return tuple(sorted(self._by_public_model))
+
+    def enabled_public_models(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    item.public_model
+                    for item in self.endpoints
+                    if item.enabled
+                }
+            )
+        )
 
     def responders(self) -> tuple[Endpoint, ...]:
         return tuple(item for item in self.endpoints if item.role == "responder")
