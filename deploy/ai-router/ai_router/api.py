@@ -30,6 +30,12 @@ from .history import (
 from .media import inspect_image_inputs, normalize_ai_images
 from .policy import updated_conversation_state
 from .protocol import normalize_request
+from .route_trace import (
+    DecisionTrace,
+    registry_fingerprint,
+    request_excerpt,
+    settings_fingerprint,
+)
 from .runtime import RouterRuntime, build_runtime
 from .token_counter import output_reserve_tokens, request_modalities
 from .types import (
@@ -77,9 +83,10 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
 
     @app.exception_handler(RouterError)
     async def router_error_handler(
-        _request: Request,
+        request: Request,
         exc: RouterError,
     ) -> JSONResponse:
+        await _finish_request_trace_error(request, exc)
         return _error_response(exc)
 
     @app.get("/health")
@@ -293,6 +300,21 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     authenticated = await current.auth.authenticate(
         request.headers.get("authorization")
     )
+    trace = DecisionTrace(
+        request_id=request_id,
+        client_id=authenticated.policy.id,
+        key_id=authenticated.key_id,
+        protocol=api_kind,
+        requested_model=requested_model,
+        excerpt=request_excerpt(received_body, api_kind),
+        instance_id=current.instance_id,
+        boot_id=current.boot_id,
+        settings_hash=settings_fingerprint(current.settings),
+        registry_hash=registry_fingerprint(current.registry),
+        client_models=authenticated.policy.models,
+    )
+    request.state.route_trace = trace
+    await _save_request_trace(current, trace)
     current.auth.ensure_model_access(authenticated, requested_model)
     if current.draining:
         raise RouterError(
@@ -318,19 +340,25 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         api_kind,
         authenticated.policy.id,
     )
+    trace.set_request_context(conversation_id=conversation_id)
+    await _save_request_trace(current, trace)
     training_token = None
-    if current.training is not None:
-        training_token = await current.training.begin(
-            request_id=request_id,
-            conversation_id=conversation_id,
-            conversation_mode=conversation_mode,
-            client_id=authenticated.policy.id,
-            key_id=authenticated.key_id,
-            protocol=api_kind,
-            received_body=received_body,
-            instance_id=current.instance_id,
-            boot_id=current.boot_id,
-        )
+    try:
+        if current.training is not None:
+            training_token = await current.training.begin(
+                request_id=request_id,
+                conversation_id=conversation_id,
+                conversation_mode=conversation_mode,
+                client_id=authenticated.policy.id,
+                key_id=authenticated.key_id,
+                protocol=api_kind,
+                received_body=received_body,
+                instance_id=current.instance_id,
+                boot_id=current.boot_id,
+            )
+    except BaseException as exc:
+        await _finish_trace_exception(current, trace, exc)
+        raise
     try:
         lease = await current.scheduler.begin_request(conversation_id)
     except BaseException as exc:
@@ -339,6 +367,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             training_token,
             exc,
         )
+        await _finish_trace_exception(current, trace, exc)
         raise
     parallel_acquired = False
     stream_owned = False
@@ -432,6 +461,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         modalities = request_modalities(effective_body, api_kind)
         image_inputs = inspect_image_inputs(effective_body)
         has_tools = required_capabilities.tools
+        trace.set_request_context(
+            prompt_tokens=prompt_tokens,
+            output_reserve_tokens=reserve_tokens,
+            modalities=modalities,
+            required_capabilities=list(required_capabilities.labels()),
+        )
+        trace.set_evaluation(evaluation)
+        await _save_request_trace(current, trace)
         excluded: set[str] = {
             endpoint.id
             for endpoint in current.registry.responders()
@@ -484,6 +521,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     excluded_deployments=excluded_deployments,
                     capacity_attempts=total_capacity_attempts,
                     queue_wait_ms=total_queue_wait_ms,
+                    trace=trace,
+                    route_attempt=attempt,
                 )
                 decision.attempts = attempt
                 decision.tool_history_repairs = tool_history_repairs
@@ -531,6 +570,23 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     conversation_id=conversation_id,
                     decision=decision,
                 )
+                trace.record(
+                    attempt,
+                    "upstream_request",
+                    "running",
+                    reason="upstream_request_started",
+                    evidence={
+                        "endpoint_id": decision.endpoint.id,
+                        "deployment_id": (
+                            decision.deployment_id
+                            or decision.endpoint.id
+                        ),
+                        "selected_model": (
+                            decision.endpoint.public_model
+                        ),
+                    },
+                )
+                await _save_request_trace(current, trace)
                 await current.track_request_routed(
                     lease.owner_token,
                     requested_model=decision.requested_model,
@@ -579,6 +635,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             excluded,
                             excluded_deployments,
                         )
+                        _record_trace_retry(
+                            trace,
+                            attempt=attempt,
+                            status_code=upstream.status_code,
+                            reason="vision_workspace_failure",
+                            allowed=True,
+                        )
+                        await _save_request_trace(current, trace)
                         await lease.release_deployment()
                         continue
                 subscription_fallback = bool(
@@ -608,6 +672,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         excluded,
                         excluded_deployments,
                     )
+                    _record_trace_retry(
+                        trace,
+                        attempt=attempt,
+                        status_code=upstream.status_code,
+                        reason=(
+                            "subscription_fallback"
+                            if subscription_fallback
+                            else "retryable_upstream_status"
+                        ),
+                        allowed=True,
+                    )
+                    await _save_request_trace(current, trace)
                     await lease.release_deployment()
                     continue
 
@@ -749,6 +825,15 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 if attempt >= attempts or not (
                     allow_retry or subscription_fallback
                 ):
+                    _record_trace_retry(
+                        trace,
+                        attempt=attempt,
+                        status_code=last_error.status_code,
+                        reason=last_error.code,
+                        allowed=False,
+                        upstream=isinstance(exc, httpx.RequestError),
+                    )
+                    await _save_request_trace(current, trace)
                     if decision is not None:
                         await _audit(
                             current,
@@ -761,6 +846,15 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             started_at=request.state.started_at,
                         )
                     raise last_error
+                _record_trace_retry(
+                    trace,
+                    attempt=attempt,
+                    status_code=last_error.status_code,
+                    reason=last_error.code,
+                    allowed=True,
+                    upstream=isinstance(exc, httpx.RequestError),
+                )
+                await _save_request_trace(current, trace)
             except Exception:
                 await current.budget.release(budget_reservation)
                 raise
@@ -772,6 +866,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             training_token,
             exc,
         )
+        await _finish_trace_exception(current, trace, exc)
         raise
     finally:
         if not stream_owned:
@@ -805,6 +900,8 @@ async def _acquire_route_capacity(
     excluded_deployments: set[str],
     capacity_attempts: int,
     queue_wait_ms: float,
+    trace: DecisionTrace | None = None,
+    route_attempt: int = 1,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     capacity_busy_seen = False
     affinity_spilled = False
@@ -825,8 +922,12 @@ async def _acquire_route_capacity(
                 excluded_endpoint_ids=excluded_endpoints,
                 excluded_deployment_ids=excluded_deployments,
                 routing_key=request_id,
+                trace=trace,
+                trace_attempt=route_attempt,
             )
         except NoEligibleModelError:
+            if trace:
+                await _save_request_trace(current, trace)
             if capacity_busy_seen:
                 if requested_model == "auto":
                     raise AllLocalCapacityBusyError()
@@ -835,6 +936,20 @@ async def _acquire_route_capacity(
 
         _apply_protocol_constraints(decision, api_kind)
         capacity_attempts += 1
+        if trace:
+            trace.record(
+                route_attempt,
+                "capacity_check",
+                "running",
+                reason="capacity_check",
+                evidence={
+                    "endpoint_id": decision.endpoint.id,
+                    "deployment_id": (
+                        decision.deployment_id
+                        or decision.endpoint.id
+                    ),
+                },
+            )
         if not await _filter_restart_draining_deployments(
             current,
             decision,
@@ -846,18 +961,74 @@ async def _acquire_route_capacity(
                 "hit",
                 "logical-hit",
             }
+            if trace:
+                trace.record(
+                    route_attempt,
+                    "capacity_check",
+                    "failed",
+                    reason="deployment_draining_after_restart",
+                    evidence={
+                        "endpoint_id": decision.endpoint.id,
+                    },
+                )
+                trace.record(
+                    route_attempt,
+                    "retry_decision",
+                    (
+                        "passed"
+                        if requested_model == "auto"
+                        else "failed"
+                    ),
+                    reason="deployment_draining_after_restart",
+                    evidence={
+                        "allowed": requested_model == "auto",
+                    },
+                )
+                await _save_request_trace(current, trace)
             if requested_model != "auto":
                 raise CapacityBusyError()
             continue
         initial_deployment = decision.deployment_id or decision.endpoint.id
         deployment_routes = dict(decision.deployment_candidates)
         deployment_ids = tuple(deployment_routes) or (initial_deployment,)
+        if trace:
+            trace.record(
+                route_attempt,
+                "capacity_check",
+                "running",
+                reason="capacity_check",
+                evidence={
+                    "endpoint_id": decision.endpoint.id,
+                    "deployment_ids": list(deployment_ids),
+                    "wait_seconds": _capacity_wait_seconds(
+                        routing,
+                        requested_model=requested_model,
+                        decision=decision,
+                    ),
+                },
+            )
 
         if (
             decision.endpoint.cloud
             and capacity_busy_seen
             and routing.get("all_local_busy_policy") != "cloud_or_429"
         ):
+            if trace:
+                trace.record(
+                    route_attempt,
+                    "capacity_check",
+                    "failed",
+                    reason="cloud_fallback_disabled",
+                    evidence={"endpoint_id": decision.endpoint.id},
+                )
+                trace.record(
+                    route_attempt,
+                    "retry_decision",
+                    "failed",
+                    reason="all_local_busy_policy",
+                    evidence={"allowed": False},
+                )
+                await _save_request_trace(current, trace)
             raise AllLocalCapacityBusyError()
 
         wait_seconds = _capacity_wait_seconds(
@@ -905,12 +1076,56 @@ async def _acquire_route_capacity(
                 excluded_endpoints,
                 excluded_deployments,
             )
+            if trace:
+                trace.record(
+                    route_attempt,
+                    "capacity_check",
+                    "failed",
+                    reason="capacity_busy",
+                    evidence={
+                        "endpoint_id": decision.endpoint.id,
+                        "deployment_ids": list(deployment_ids),
+                        "queue_wait_ms": round(queue_wait_ms, 2),
+                    },
+                )
+                trace.record(
+                    route_attempt,
+                    "retry_decision",
+                    (
+                        "passed"
+                        if requested_model == "auto"
+                        else "failed"
+                    ),
+                    reason="capacity_spillover",
+                    evidence={
+                        "allowed": requested_model == "auto",
+                        "excluded_endpoint_ids": sorted(
+                            excluded_endpoints
+                        ),
+                        "excluded_deployment_ids": sorted(
+                            excluded_deployments
+                        ),
+                    },
+                )
+                await _save_request_trace(current, trace)
             await lease.release_deployment()
             if requested_model != "auto":
                 raise
             continue
 
         queue_wait_ms += (time.monotonic() - wait_started) * 1000
+        if trace:
+            trace.record(
+                route_attempt,
+                "capacity_check",
+                "selected",
+                reason="capacity_acquired",
+                evidence={
+                    "endpoint_id": decision.endpoint.id,
+                    "deployment_id": selected_deployment,
+                    "queue_wait_ms": round(queue_wait_ms, 2),
+                },
+            )
         decision.deployment_id = selected_deployment
         if deployment_routes:
             decision.upstream_api_base = deployment_routes[
@@ -919,6 +1134,17 @@ async def _acquire_route_capacity(
         _apply_selected_deployment(decision, selected_deployment)
 
         budget_reservation = None
+        if trace:
+            trace.record(
+                route_attempt,
+                "request_prepare",
+                "running",
+                reason="request_prepare",
+                evidence={
+                    "protocol": api_kind,
+                    "endpoint_id": decision.endpoint.id,
+                },
+            )
         try:
             routed_body, capsule = await _prepare_routed_body(
                 current,
@@ -927,9 +1153,40 @@ async def _acquire_route_capacity(
                 decision=decision,
                 request_id=request_id,
             )
-        except RouterError:
+        except RouterError as exc:
+            if trace:
+                trace.record(
+                    route_attempt,
+                    "request_prepare",
+                    "error",
+                    reason=exc.code,
+                    evidence={"message": str(exc)[:500]},
+                )
+                await _save_request_trace(current, trace)
             await lease.release_deployment()
             raise
+        if trace:
+            trace.record(
+                route_attempt,
+                "request_prepare",
+                "passed",
+                reason="request_prepared",
+                evidence={
+                    "protocol": api_kind,
+                    "image_resizes": decision.image_resizes,
+                    "compacted": capsule is not None,
+                },
+            )
+            trace.record(
+                route_attempt,
+                "budget_check",
+                "running",
+                reason="budget_check",
+                evidence={
+                    "cloud": decision.endpoint.cloud,
+                    "endpoint_id": decision.endpoint.id,
+                },
+            )
         try:
             budget_reservation = await current.budget.reserve(
                 decision.endpoint,
@@ -937,12 +1194,36 @@ async def _acquire_route_capacity(
                 prompt_tokens=decision.prompt_tokens,
                 output_reserve_tokens=decision.output_reserve_tokens,
             )
-        except RouterError:
+        except RouterError as exc:
+            if trace:
+                trace.record(
+                    route_attempt,
+                    "budget_check",
+                    "failed",
+                    reason=exc.code,
+                    evidence={"message": str(exc)[:500]},
+                )
+                await _save_request_trace(current, trace)
             await current.budget.release(budget_reservation)
             await lease.release_deployment()
             if decision.endpoint.cloud and capacity_busy_seen:
                 raise AllLocalCapacityBusyError()
             raise
+        if trace:
+            trace.record(
+                route_attempt,
+                "budget_check",
+                "passed",
+                reason=(
+                    "cloud_budget_reserved"
+                    if decision.endpoint.cloud
+                    else "local_no_budget_required"
+                ),
+                evidence={
+                    "cloud": decision.endpoint.cloud,
+                    "reservation": budget_reservation is not None,
+                },
+            )
 
         decision.capacity_attempts = capacity_attempts
         decision.queue_wait_ms = queue_wait_ms
@@ -955,6 +1236,18 @@ async def _acquire_route_capacity(
                 decision.reason = "capacity_spillover"
         elif selected_deployment != initial_deployment:
             decision.reason = "capacity_spillover"
+        if trace:
+            trace.set_selection(
+                attempt=route_attempt,
+                selected_model=decision.endpoint.public_model,
+                endpoint_id=decision.endpoint.id,
+                deployment_id=decision.deployment_id,
+                task=decision.task,
+                reason=decision.reason,
+                affinity=decision.affinity,
+            )
+            trace.confirm_selection(attempt=route_attempt)
+            await _save_request_trace(current, trace)
 
         return (
             decision,
@@ -1682,6 +1975,27 @@ async def _stream_response(
                         interrupted=True,
                     )
                 )
+            if not completed and decision.trace:
+                decision.trace.record(
+                    decision.attempts,
+                    "upstream_request",
+                    "error",
+                    reason="stream_interrupted",
+                    evidence={"status_code": 499},
+                )
+                decision.trace.fail(
+                    status_code=499,
+                    code="stream_interrupted",
+                    message=(
+                        "stream ended before a complete response"
+                    ),
+                    interrupted=True,
+                    attempt=decision.attempts,
+                )
+                await _save_request_trace(
+                    current,
+                    decision.trace,
+                )
             await _audit(
                 current,
                 request_id=request_id,
@@ -1781,6 +2095,18 @@ async def _audit(
         usage,
         prompt_tokens_fallback=decision.prompt_tokens,
     )
+    if decision.trace and not decision.trace.terminal:
+        decision.trace.finish(
+            attempt=decision.attempts,
+            status_code=status_code,
+            evidence={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cached_prompt_tokens": cached_prompt_tokens,
+                "cache_hit_ratio": cache_hit_ratio,
+            },
+        )
+        await _save_request_trace(current, decision.trace)
     current.audit.write(
         "request_completed",
         request_id=request_id,
@@ -1994,6 +2320,106 @@ def _audit_started(
         candidate_rejections=list(decision.candidate_rejections),
         instance_id=current.instance_id,
         boot_id=current.boot_id,
+    )
+
+
+async def _save_request_trace(
+    current: RouterRuntime,
+    trace: DecisionTrace | None,
+) -> None:
+    if trace is None:
+        return
+    try:
+        await asyncio.shield(current.route_traces.save(trace))
+    except Exception as exc:
+        current.audit.write(
+            "route_trace_write_failed",
+            request_id=trace.request_id,
+            error=type(exc).__name__,
+            instance_id=current.instance_id,
+            boot_id=current.boot_id,
+        )
+
+
+async def _finish_request_trace_error(
+    request: Request,
+    exc: RouterError,
+) -> None:
+    trace = getattr(request.state, "route_trace", None)
+    if trace is None or trace.terminal:
+        return
+    current = _runtime(request)
+    trace.fail(
+        status_code=exc.status_code,
+        code=exc.code,
+        message=str(exc),
+    )
+    await _save_request_trace(current, trace)
+
+
+async def _finish_trace_exception(
+    current: RouterRuntime,
+    trace: DecisionTrace | None,
+    exc: BaseException,
+) -> None:
+    if trace is None or trace.terminal:
+        return
+    interrupted = isinstance(exc, asyncio.CancelledError)
+    trace.fail(
+        status_code=(
+            499
+            if interrupted
+            else int(getattr(exc, "status_code", 500))
+        ),
+        code=(
+            "request_interrupted"
+            if interrupted
+            else str(
+                getattr(
+                    exc,
+                    "code",
+                    "internal_router_error",
+                )
+            )
+        ),
+        message=(
+            "request interrupted before completion"
+            if interrupted
+            else str(exc) or type(exc).__name__
+        ),
+        interrupted=interrupted,
+    )
+    await _save_request_trace(current, trace)
+
+
+def _record_trace_retry(
+    trace: DecisionTrace | None,
+    *,
+    attempt: int,
+    status_code: int,
+    reason: str,
+    allowed: bool,
+    upstream: bool = True,
+) -> None:
+    if trace is None or trace.terminal:
+        return
+    if upstream:
+        trace.record(
+            attempt,
+            "upstream_request",
+            "error",
+            reason=reason,
+            evidence={"status_code": status_code},
+        )
+    trace.record(
+        attempt,
+        "retry_decision",
+        "passed" if allowed else "failed",
+        reason=reason,
+        evidence={
+            "allowed": allowed,
+            "status_code": status_code,
+        },
     )
 
 

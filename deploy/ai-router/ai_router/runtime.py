@@ -4,6 +4,7 @@ import asyncio
 import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from .config import Registry, Settings
 from .evaluator import TaskEvaluator
 from .health import HealthMonitor
 from .policy import ConversationRepository, RoutingPolicy
+from .route_trace import RouteTraceStore
 from .scheduler import ClientLimiter, Scheduler
 from .store import InMemoryStateStore, RedisStateStore, StateStore
 from .token_counter import HuggingFaceTokenCounter, TokenCounter
@@ -41,6 +43,7 @@ class RouterRuntime:
     compactor: ContextCompactor
     policy: RoutingPolicy
     audit: AuditLog
+    route_traces: RouteTraceStore
     training: TrainingArchive | None
     internal_client: httpx.AsyncClient
     internal_base_url: str
@@ -98,8 +101,27 @@ class RouterRuntime:
                 "training_archive_backfill_completed",
                 records=backfilled,
             )
+        removed_traces = await self.route_traces.cleanup()
+        if removed_traces:
+            self.audit.write(
+                "route_trace_retention_cleanup",
+                records=removed_traces,
+            )
         if not self.track_instance:
             return
+        interrupted_traces = (
+            await self.route_traces.interrupt_previous_boot(
+                self.instance_id,
+                self.boot_id,
+            )
+        )
+        if interrupted_traces:
+            self.audit.write(
+                "route_traces_interrupted_by_restart",
+                records=interrupted_traces,
+                instance_id=self.instance_id,
+                boot_id=self.boot_id,
+            )
         previous = await self.store.get_json(self._instance_state_key())
         cleanup = await self.scheduler.cleanup_previous_instance_leases()
         self.startup_cleanup = cleanup
@@ -369,6 +391,10 @@ def build_runtime(
         "AI_ROUTER_AUDIT_PATH",
         "/data/audit/router.jsonl",
     )
+    trace_database_path = os.environ.get(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(Path(audit_path).with_name("route-traces.sqlite3")),
+    )
     configured_instance_id = (
         instance_id
         or os.environ.get("AI_ROUTER_INSTANCE_ID", "").strip()
@@ -412,6 +438,15 @@ def build_runtime(
         compactor=compactor,
         policy=RoutingPolicy(registry, settings, health),
         audit=AuditLog(audit_path),
+        route_traces=RouteTraceStore(
+            trace_database_path,
+            retention_days=int(
+                os.environ.get(
+                    "AI_ROUTER_ROUTE_TRACE_RETENTION_DAYS",
+                    "30",
+                )
+            ),
+        ),
         training=training,
         internal_client=httpx.AsyncClient(
             timeout=httpx.Timeout(900.0, connect=5.0),

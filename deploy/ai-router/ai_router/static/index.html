@@ -32,6 +32,7 @@
       <button class="tab active" type="button" data-view="dashboard">总览</button>
       <button class="tab" type="button" data-view="nodes">模型节点</button>
       <button class="tab" type="button" data-view="requests">请求记录</button>
+      <button class="tab" type="button" data-view="audit">路由审计</button>
       <button class="tab" type="button" data-view="clients">客户端账号</button>
       <button class="tab" type="button" data-view="settings">策略设置</button>
     </nav>
@@ -234,6 +235,184 @@
               </thead>
               <tbody id="request-table"></tbody>
             </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="audit-view" class="view">
+        <section class="section-block first audit-section">
+          <div class="audit-toolbar">
+            <div class="audit-filters">
+              <label>
+                <span>请求类型</span>
+                <select id="trace-mode-filter">
+                  <option value="auto">Auto</option>
+                  <option value="explicit">显式模型</option>
+                  <option value="all">全部请求</option>
+                </select>
+              </label>
+              <label>
+                <span>审核状态</span>
+                <select id="trace-review-filter">
+                  <option value="unreviewed">未审核</option>
+                  <option value="">全部状态</option>
+                  <option value="correct">正确</option>
+                  <option value="incorrect">错误</option>
+                  <option value="needs_review">待复核</option>
+                </select>
+              </label>
+              <label>
+                <span>客户端</span>
+                <select id="trace-client-filter">
+                  <option value="">全部客户端</option>
+                </select>
+              </label>
+              <label>
+                <span>任务画像</span>
+                <select id="trace-task-filter">
+                  <option value="">全部画像</option>
+                </select>
+              </label>
+              <label>
+                <span>实际模型</span>
+                <select id="trace-model-filter">
+                  <option value="">全部模型</option>
+                </select>
+              </label>
+              <label>
+                <span>请求状态</span>
+                <select id="trace-status-filter">
+                  <option value="">全部状态</option>
+                  <option value="running">运行中</option>
+                  <option value="succeeded">成功</option>
+                  <option value="failed">失败</option>
+                  <option value="interrupted">已中断</option>
+                </select>
+              </label>
+              <label class="trace-search-field">
+                <span>请求 / 会话 ID</span>
+                <input id="trace-search" type="search" placeholder="输入 ID">
+              </label>
+            </div>
+            <div class="audit-toolbar-actions">
+              <label class="audit-group-toggle">
+                <input id="trace-group-conversation" type="checkbox">
+                <span>按会话分组</span>
+              </label>
+              <button id="trace-filter-reset" type="button" class="secondary">
+                重置
+              </button>
+            </div>
+          </div>
+
+          <div class="audit-layout">
+            <aside class="trace-list-pane" aria-label="路由请求列表">
+              <div class="audit-pane-heading">
+                <div>
+                  <h3>请求轨迹</h3>
+                  <span id="trace-count" class="section-meta">0 条</span>
+                </div>
+                <span id="trace-list-state" class="section-meta"></span>
+              </div>
+              <div id="trace-list" class="trace-list"></div>
+              <button id="trace-load-more" type="button" class="secondary trace-load-more" hidden>
+                加载更多
+              </button>
+            </aside>
+
+            <section class="trace-detail-pane" aria-label="路由流程详情">
+              <div id="trace-detail-empty" class="trace-detail-empty">
+                选择一条请求，查看它实际经过的完整路由路径。
+              </div>
+              <div id="trace-detail" hidden>
+                <div class="trace-detail-head">
+                  <div>
+                    <div class="trace-title-row">
+                      <h3 id="trace-detail-title">路由轨迹</h3>
+                      <span id="trace-detail-status"></span>
+                    </div>
+                    <p id="trace-detail-summary"></p>
+                    <div id="trace-detail-meta" class="trace-detail-meta"></div>
+                    <div id="trace-routing-state" class="trace-routing-state" hidden></div>
+                  </div>
+                  <div class="trace-graph-controls" aria-label="流程图控制">
+                    <button id="trace-pan-left" class="secondary icon-control" type="button" title="向左查看" aria-label="向左查看">‹</button>
+                    <button id="trace-zoom-out" class="secondary icon-control" type="button" title="缩小" aria-label="缩小">−</button>
+                    <button id="trace-fit" class="secondary icon-control" type="button" title="适应画布" aria-label="适应画布">↔</button>
+                    <button id="trace-zoom-in" class="secondary icon-control" type="button" title="放大" aria-label="放大">+</button>
+                    <button id="trace-current" class="secondary icon-control" type="button" title="定位最终节点" aria-label="定位最终节点">◎</button>
+                    <button id="trace-fullscreen" class="secondary icon-control" type="button" title="全屏查看" aria-label="全屏查看">⛶</button>
+                    <button id="trace-pan-right" class="secondary icon-control" type="button" title="向右查看" aria-label="向右查看">›</button>
+                  </div>
+                </div>
+
+                <div id="trace-core-heading" class="trace-core-heading">
+                  <strong>智能路由核心</strong>
+                  <span>候选资格 → 会话亲和 / Provider 优先级 → 综合评分 → 容量 → 最终模型</span>
+                </div>
+                <div id="trace-attempts" class="trace-attempts" aria-label="路由尝试"></div>
+                <div id="trace-graph-viewport" class="trace-graph-viewport" tabindex="0">
+                  <div id="trace-graph" class="trace-graph">
+                    <div class="trace-graph-empty">流程图尚未加载</div>
+                  </div>
+                </div>
+
+                <section id="trace-node-inspector" class="trace-node-inspector" hidden>
+                  <div class="trace-inspector-head">
+                    <div>
+                      <span>判断证据</span>
+                      <h4 id="trace-node-title">节点详情</h4>
+                    </div>
+                    <span id="trace-node-status"></span>
+                  </div>
+                  <p id="trace-node-reason" class="trace-node-reason"></p>
+                  <div id="trace-node-evidence" class="trace-node-evidence"></div>
+                </section>
+
+                <form id="trace-review-form" class="trace-review-form">
+                  <div class="trace-review-heading">
+                    <div>
+                      <h4>人工审核</h4>
+                      <span id="trace-current-review" class="section-meta">尚未审核</span>
+                    </div>
+                  </div>
+                  <div class="trace-review-grid">
+                    <label>
+                      <span>审核结论</span>
+                      <select id="trace-review-verdict" required>
+                        <option value="">请选择</option>
+                        <option value="correct">路由正确</option>
+                        <option value="incorrect">路由错误</option>
+                        <option value="needs_review">待进一步复核</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>期望画像</span>
+                      <select id="trace-expected-task">
+                        <option value="">不指定</option>
+                        <option value="general">general</option>
+                        <option value="code">code</option>
+                        <option value="batch">batch</option>
+                        <option value="long-context">long-context</option>
+                        <option value="home-automation">home-automation</option>
+                        <option value="asr">asr</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>期望模型</span>
+                      <input id="trace-expected-model" type="text" maxlength="240" placeholder="可留空">
+                    </label>
+                    <label class="trace-review-note">
+                      <span>审核备注</span>
+                      <textarea id="trace-review-note" maxlength="1000" rows="3" placeholder="说明判断依据或需要复核的问题"></textarea>
+                    </label>
+                  </div>
+                  <div class="trace-review-actions">
+                    <button id="trace-review-submit" type="submit">提交审核</button>
+                  </div>
+                </form>
+              </div>
+            </section>
           </div>
         </section>
       </section>
@@ -503,6 +682,7 @@
       </div>
     </dialog>
 
+    <script src="/assets/vendor/mermaid/mermaid.min.js"></script>
     <script src="/assets/app.js"></script>
   </body>
 </html>

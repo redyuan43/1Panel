@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .errors import RouterError
+from .route_trace import graph_document, validate_review
 from .runtime import RouterRuntime, build_runtime
 
 
@@ -222,6 +223,109 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         )
         return {"key": key}
 
+    @app.get("/api/route-graph")
+    async def route_graph(request: Request) -> dict[str, Any]:
+        _authorized_runtime(request)
+        return graph_document()
+
+    @app.get("/api/route-traces")
+    async def route_traces(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=100),
+        cursor: str | None = None,
+        request_mode: str = Query(default="auto"),
+        client_id: str | None = None,
+        conversation_id: str | None = None,
+        task: str | None = None,
+        selected_model: str | None = None,
+        status: str | None = None,
+        review_status: str | None = None,
+        search: str | None = None,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        if request_mode not in {"auto", "explicit", "all"}:
+            raise RouterError(
+                "request_mode must be auto, explicit, or all",
+                status_code=400,
+                code="invalid_trace_filter",
+            )
+        return await current.route_traces.list(
+            limit=limit,
+            cursor=cursor,
+            request_mode=request_mode,
+            client_id=_query_text(client_id),
+            conversation_id=_query_text(conversation_id),
+            task=_query_text(task),
+            selected_model=_query_text(selected_model),
+            status=_query_text(status),
+            review_status=_query_text(review_status),
+            search=_query_text(search),
+        )
+
+    @app.get("/api/route-traces/{request_id}")
+    async def route_trace(
+        request_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await current.route_traces.get(request_id)
+        if value is None:
+            raise RouterError(
+                "route trace was not found",
+                status_code=404,
+                code="route_trace_not_found",
+            )
+        return {"trace": value}
+
+    @app.post("/api/route-traces/{request_id}/reviews")
+    async def review_route_trace(
+        request_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        try:
+            verdict, expected_task, expected_model, note = (
+                validate_review(value)
+            )
+            review = await current.route_traces.add_review(
+                request_id,
+                verdict=verdict,
+                expected_task=expected_task,
+                expected_model=expected_model,
+                note=note,
+                reviewer_source=(
+                    request.client.host
+                    if request.client
+                    else "unknown"
+                ),
+            )
+        except ValueError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=400,
+                code="invalid_route_review",
+            ) from exc
+        except KeyError as exc:
+            raise RouterError(
+                "route trace was not found",
+                status_code=404,
+                code="route_trace_not_found",
+            ) from exc
+        current.audit.write(
+            "route_trace_reviewed",
+            request_id=request_id,
+            verdict=verdict,
+            expected_task=expected_task,
+            expected_model=expected_model,
+            source=(
+                request.client.host
+                if request.client
+                else "unknown"
+            ),
+        )
+        return {"review": review}
+
     @app.get("/api/dashboard")
     async def dashboard(
         request: Request,
@@ -327,6 +431,11 @@ async def _json_body(request: Request) -> dict[str, Any]:
 
 def _allowed_client_models(current: RouterRuntime) -> set[str]:
     return {"*", "auto", *current.registry.public_models()}
+
+
+def _query_text(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    return text[:256] if text else None
 
 
 def _editable(value: dict[str, Any]) -> dict[str, Any]:

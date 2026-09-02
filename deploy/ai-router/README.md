@@ -16,6 +16,7 @@ Agent 与第三方调用示例见
 - `POST /v1/responses`
 - `GET /v1/models`
 - `GET /api/dashboard`：控制面运行总览、节点、物理 worker、请求记录和云端预算
+- `GET /api/route-graph` 与 `/api/route-traces`：真实路由决策图、证据和人工审核
 - `GET/POST/PATCH /api/clients`：客户端账号、独立限额、模型权限和多 Key 管理
 - `model=auto` 的能力、上下文、健康、质量、负载和层级筛选
 - 显式模型严格匹配，不静默换成其他模型
@@ -62,6 +63,35 @@ POST  /api/clients/{client_id}/keys/{key_id}/revoke
 ```
 
 不提供账号硬删除。停用账号会拒绝新请求，同时保留历史请求和审计关联。
+
+## 路由审计
+
+控制台一级导航“路由审计”展示认证后请求的真实决策轨迹。页面默认筛选
+`model=auto` 与未审核请求，可按客户端、会话、画像、实际模型、结果和审核
+状态过滤。流程图由项目内置 Mermaid 渲染，不依赖公网 CDN；多次故障回退按
+attempt 分段展示。主图使用横向布局，只呈现候选资格、会话亲和、Provider
+优先级、评分、容量和最终模型等智能路由核心；认证或请求校验等外围结果作为
+结构化证据展示，不伪装成路由失败。节点可展开候选快照、拒绝原因、容量、
+上下文和评分证据。
+
+控制面接口均使用 `AI_ROUTER_ADMIN_KEY`：
+
+```text
+GET  /api/route-graph
+GET  /api/route-traces
+GET  /api/route-traces/{request_id}
+POST /api/route-traces/{request_id}/reviews
+```
+
+审核记录只追加，不自动修改生产策略。`incorrect` 审核至少需要
+`expected_task`、`expected_model` 或 `note` 中的一项。
+
+轨迹使用 SQLite WAL，容器内默认路径为
+`/data/audit/route-traces.sqlite3`，对应宿主持久目录
+`/opt/1panel/ai-router/audit/route-traces.sqlite3`。默认保留 30 天，旧实例
+遗留的 `running` 记录会在启动时标记为 `interrupted`。摘要最多 800 字符，
+不保存 API Key、Base64 媒体、完整工具参数或原始请求；训练归档内容不会为
+审计页面解密。
 
 ## 多轮上下文与物理缓存
 
@@ -219,6 +249,7 @@ ChatGPT Codex 订阅后端不接受 `previous_response_id`，Router 会用该 ID
 - Git 中只记录密钥环境变量名
 - 运行时覆盖保存在 `/opt/1panel/ai-router/settings.yaml`
 - 审计日志保存在 `/opt/1panel/ai-router/audit/router.jsonl`
+- 路由轨迹保存在 `/opt/1panel/ai-router/audit/route-traces.sqlite3`
 - 会话迁移胶囊使用 `AI_ROUTER_STATE_KEY` 加密
 - 客户端 Key 仅保存派生 HMAC 摘要，创建明文响应使用 `Cache-Control: no-store`
 - 请求体默认最大 32 MiB，超限返回 `413 payload_too_large`

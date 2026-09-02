@@ -8,6 +8,7 @@ from typing import Any
 from .config import Registry, Settings
 from .errors import NoEligibleModelError, RouterError
 from .health import HealthMonitor
+from .route_trace import DecisionTrace
 from .store import StateStore
 from .types import (
     ConversationState,
@@ -114,6 +115,8 @@ class RoutingPolicy:
         excluded_endpoint_ids: set[str] | None = None,
         excluded_deployment_ids: set[str] | None = None,
         routing_key: str = "",
+        trace: DecisionTrace | None = None,
+        trace_attempt: int = 1,
     ) -> RouteDecision:
         excluded = excluded_endpoint_ids or set()
         excluded_deployments = excluded_deployment_ids or set()
@@ -127,6 +130,16 @@ class RoutingPolicy:
             else list(self.registry.by_public_model(requested_model))
         )
         if not endpoints:
+            if trace:
+                trace.record_candidate_round(
+                    trace_attempt,
+                    [],
+                    mode=(
+                        "auto"
+                        if requested_model == "auto"
+                        else "explicit"
+                    ),
+                )
             raise RouterError(
                 f"unknown model: {requested_model}",
                 status_code=404,
@@ -135,6 +148,7 @@ class RoutingPolicy:
         statuses = await self.health.statuses(endpoints)
         candidates: list[Endpoint] = []
         rejections: list[str] = []
+        trace_candidates: list[dict[str, Any]] = []
         for endpoint in endpoints:
             reason = (
                 "excluded"
@@ -157,6 +171,28 @@ class RoutingPolicy:
                 rejections.append(f"{endpoint.id}:{reason}")
             else:
                 candidates.append(endpoint)
+            if trace:
+                trace_candidates.append(
+                    self._trace_candidate(
+                        endpoint,
+                        statuses[endpoint.id],
+                        evaluation=evaluation,
+                        prompt_tokens=prompt_tokens,
+                        output_reserve_tokens=output_reserve_tokens,
+                        required_capabilities=required,
+                        rejection_reason=reason,
+                    )
+                )
+        if trace:
+            trace.record_candidate_round(
+                trace_attempt,
+                trace_candidates,
+                mode=(
+                    "auto"
+                    if requested_model == "auto"
+                    else "explicit"
+                ),
+            )
         if not candidates:
             raise NoEligibleModelError(
                 "no eligible model is available: " + ", ".join(rejections)
@@ -168,6 +204,19 @@ class RoutingPolicy:
                 None,
             )
             if pinned:
+                if trace:
+                    trace.record(
+                        trace_attempt,
+                        "conversation_affinity",
+                        "selected",
+                        branch="hit",
+                        reason="conversation_affinity",
+                        evidence={
+                            "conversation_id": conversation.conversation_id,
+                            "endpoint_id": pinned.id,
+                            "deployment_id": conversation.deployment_id,
+                        },
+                    )
                 decision = RouteDecision(
                     endpoint=pinned,
                     requested_model=requested_model,
@@ -183,8 +232,9 @@ class RoutingPolicy:
                     ),
                     required_capabilities=required.labels(),
                     candidate_rejections=tuple(rejections),
+                    trace=trace,
                 )
-                await self._bind_physical_deployment(
+                await self._bind_traced_deployment(
                     decision,
                     statuses[pinned.id],
                     conversation,
@@ -193,14 +243,56 @@ class RoutingPolicy:
                     modalities,
                     image_count,
                     routing_key,
+                    trace,
+                    trace_attempt,
                 )
                 return decision
+        if trace:
+            trace.record(
+                trace_attempt,
+                "conversation_affinity",
+                "evaluated",
+                branch="miss",
+                reason=(
+                    "conversation_endpoint_ineligible"
+                    if conversation
+                    else "new_conversation"
+                ),
+                evidence={
+                    "conversation_id": (
+                        conversation.conversation_id
+                        if conversation
+                        else None
+                    ),
+                    "previous_endpoint_id": (
+                        conversation.endpoint_id
+                        if conversation
+                        else None
+                    ),
+                },
+            )
 
         if requested_model == "auto":
+            before_priority = [item.id for item in candidates]
             candidates = self._apply_provider_priority(
                 candidates,
                 evaluation,
             )
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "provider_priority",
+                    "passed",
+                    branch="auto",
+                    reason=self._provider_priority_reason(evaluation),
+                    evidence={
+                        "before_endpoint_ids": before_priority,
+                        "after_endpoint_ids": [
+                            item.id for item in candidates
+                        ],
+                        "preferred_tier": evaluation.preferred_tier,
+                    },
+                )
 
         if requested_model != "auto":
             endpoint = max(
@@ -211,6 +303,24 @@ class RoutingPolicy:
                     item.id,
                 ),
             )
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "explicit_selection",
+                    "selected",
+                    branch="explicit",
+                    reason="explicit_model",
+                    evidence={
+                        "endpoint_id": endpoint.id,
+                        "selected_model": endpoint.public_model,
+                        "load_headroom": statuses[
+                            endpoint.id
+                        ].load_headroom,
+                        "latency_score": statuses[
+                            endpoint.id
+                        ].latency_score,
+                    },
+                )
             migration = bool(
                 conversation and endpoint.id != conversation.endpoint_id
             )
@@ -233,8 +343,9 @@ class RoutingPolicy:
                 ),
                 required_capabilities=required.labels(),
                 candidate_rejections=tuple(rejections),
+                trace=trace,
             )
-            await self._bind_physical_deployment(
+            await self._bind_traced_deployment(
                 decision,
                 statuses[endpoint.id],
                 conversation,
@@ -243,6 +354,8 @@ class RoutingPolicy:
                 modalities,
                 image_count,
                 routing_key,
+                trace,
+                trace_attempt,
             )
             return decision
 
@@ -258,6 +371,39 @@ class RoutingPolicy:
             )
             for endpoint in candidates
         ]
+        if trace:
+            trace.record(
+                trace_attempt,
+                "score_candidates",
+                "passed",
+                branch="auto",
+                reason="candidate_scoring",
+                evidence={
+                    "scores": [
+                        {
+                            "endpoint_id": candidate.id,
+                            "score": round(candidate_score, 6),
+                            "quality_score": float(
+                                candidate.quality.get(
+                                    evaluation.task,
+                                    0,
+                                )
+                            ),
+                            "load_headroom": statuses[
+                                candidate.id
+                            ].load_headroom,
+                            "latency_score": statuses[
+                                candidate.id
+                            ].latency_score,
+                        }
+                        for candidate_score, candidate in sorted(
+                            scored,
+                            key=lambda item: item[0],
+                            reverse=True,
+                        )
+                    ]
+                },
+            )
         score, endpoint = max(scored, key=lambda item: (item[0], item[1].node == "ai", item[1].id))
         migration = bool(conversation and endpoint.id != conversation.endpoint_id)
         decision = RouteDecision(
@@ -281,8 +427,9 @@ class RoutingPolicy:
             ),
             required_capabilities=required.labels(),
             candidate_rejections=tuple(rejections),
+            trace=trace,
         )
-        await self._bind_physical_deployment(
+        await self._bind_traced_deployment(
             decision,
             statuses[endpoint.id],
             conversation,
@@ -291,8 +438,171 @@ class RoutingPolicy:
             modalities,
             image_count,
             routing_key,
+            trace,
+            trace_attempt,
         )
         return decision
+
+    def _trace_candidate(
+        self,
+        endpoint: Endpoint,
+        status: EndpointStatus,
+        *,
+        evaluation: Evaluation,
+        prompt_tokens: int,
+        output_reserve_tokens: int,
+        required_capabilities: RequestCapabilities,
+        rejection_reason: str | None,
+    ) -> dict[str, Any]:
+        workers = status.detail.get("workers", [])
+        safe_context = min(
+            endpoint.safe_context_tokens,
+            status.eligible_context_tokens
+            or endpoint.safe_context_tokens,
+        )
+        stale_after = float(
+            self.settings.section("health").get(
+                "stale_after_seconds",
+                15,
+            )
+        )
+        return {
+            "endpoint_id": endpoint.id,
+            "model": endpoint.public_model,
+            "node": endpoint.node,
+            "cloud": endpoint.cloud,
+            "enabled": endpoint.enabled,
+            "auto_candidate": endpoint.auto_candidate,
+            "tier": endpoint.tier,
+            "modalities": list(endpoint.modalities),
+            "tasks": list(endpoint.tasks),
+            "required_capabilities": list(
+                required_capabilities.labels()
+            ),
+            "capability_validation": (
+                endpoint.capabilities.validation_status
+            ),
+            "healthy": status.healthy,
+            "fresh": status.is_fresh(time.time(), stale_after),
+            "load_headroom": status.load_headroom,
+            "latency_score": status.latency_score,
+            "required_context_tokens": (
+                prompt_tokens + output_reserve_tokens
+            ),
+            "safe_context_tokens": safe_context,
+            "quality_score": float(
+                endpoint.quality.get(evaluation.task, 0)
+            ),
+            "quality_status": endpoint.metadata.get(
+                "quality_status",
+                "unverified",
+            ),
+            "physical_deployments": {
+                "total": len(workers),
+                "ready": sum(
+                    bool(item.get("ready"))
+                    for item in workers
+                ),
+                "available": sum(
+                    bool(
+                        item.get("ready")
+                        and item.get("schedulable", True)
+                        and item.get("state") == "available"
+                    )
+                    for item in workers
+                ),
+            },
+            "rejection_reason": rejection_reason,
+        }
+
+    def _provider_priority_reason(
+        self,
+        evaluation: Evaluation,
+    ) -> str:
+        if evaluation.preferred_tier:
+            return "preferred_tier"
+        return str(
+            self.settings.section("routing").get(
+                "provider_priority",
+                "local_first",
+            )
+        )
+
+    async def _bind_traced_deployment(
+        self,
+        decision: RouteDecision,
+        status: EndpointStatus,
+        conversation: ConversationState | None,
+        required_context: int,
+        excluded_deployment_ids: set[str],
+        modalities: set[str],
+        image_count: int,
+        routing_key: str,
+        trace: DecisionTrace | None,
+        trace_attempt: int,
+    ) -> None:
+        if trace:
+            trace.record(
+                trace_attempt,
+                "deployment_binding",
+                "running",
+                reason="deployment_binding",
+                evidence={"endpoint_id": decision.endpoint.id},
+            )
+        try:
+            await self._bind_physical_deployment(
+                decision,
+                status,
+                conversation,
+                required_context,
+                excluded_deployment_ids,
+                modalities,
+                image_count,
+                routing_key,
+            )
+        except Exception as exc:
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "deployment_binding",
+                    "error",
+                    reason=type(exc).__name__,
+                    evidence={
+                        "endpoint_id": decision.endpoint.id,
+                        "message": str(exc)[:500],
+                    },
+                )
+            raise
+        if trace:
+            trace.record(
+                trace_attempt,
+                "deployment_binding",
+                "selected",
+                reason="deployment_selected",
+                evidence={
+                    "endpoint_id": decision.endpoint.id,
+                    "deployment_id": (
+                        decision.deployment_id
+                        or decision.endpoint.id
+                    ),
+                    "deployment_profile_id": (
+                        decision.deployment_profile_id
+                    ),
+                    "safe_context_tokens": (
+                        decision.deployment_safe_context_tokens
+                        or decision.endpoint.safe_context_tokens
+                    ),
+                },
+            )
+            trace.set_selection(
+                attempt=trace_attempt,
+                selected_model=decision.endpoint.public_model,
+                endpoint_id=decision.endpoint.id,
+                deployment_id=decision.deployment_id,
+                task=decision.task,
+                reason=decision.reason,
+                affinity=decision.affinity,
+            )
 
     async def _ineligible_reason(
         self,

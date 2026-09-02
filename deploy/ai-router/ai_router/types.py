@@ -267,6 +267,7 @@ class RouteDecision:
     tool_history_repairs: int = 0
     candidate_rejections: tuple[str, ...] = ()
     image_resizes: int = 0
+    trace: Any | None = field(default=None, repr=False, compare=False)
 
     def response_headers(self, request_id: str) -> dict[str, str]:
         values = {

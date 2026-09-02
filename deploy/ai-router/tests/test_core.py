@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import sqlite3
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -64,6 +65,14 @@ from ai_router.pilot import (
     write_json,
 )
 from ai_router.protocol import normalize_request
+from ai_router.route_trace import (
+    DecisionTrace,
+    RouteTraceStore,
+    graph_document,
+    registry_fingerprint,
+    request_excerpt,
+    settings_fingerprint,
+)
 from ai_router.runtime import build_runtime
 from ai_router.scheduler import ClientLimiter, Scheduler
 from ai_router.store import InMemoryStateStore
@@ -5790,6 +5799,473 @@ def test_control_dashboard_aggregates_runtime_state(
     assert payload["requests"][0]["capacity_attempts"] == 2
     assert payload["requests"][0]["queue_wait_ms"] == 12.5
     assert payload["requests"][1]["status"] == "running"
+
+
+def test_route_trace_store_redacts_filters_and_appends_reviews(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    store = RouteTraceStore(tmp_path / "route-traces.sqlite3")
+    with sqlite3.connect(store.database_path) as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    trace = DecisionTrace(
+        request_id="trace-store-1",
+        client_id="work-buddy",
+        key_id="key-1",
+        protocol="chat",
+        requested_model="auto",
+        excerpt=request_excerpt(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    f"review this token {secret} "
+                                    + "x" * 1000
+                                ),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": (
+                                        "data:image/png;base64,"
+                                        + "A" * 1024
+                                    )
+                                },
+                            },
+                        ],
+                    }
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "github.search",
+                            "parameters": {
+                                "secret": secret,
+                            },
+                        },
+                    }
+                ],
+            },
+            "chat",
+        ),
+        instance_id="router-api-local",
+        boot_id="boot-1",
+        settings_hash=settings_fingerprint(value),
+        registry_hash=registry_fingerprint(registry),
+    )
+    trace.set_request_context(
+        conversation_id="conversation-1",
+        prompt_tokens=1200,
+        output_reserve_tokens=256,
+        modalities={"text"},
+        required_capabilities=["chat", "tools"],
+    )
+    trace.set_evaluation(
+        Evaluation("code", None, 0.96, "test_evaluator")
+    )
+    trace.record_candidate_round(
+        1,
+        [
+            {
+                "endpoint_id": "ivan-qwen38-flash-128k",
+                "rejection_reason": None,
+            },
+            {
+                "endpoint_id": "amd-qwen38-rocmfpx-128k",
+                "rejection_reason": "context",
+            },
+        ],
+        mode="auto",
+    )
+    trace_steps = trace.payload["attempts"][0]["steps"]
+    explicit_step = next(
+        item for item in trace_steps
+        if item["node_id"] == "explicit_model"
+    )
+    candidate_step = next(
+        item for item in trace_steps
+        if item["node_id"] == "candidate_scope"
+    )
+    assert explicit_step["status"] == "evaluated"
+    assert candidate_step["evidence"]["eligible_count"] == 1
+    assert candidate_step["evidence"]["rejected_count"] == 1
+    assert all(
+        item["path"] is False
+        for item in trace_steps
+        if item["node_id"].startswith("candidate_")
+        and item["node_id"] != "candidate_scope"
+    )
+    trace.finish(attempt=1, status_code=200)
+    run(store.save(trace))
+
+    listed = run(
+        store.list(
+            request_mode="auto",
+            review_status="unreviewed",
+        )
+    )
+    assert [item["request_id"] for item in listed["items"]] == [
+        "trace-store-1"
+    ]
+    assert listed["items"][0]["excerpt"]["tool_names"] == [
+        "github.search"
+    ]
+    assert len(listed["items"][0]["excerpt"]["text"]) <= 800
+    database_text = (
+        tmp_path / "route-traces.sqlite3"
+    ).read_bytes().decode("utf-8", errors="ignore")
+    assert secret not in database_text
+    assert "data:image/png;base64" not in database_text
+    assert "A" * 160 not in database_text
+
+    review = run(
+        store.add_review(
+            "trace-store-1",
+            verdict="incorrect",
+            expected_task="general",
+            expected_model="deepseek/deepseek-v4-flash",
+            note="画像判断偏向代码。",
+            reviewer_source="127.0.0.1",
+        )
+    )
+    assert review["verdict"] == "incorrect"
+    detail = run(store.get("trace-store-1"))
+    assert detail is not None
+    assert detail["review_status"] == "incorrect"
+    assert detail["current_review"]["expected_task"] == "general"
+    assert len(detail["reviews"]) == 1
+    assert run(
+        store.list(
+            request_mode="all",
+            review_status="incorrect",
+        )
+    )["items"][0]["request_id"] == "trace-store-1"
+
+    interrupted = DecisionTrace(
+        request_id="trace-interrupted-1",
+        client_id="work-buddy",
+        key_id="key-1",
+        protocol="chat",
+        requested_model="auto",
+        excerpt={"text": "still running", "tool_names": []},
+        instance_id="router-api-local",
+        boot_id="boot-old",
+        settings_hash=settings_fingerprint(value),
+        registry_hash=registry_fingerprint(registry),
+    )
+    run(store.save(interrupted))
+    assert run(
+        store.interrupt_previous_boot(
+            "router-api-local",
+            "boot-new",
+        )
+    ) == 1
+    interrupted_detail = run(store.get("trace-interrupted-1"))
+    assert interrupted_detail is not None
+    assert interrupted_detail["status"] == "interrupted"
+    assert interrupted_detail["error"]["code"] == "router_restarted"
+    assert interrupted_detail["attempts"][0]["steps"][-1][
+        "node_id"
+    ] == "failed"
+
+    expired = DecisionTrace(
+        request_id="trace-expired-1",
+        client_id="work-buddy",
+        key_id="key-1",
+        protocol="chat",
+        requested_model="auto",
+        excerpt={"text": "expired", "tool_names": []},
+        instance_id="router-api-local",
+        boot_id="boot-new",
+        settings_hash=settings_fingerprint(value),
+        registry_hash=registry_fingerprint(registry),
+    )
+    expired.payload["started_at"] = time.time() - 31 * 86400
+    expired.payload["updated_at"] = expired.payload["started_at"]
+    expired.finish(attempt=1, status_code=200)
+    run(store.save(expired))
+    run(
+        store.add_review(
+            "trace-expired-1",
+            verdict="correct",
+            expected_task=None,
+            expected_model=None,
+            note="old review",
+            reviewer_source="127.0.0.1",
+        )
+    )
+    assert run(store.cleanup()) == 1
+    assert run(store.get("trace-expired-1")) is None
+
+
+def test_control_route_trace_api_and_review_validation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    trace = DecisionTrace(
+        request_id="control-trace-1",
+        client_id="1panel",
+        key_id="key-1",
+        protocol="chat",
+        requested_model="auto",
+        excerpt={"text": "route this", "tool_names": []},
+        instance_id="router-api-local",
+        boot_id="boot-1",
+        settings_hash=settings_fingerprint(value),
+        registry_hash=registry_fingerprint(registry),
+    )
+    trace.set_evaluation(Evaluation("general", None, 1, "test"))
+    trace.finish(attempt=1, status_code=200)
+    run(runtime.route_traces.save(trace))
+
+    app = create_control_app(runtime)
+    with TestClient(app) as client:
+        index = client.get("/")
+        mermaid_asset = client.get(
+            "/assets/vendor/mermaid/mermaid.min.js"
+        )
+        assert client.get("/api/route-graph").status_code == 401
+        graph = client.get(
+            "/api/route-graph",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+        listing = client.get(
+            "/api/route-traces",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+        detail = client.get(
+            "/api/route-traces/control-trace-1",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+        invalid = client.post(
+            "/api/route-traces/control-trace-1/reviews",
+            headers={"Authorization": "Bearer admin-key"},
+            json={"verdict": "incorrect"},
+        )
+        reviewed = client.post(
+            "/api/route-traces/control-trace-1/reviews",
+            headers={"Authorization": "Bearer admin-key"},
+            json={
+                "verdict": "incorrect",
+                "expected_model": "deepseek/deepseek-v4-flash",
+                "note": "期望文本代理。",
+            },
+        )
+
+    assert index.status_code == 200
+    assert 'data-view="audit"' in index.text
+    assert 'id="trace-graph"' in index.text
+    assert "/assets/vendor/mermaid/mermaid.min.js" in index.text
+    assert mermaid_asset.status_code == 200
+    assert "mermaid" in mermaid_asset.text[:1000].lower()
+    assert graph.status_code == 200
+    assert graph.json()["graph_version"] == 2
+    assert "flowchart LR" in graph.json()["mermaid"]
+    assert len(graph.json()["nodes"]) == 12
+    assert "智能路由核心" in graph.json()["mermaid"]
+    assert "upstream_request" not in {
+        item["id"] for item in graph.json()["nodes"]
+    }
+    assert listing.status_code == 200
+    assert listing.json()["items"][0]["request_id"] == "control-trace-1"
+    assert detail.status_code == 200
+    assert invalid.status_code == 400
+    assert reviewed.status_code == 200
+    assert reviewed.json()["review"]["verdict"] == "incorrect"
+    run(runtime.close())
+
+
+def test_router_persists_real_decision_trace_without_changing_route(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv(
+        "AI_ROUTER_CHECK_BOARDS_API_KEY",
+        "restricted-key",
+    )
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(audit_path))
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=(
+                    ai_workers()
+                    if endpoint.backend_type == "ai_pool"
+                    else None
+                ),
+            )
+            for endpoint in registry.endpoints
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-trace",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 20,
+                    "completion_tokens": 2,
+                    "total_tokens": 22,
+                },
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        restricted = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer restricted-key",
+                "X-Request-ID": "restricted-route-trace",
+            },
+            json={
+                "model": "local/qwen3.8-flash",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer client-key",
+                "X-Request-ID": "real-route-trace",
+            },
+            json={
+                "model": "auto",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": f"hello {secret}",
+                    }
+                ],
+                "max_tokens": 16,
+            },
+        )
+        original_save = runtime.route_traces.save
+
+        async def unavailable_trace_store(_trace) -> None:
+            raise OSError("audit disk unavailable")
+
+        runtime.route_traces.save = unavailable_trace_store
+        response_without_trace_store = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer client-key",
+                "X-Request-ID": "trace-write-failure",
+            },
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hello again"}],
+                "max_tokens": 16,
+            },
+        )
+        runtime.route_traces.save = original_save
+
+    assert restricted.status_code == 401
+    restricted_trace = run(
+        runtime.route_traces.get("restricted-route-trace")
+    )
+    assert restricted_trace is not None
+    assert restricted_trace["status"] == "failed"
+    assert restricted_trace["error"]["code"] == "invalid_api_key"
+    assert response.status_code == 200
+    assert response_without_trace_store.status_code == 200
+    assert response_without_trace_store.json()["choices"][0]["message"][
+        "content"
+    ] == response.json()["choices"][0]["message"]["content"]
+    assert response_without_trace_store.headers[
+        "x-1panel-route-model"
+    ] == response.headers["x-1panel-route-model"]
+    trace_detail = run(runtime.route_traces.get("real-route-trace"))
+    assert trace_detail is not None
+    assert trace_detail["status"] == "succeeded"
+    assert trace_detail["selected_model"] == response.headers[
+        "x-1panel-route-model"
+    ]
+    steps = trace_detail["attempts"][0]["steps"]
+    step_ids = {item["node_id"] for item in steps}
+    assert {
+        "request_received",
+        "task_evaluation",
+        "candidate_scope",
+        "provider_priority",
+        "score_candidates",
+        "deployment_binding",
+        "capacity_check",
+        "route_selected",
+        "request_prepare",
+        "budget_check",
+        "upstream_request",
+        "completed",
+    }.issubset(step_ids)
+    candidate_step = next(
+        item for item in steps if item["node_id"] == "candidate_scope"
+    )
+    endpoint_ids = {
+        item["endpoint_id"]
+        for item in candidate_step["evidence"]["candidates"]
+    }
+    assert "ivan-qwen38-flash-128k" in endpoint_ids
+    assert "amd-qwen38-rocmfpx-128k" in endpoint_ids
+    assert secret not in json.dumps(trace_detail, ensure_ascii=False)
+    assert response.headers["x-1panel-route-reason"]
+    run(runtime.close())
 
 
 class CharacterTokenCounter:

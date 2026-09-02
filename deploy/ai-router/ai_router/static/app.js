@@ -3,6 +3,13 @@ const state = {
   settings: null,
   dashboard: null,
   clients: [],
+  routeGraph: null,
+  routeTraces: [],
+  routeTraceCursor: null,
+  selectedTraceId: null,
+  selectedTrace: null,
+  selectedTraceAttempt: 1,
+  selectedTraceNodeId: null,
   editingClientId: null,
   selectedClientId: null,
   view: "dashboard",
@@ -13,6 +20,7 @@ const viewTitles = {
   dashboard: "运行总览",
   nodes: "模型节点",
   requests: "请求记录",
+  audit: "路由审计",
   clients: "客户端账号",
   settings: "策略设置",
 };
@@ -55,7 +63,21 @@ const statusLabels = {
   succeeded: "成功",
   failed: "失败",
   stale: "已中断",
+  interrupted: "已中断",
 };
+
+const reviewLabels = {
+  unreviewed: "未审核",
+  correct: "正确",
+  incorrect: "错误",
+  needs_review: "待复核",
+};
+
+const traceNodeLabels = {};
+let traceGraphRenderKey = "";
+let traceGraphRenderSequence = 0;
+let traceGraphScale = 1;
+let traceSearchTimer = null;
 
 const byId = (id) => document.getElementById(id);
 
@@ -585,7 +607,12 @@ function renderRecentRequests(requests) {
   byId("recent-requests").innerHTML = requests.length
     ? requests.map((item) => `
       <tr>
-        <td>${statusBadge(item.status, item.status_code)}</td>
+        <td>${statusBadge(
+          item.status,
+          item.status_code,
+          null,
+          Boolean(item.task || item.selected_model),
+        )}</td>
         <td>${formatTime(item.timestamp)}</td>
         <td>
           <strong class="table-primary">${escapeHtml(shortModel(item.selected_model || item.requested_model))}</strong>
@@ -671,11 +698,16 @@ function renderRequestTable() {
   byId("request-table").innerHTML = filtered.length
     ? filtered.map((item) => `
       <tr>
-        <td>${statusBadge(item.status, item.status_code)}</td>
+        <td>${statusBadge(
+          item.status,
+          item.status_code,
+          null,
+          Boolean(item.task || item.selected_model),
+        )}</td>
         <td>${formatTime(item.timestamp)}</td>
         <td>
           <strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong>
-          <span class="table-secondary">${escapeHtml(shortId(item.request_id))}</span>
+          <span class="table-secondary request-id-full">${escapeHtml(item.request_id || "—")}</span>
         </td>
         <td>
           <strong class="table-primary">${escapeHtml(shortModel(item.selected_model))}</strong>
@@ -699,6 +731,804 @@ function renderRequestTable() {
       </tr>
     `).join("")
     : emptyRow(13, "没有符合筛选条件的请求");
+}
+
+async function loadRouteAudit(silent = false) {
+  if (!state.key) return;
+  try {
+    await Promise.all([
+      state.routeGraph ? Promise.resolve() : loadRouteGraph(),
+      loadRouteTraces(true),
+    ]);
+    if (!silent) notice("");
+  } catch (error) {
+    if (!silent) notice(error.message, true);
+  }
+}
+
+async function loadRouteGraph() {
+  state.routeGraph = await api("/api/route-graph");
+  Object.keys(traceNodeLabels).forEach((key) => delete traceNodeLabels[key]);
+  (state.routeGraph.nodes || []).forEach((node) => {
+    traceNodeLabels[node.id] = node.label;
+  });
+  traceGraphRenderKey = "";
+}
+
+function traceFilterQuery(cursor = null) {
+  const query = new URLSearchParams({
+    limit: "50",
+    request_mode: byId("trace-mode-filter").value || "auto",
+  });
+  const values = {
+    review_status: byId("trace-review-filter").value,
+    client_id: byId("trace-client-filter").value,
+    task: byId("trace-task-filter").value,
+    selected_model: byId("trace-model-filter").value,
+    status: byId("trace-status-filter").value,
+    search: byId("trace-search").value.trim(),
+  };
+  Object.entries(values).forEach(([key, value]) => {
+    if (value) query.set(key, value);
+  });
+  if (cursor) query.set("cursor", cursor);
+  return query.toString();
+}
+
+async function loadRouteTraces(silent = false, append = false) {
+  if (!state.key) return;
+  const listState = byId("trace-list-state");
+  if (!silent) listState.textContent = "正在加载";
+  const cursor = append ? state.routeTraceCursor : null;
+  try {
+    const payload = await api(`/api/route-traces?${traceFilterQuery(cursor)}`);
+    state.routeTraces = append
+      ? [...state.routeTraces, ...(payload.items || [])]
+      : (payload.items || []);
+    state.routeTraceCursor = payload.next_cursor || null;
+    syncTraceFilterOptions();
+    renderTraceList();
+    byId("trace-load-more").hidden = !state.routeTraceCursor;
+    listState.textContent = "";
+
+    const selectedStillVisible = state.routeTraces.some(
+      (item) => item.request_id === state.selectedTraceId,
+    );
+    if (!append && state.routeTraces.length && !selectedStillVisible) {
+      await selectRouteTrace(state.routeTraces[0].request_id);
+    } else if (!append && !state.routeTraces.length) {
+      clearTraceDetail();
+    } else if (
+      state.selectedTrace?.status === "running" &&
+      state.selectedTraceId
+    ) {
+      await selectRouteTrace(state.selectedTraceId, true);
+    }
+  } catch (error) {
+    listState.textContent = "加载失败";
+    if (!silent) notice(error.message, true);
+    throw error;
+  }
+}
+
+function syncTraceFilterOptions() {
+  const clientValues = new Set(
+    state.routeTraces.map((item) => item.client_id).filter(Boolean),
+  );
+  state.clients.forEach((item) => clientValues.add(item.id));
+  const taskValues = new Set(
+    state.routeTraces.map((item) => item.task).filter(Boolean),
+  );
+  const modelValues = new Set(
+    state.routeTraces.map((item) => item.selected_model).filter(Boolean),
+  );
+  updateTraceSelect(
+    "trace-client-filter",
+    [...clientValues].sort(),
+    "全部客户端",
+  );
+  updateTraceSelect(
+    "trace-task-filter",
+    [...taskValues].sort(),
+    "全部画像",
+  );
+  updateTraceSelect(
+    "trace-model-filter",
+    [...modelValues].sort(),
+    "全部模型",
+    shortModel,
+  );
+}
+
+function updateTraceSelect(id, values, emptyLabel, format = (value) => value) {
+  const select = byId(id);
+  const current = select.value;
+  if (current && !values.includes(current)) values.push(current);
+  select.innerHTML =
+    `<option value="">${escapeHtml(emptyLabel)}</option>` +
+    values.map((value) => (
+      `<option value="${escapeHtml(value)}">${escapeHtml(format(value))}</option>`
+    )).join("");
+  select.value = current;
+}
+
+function renderTraceList() {
+  const items = state.routeTraces;
+  byId("trace-count").textContent = `${items.length} 条`;
+  const target = byId("trace-list");
+  if (!items.length) {
+    target.innerHTML = '<p class="empty">当前筛选条件下没有路由轨迹。</p>';
+    return;
+  }
+  if (!byId("trace-group-conversation").checked) {
+    target.innerHTML = items.map(traceListItem).join("");
+  } else {
+    const groups = new Map();
+    items.forEach((item) => {
+      const key = item.conversation_id || "无会话 ID";
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(item);
+    });
+    target.innerHTML = [...groups.entries()].map(([conversationId, values]) => `
+      <div class="trace-conversation-heading" title="${escapeHtml(conversationId)}">
+        会话 ${escapeHtml(shortId(conversationId, 26))} · ${values.length} 次请求
+      </div>
+      ${values.map(traceListItem).join("")}
+    `).join("");
+  }
+  target.querySelectorAll("[data-trace-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void selectRouteTrace(button.dataset.traceId);
+    });
+  });
+}
+
+function traceListItem(item) {
+  const selected = item.request_id === state.selectedTraceId;
+  const excerpt = item.excerpt?.text || "无文本摘要";
+  return `
+    <button class="trace-list-item${selected ? " selected" : ""}" type="button"
+      data-trace-id="${escapeHtml(item.request_id)}">
+      <span class="trace-list-primary">
+        <strong>${escapeHtml(shortModel(item.selected_model || item.requested_model || "等待路由"))}</strong>
+        ${statusBadge(
+          item.status,
+          item.status_code,
+          item.error?.code,
+          Boolean(item.task || item.selected_model),
+        )}
+      </span>
+      <span class="trace-list-secondary">
+        <span>${escapeHtml(item.task || "等待画像")} · ${escapeHtml(item.client_id)}</span>
+        <span>${formatTime(item.started_at)}</span>
+      </span>
+      <span class="trace-list-tertiary">
+        <span title="${escapeHtml(excerpt)}">${escapeHtml(excerpt)}</span>
+        ${reviewBadge(item.review_status)}
+      </span>
+    </button>`;
+}
+
+function reviewBadge(value) {
+  const tone = value === "correct"
+    ? "success"
+    : value === "incorrect"
+      ? "danger"
+      : value === "needs_review"
+        ? "warning"
+        : "neutral";
+  return `<span class="badge ${tone}"><i></i>${escapeHtml(reviewLabels[value] || value || "未审核")}</span>`;
+}
+
+async function selectRouteTrace(requestId, silent = false) {
+  if (!requestId) return;
+  state.selectedTraceId = requestId;
+  renderTraceList();
+  try {
+    const payload = await api(`/api/route-traces/${encodeURIComponent(requestId)}`);
+    state.selectedTrace = payload.trace;
+    const attempts = state.selectedTrace.attempts || [];
+    const attemptNumbers = attempts.map((item) => Number(item.number));
+    if (!attemptNumbers.includes(state.selectedTraceAttempt)) {
+      state.selectedTraceAttempt = Math.max(...attemptNumbers, 1);
+    }
+    state.selectedTraceNodeId = null;
+    renderTraceDetail();
+    if (traceEnteredRouting(state.selectedTrace)) {
+      await ensureTraceGraphRendered();
+    }
+  } catch (error) {
+    if (!silent) notice(error.message, true);
+  }
+}
+
+function clearTraceDetail() {
+  state.selectedTraceId = null;
+  state.selectedTrace = null;
+  state.selectedTraceNodeId = null;
+  byId("trace-detail").hidden = true;
+  byId("trace-detail-empty").hidden = false;
+}
+
+function renderTraceDetail() {
+  const trace = state.selectedTrace;
+  if (!trace) {
+    clearTraceDetail();
+    return;
+  }
+  byId("trace-detail-empty").hidden = true;
+  byId("trace-detail").hidden = false;
+  byId("trace-detail-title").textContent =
+    shortModel(trace.selected_model || trace.requested_model || "路由轨迹");
+  byId("trace-detail-status").innerHTML =
+    statusBadge(
+      trace.status,
+      trace.status_code,
+      trace.error?.code,
+      traceEnteredRouting(trace),
+    );
+  byId("trace-detail-summary").textContent =
+    trace.excerpt?.text || "此请求没有可显示的文本摘要。";
+  byId("trace-detail-meta").innerHTML = [
+    `请求 <code>${escapeHtml(shortId(trace.request_id, 20))}</code>`,
+    `客户端 <strong>${escapeHtml(trace.client_id)}</strong>`,
+    `画像 <strong>${escapeHtml(trace.task || "—")}</strong>`,
+    `Token <strong>${formatTokens(trace.request?.prompt_tokens || 0)} + ${formatTokens(trace.request?.output_reserve_tokens || 0)}</strong>`,
+    `策略 <code>${escapeHtml(trace.settings_fingerprint || "—")}</code>`,
+    `注册表 <code>${escapeHtml(trace.registry_fingerprint || "—")}</code>`,
+  ].map((item) => `<span>${item}</span>`).join("");
+  renderTraceRoutingState(trace);
+  renderTraceAttempts();
+  renderTraceCurrentReview();
+}
+
+function renderTraceRoutingState(trace) {
+  const target = byId("trace-routing-state");
+  const beforeRouting = !traceEnteredRouting(trace);
+  byId("trace-core-heading").hidden = beforeRouting;
+  byId("trace-attempts").hidden = beforeRouting;
+  byId("trace-graph-viewport").hidden = beforeRouting;
+  if (beforeRouting) {
+    byId("trace-node-inspector").hidden = true;
+  }
+  if (!beforeRouting) {
+    target.hidden = true;
+    target.textContent = "";
+    return;
+  }
+  const client = state.clients.find(
+    (item) => item.id === trace.client_id,
+  );
+  const allowedModels = trace.client_models?.length
+    ? trace.client_models
+    : (client?.models || []);
+  const accessDenied = trace.error?.code === "invalid_api_key";
+  target.className = "trace-routing-state warning";
+  target.innerHTML = accessDenied
+    ? `<strong>未进入智能路由</strong><span>客户端 ${escapeHtml(trace.client_id)} 未授权 ${escapeHtml(trace.requested_model)}；当前允许：${escapeHtml(allowedModels.join(", ") || "未配置")}</span>`
+    : `<strong>未进入智能路由</strong><span>${escapeHtml(trace.error?.message || "请求在选模前被拒绝")}</span>`;
+  target.hidden = false;
+}
+
+function traceEnteredRouting(trace) {
+  return Boolean(trace?.task || trace?.selected_model);
+}
+
+function renderTraceAttempts() {
+  const attempts = state.selectedTrace?.attempts || [];
+  byId("trace-attempts").innerHTML = attempts.map((attempt) => `
+    <button class="trace-attempt${Number(attempt.number) === state.selectedTraceAttempt ? " active" : ""}"
+      type="button" data-trace-attempt="${Number(attempt.number)}">
+      尝试 ${Number(attempt.number)}
+      ${attempt.selection?.endpoint_id ? ` · ${escapeHtml(attempt.selection.endpoint_id)}` : ""}
+    </button>
+  `).join("");
+  byId("trace-attempts").querySelectorAll("[data-trace-attempt]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.selectedTraceAttempt = Number(button.dataset.traceAttempt);
+      state.selectedTraceNodeId = null;
+      renderTraceAttempts();
+      applyTraceGraphState();
+    });
+  });
+}
+
+function selectedTraceAttempt() {
+  return (state.selectedTrace?.attempts || []).find(
+    (item) => Number(item.number) === state.selectedTraceAttempt,
+  ) || null;
+}
+
+function initializeTraceMermaid() {
+  if (!window.mermaid) return false;
+  if (!window.mermaid.__aiRouterInitialized) {
+    window.mermaid.initialize({
+      startOnLoad: false,
+      securityLevel: "antiscript",
+      theme: "base",
+      themeVariables: {
+        background: "#090c10",
+        primaryColor: "#10161d",
+        primaryTextColor: "#f3f6f8",
+        primaryBorderColor: "#52606d",
+        lineColor: "#707b86",
+        secondaryColor: "#151c24",
+        tertiaryColor: "#0f1318",
+        edgeLabelBackground: "#090c10",
+        fontFamily: "Inter, system-ui, sans-serif",
+        fontSize: "13px",
+      },
+      flowchart: {
+        htmlLabels: true,
+        curve: "basis",
+        useMaxWidth: false,
+        nodeSpacing: 34,
+        rankSpacing: 52,
+      },
+    });
+    window.mermaid.__aiRouterInitialized = true;
+  }
+  return true;
+}
+
+async function ensureTraceGraphRendered() {
+  const graph = state.routeGraph;
+  if (!graph?.mermaid) return;
+  const target = byId("trace-graph");
+  const renderKey = `${graph.graph_version}:${graph.mermaid}`;
+  if (renderKey === traceGraphRenderKey && target.querySelector("svg")) {
+    applyTraceGraphScale();
+    applyTraceGraphState();
+    return;
+  }
+  if (!initializeTraceMermaid()) {
+    renderTraceGraphFallback("Mermaid 渲染器未加载");
+    return;
+  }
+  const sequence = ++traceGraphRenderSequence;
+  target.classList.add("loading");
+  target.innerHTML = '<div class="trace-graph-empty">正在生成路由流程图...</div>';
+  try {
+    const result = await window.mermaid.render(
+      `route-audit-${Date.now()}-${sequence}`,
+      graph.mermaid,
+    );
+    if (sequence !== traceGraphRenderSequence) return;
+    target.classList.remove("loading");
+    target.innerHTML = result?.svg || "";
+    traceGraphRenderKey = renderKey;
+    bindTraceGraph();
+    fitTraceGraph(false);
+    applyTraceGraphState();
+  } catch (error) {
+    target.classList.remove("loading");
+    renderTraceGraphFallback(`流程图渲染失败：${error.message}`);
+  }
+}
+
+function traceGraphNodeElement(nodeId) {
+  if (!nodeId) return null;
+  return Array.from(
+    byId("trace-graph").querySelectorAll("g.node, [data-mermaid-node-id]"),
+  ).find((node) => {
+    if (node.dataset.mermaidNodeId === nodeId) return true;
+    const id = node.getAttribute("id") || "";
+    return id === nodeId
+      || id.startsWith(`flowchart-${nodeId}-`)
+      || id.includes(`-${nodeId}-`);
+  }) || null;
+}
+
+function bindTraceGraph() {
+  (state.routeGraph?.nodes || []).forEach((flowNode) => {
+    const graphNode = traceGraphNodeElement(flowNode.id);
+    if (!graphNode) return;
+    graphNode.dataset.traceNodeId = flowNode.id;
+    graphNode.setAttribute("role", "button");
+    graphNode.setAttribute("tabindex", "0");
+    graphNode.setAttribute("aria-label", flowNode.label);
+    const select = () => selectTraceGraphNode(flowNode.id);
+    graphNode.addEventListener("click", select);
+    graphNode.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      select();
+    });
+  });
+  const edgeElements = Array.from(
+    byId("trace-graph").querySelectorAll(
+      "g.edgePath, g.edgePaths > path.flowchart-link",
+    ),
+  );
+  edgeElements.forEach((element, index) => {
+    const edge = state.routeGraph?.edges?.[index];
+    if (!edge) return;
+    element.dataset.traceEdgeId = edge.id;
+  });
+  const edgeLabels = Array.from(
+    byId("trace-graph").querySelectorAll("g.edgeLabel"),
+  );
+  const labeledEdges = (state.routeGraph?.edges || []).filter(
+    (edge) => edge.label,
+  );
+  edgeLabels.forEach((element, index) => {
+    const edge = labeledEdges[index];
+    if (!edge) return;
+    element.dataset.traceEdgeId = edge.id;
+  });
+}
+
+function traceGraphSteps() {
+  const attempt = selectedTraceAttempt();
+  const graphNodeIds = new Set(
+    (state.routeGraph?.nodes || []).map((item) => item.id),
+  );
+  const steps = (attempt?.steps || []).filter(
+    (step) => (
+      graphNodeIds.has(step.node_id)
+      && step.path !== false
+    ),
+  );
+  const hasFinalSelection = steps.some(
+    (step) => step.node_id === "route_selected",
+  );
+  const capacityAcquired = (attempt?.steps || []).some(
+    (step) => (
+      step.node_id === "capacity_check"
+      && ["selected", "passed"].includes(step.status)
+      && ["capacity_acquired", "lease_acquired"].includes(step.reason)
+    ),
+  );
+  if (
+    graphNodeIds.has("route_selected")
+    && !hasFinalSelection
+    && capacityAcquired
+    && attempt?.selection
+  ) {
+    steps.push({
+      sequence: Number.MAX_SAFE_INTEGER,
+      timestamp: state.selectedTrace?.completed_at,
+      node_id: "route_selected",
+      status: "selected",
+      branch: "available",
+      reason: attempt.selection.reason || "route_selected",
+      path: true,
+      evidence: {
+        selected_model: attempt.selection.selected_model,
+        endpoint_id: attempt.selection.endpoint_id,
+        deployment_id: attempt.selection.deployment_id,
+        affinity: attempt.selection.affinity,
+      },
+    });
+  }
+  return steps;
+}
+
+function traceDisplayStatus(step, steps = traceGraphSteps()) {
+  if (
+    step.status === "selected"
+    && step.node_id !== "route_selected"
+  ) {
+    return "passed";
+  }
+  if (
+    step.status === "failed"
+    && ["explicit_model", "conversation_affinity"].includes(step.node_id)
+  ) {
+    return "evaluated";
+  }
+  if (
+    step.node_id === "candidate_scope"
+    && Array.isArray(step.evidence?.candidates)
+    && step.evidence.candidates.length
+    && !step.evidence.candidates.some((item) => !item.rejection_reason)
+  ) {
+    return "blocked";
+  }
+  if (
+    step.status === "failed"
+    && step.node_id === "capacity_check"
+    && steps.some((item) => (
+      item.node_id === "retry_decision"
+      && ["passed", "evaluated"].includes(item.status)
+    ))
+  ) {
+    return "rejected";
+  }
+  if (
+    step.status === "failed"
+    && step.node_id === "retry_decision"
+  ) {
+    return "blocked";
+  }
+  return step.status;
+}
+
+function applyTraceGraphState() {
+  const steps = traceGraphSteps();
+  const latest = new Map();
+  steps.forEach((step) => latest.set(step.node_id, step));
+  const currentStep = steps[steps.length - 1] || null;
+  if (!state.selectedTraceNodeId && currentStep) {
+    state.selectedTraceNodeId = currentStep.node_id;
+  }
+
+  (state.routeGraph?.nodes || []).forEach((flowNode) => {
+    const graphNode = traceGraphNodeElement(flowNode.id);
+    if (!graphNode) return;
+    const step = latest.get(flowNode.id);
+    graphNode.classList.remove(
+      "trace-unvisited",
+      "trace-status-passed",
+      "trace-status-evaluated",
+      "trace-status-rejected",
+      "trace-status-blocked",
+      "trace-status-failed",
+      "trace-status-error",
+      "trace-status-selected",
+      "trace-status-running",
+      "trace-node-selected",
+    );
+    if (!step) {
+      graphNode.classList.add("trace-unvisited");
+    } else {
+      graphNode.classList.add(
+        `trace-status-${traceDisplayStatus(step, steps)}`,
+      );
+    }
+    graphNode.classList.toggle(
+      "trace-node-selected",
+      flowNode.id === state.selectedTraceNodeId,
+    );
+  });
+
+  const visiblePath = [];
+  steps.forEach((step) => {
+    const previous = visiblePath[visiblePath.length - 1];
+    if (previous?.node_id === step.node_id) {
+      visiblePath[visiblePath.length - 1] = step;
+    } else {
+      visiblePath.push(step);
+    }
+  });
+  const transitions = visiblePath.slice(1).map((step, index) => ({
+    from: visiblePath[index].node_id,
+    to: step.node_id,
+    branch: step.branch,
+  }));
+  (state.routeGraph?.edges || []).forEach((edge) => {
+    const active = transitions.some((transition) => (
+      transition.from === edge.from
+      && transition.to === edge.to
+      && (!edge.branch || transition.branch === edge.branch)
+    ));
+    byId("trace-graph")
+      .querySelectorAll(`[data-trace-edge-id="${cssEscape(edge.id)}"]`)
+      .forEach((element) => {
+        element.classList.toggle("trace-edge-active", active);
+        element.classList.toggle("trace-unvisited", !active);
+      });
+  });
+  renderTraceNodeInspector();
+}
+
+function selectTraceGraphNode(nodeId) {
+  state.selectedTraceNodeId = nodeId;
+  applyTraceGraphState();
+  const target = traceGraphNodeElement(nodeId);
+  target?.scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+    inline: "center",
+  });
+}
+
+function renderTraceNodeInspector() {
+  const inspector = byId("trace-node-inspector");
+  const steps = traceGraphSteps();
+  const step = [...steps].reverse().find(
+    (item) => item.node_id === state.selectedTraceNodeId,
+  );
+  if (!step) {
+    inspector.hidden = true;
+    return;
+  }
+  inspector.hidden = false;
+  byId("trace-node-title").textContent =
+    traceNodeLabels[step.node_id] || step.node_id;
+  byId("trace-node-status").innerHTML = traceStepBadge(
+    traceDisplayStatus(step, steps),
+  );
+  byId("trace-node-reason").textContent =
+    `${step.reason || "无附加原因"}${step.branch ? ` · 分支 ${step.branch}` : ""}`;
+  byId("trace-node-evidence").innerHTML =
+    renderTraceEvidence(step.evidence || {});
+}
+
+function traceStepBadge(status) {
+  const labels = {
+    passed: "通过",
+    evaluated: "已判断",
+    rejected: "候选跳过",
+    blocked: "路由阻断",
+    failed: "未满足",
+    error: "异常",
+    selected: "已选择",
+    running: "执行中",
+    skipped: "已跳过",
+  };
+  const tone = status === "passed"
+    ? "success"
+    : status === "selected" || status === "running"
+      ? "running"
+      : status === "evaluated"
+        ? "neutral"
+        : ["rejected", "skipped"].includes(status)
+        ? "warning"
+        : "danger";
+  return `<span class="badge ${tone}"><i></i>${escapeHtml(labels[status] || status)}</span>`;
+}
+
+function renderTraceEvidence(evidence) {
+  const candidates = Array.isArray(evidence.candidates)
+    ? evidence.candidates
+    : null;
+  const entries = Object.entries(evidence).filter(
+    ([key]) => key !== "candidates",
+  );
+  const grid = entries.length
+    ? `<div class="trace-evidence-grid">${entries.map(([key, value]) => `
+        <div class="trace-evidence-item">
+          <span>${escapeHtml(key.replaceAll("_", " "))}</span>
+          <strong>${escapeHtml(traceEvidenceValue(value))}</strong>
+        </div>
+      `).join("")}</div>`
+    : '<p class="empty">该节点没有附加证据。</p>';
+  return candidates ? `${grid}${renderTraceCandidates(candidates)}` : grid;
+}
+
+function traceEvidenceValue(value) {
+  if (value == null || value === "") return "—";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  if (Array.isArray(value)) {
+    if (!value.length) return "—";
+    return value.map((item) => (
+      typeof item === "object" ? JSON.stringify(item) : String(item)
+    )).join(", ");
+  }
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function renderTraceCandidates(candidates) {
+  if (!candidates.length) return "";
+  return `
+    <table class="trace-candidate-table">
+      <thead>
+        <tr>
+          <th>端点</th>
+          <th>模型 / 节点</th>
+          <th>类型</th>
+          <th>健康 / 容量</th>
+          <th>上下文</th>
+          <th>画像质量</th>
+          <th>结果</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${candidates.map((item) => `
+          <tr>
+            <td><code>${escapeHtml(item.endpoint_id)}</code></td>
+            <td>
+              <strong class="table-primary">${escapeHtml(shortModel(item.model))}</strong>
+              <span class="table-secondary">${escapeHtml(item.node)}</span>
+            </td>
+            <td>${item.cloud ? "云端" : "本地"}</td>
+            <td>
+              <strong class="table-primary">${item.healthy && item.fresh ? "健康" : "不可用"} · ${Math.round(Number(item.load_headroom || 0) * 100)}%</strong>
+              <span class="table-secondary">${Number(item.physical_deployments?.available || 0)}/${Number(item.physical_deployments?.total || 0)} 物理部署空闲</span>
+            </td>
+            <td>${formatTokens(item.required_context_tokens)} / ${formatTokens(item.safe_context_tokens)}</td>
+            <td>
+              <strong class="table-primary">${Number(item.quality_score || 0)}</strong>
+              <span class="table-secondary">${escapeHtml(item.quality_status || "unverified")}</span>
+            </td>
+            <td>${item.rejection_reason
+              ? `<span class="badge danger"><i></i>${escapeHtml(rejectionReasonLabel(item.rejection_reason))}</span>`
+              : '<span class="badge success"><i></i>合格</span>'}</td>
+          </tr>
+        `).join("")}
+      </tbody>
+    </table>`;
+}
+
+function renderTraceGraphFallback(message) {
+  const steps = traceGraphSteps();
+  byId("trace-graph").innerHTML = `
+    <div class="trace-graph-empty">
+      <div>
+        <strong>${escapeHtml(message)}</strong>
+        <p>${steps.map((step) => (
+          `${escapeHtml(traceNodeLabels[step.node_id] || step.node_id)}：${escapeHtml(step.reason || step.status)}`
+        )).join("<br>") || "没有可显示的轨迹步骤"}</p>
+      </div>
+    </div>`;
+}
+
+function renderTraceCurrentReview() {
+  const review = state.selectedTrace?.current_review;
+  byId("trace-current-review").textContent = review
+    ? `${reviewLabels[review.verdict] || review.verdict} · ${formatTime(review.created_at)}`
+    : "尚未审核";
+  byId("trace-review-verdict").value = review?.verdict || "";
+  byId("trace-expected-task").value = review?.expected_task || "";
+  byId("trace-expected-model").value = review?.expected_model || "";
+  byId("trace-review-note").value = review?.note || "";
+}
+
+async function submitTraceReview(event) {
+  event.preventDefault();
+  if (!state.selectedTraceId) return;
+  const button = byId("trace-review-submit");
+  button.disabled = true;
+  try {
+    await api(
+      `/api/route-traces/${encodeURIComponent(state.selectedTraceId)}/reviews`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          verdict: byId("trace-review-verdict").value,
+          expected_task: byId("trace-expected-task").value || null,
+          expected_model: byId("trace-expected-model").value.trim() || null,
+          note: byId("trace-review-note").value.trim() || null,
+        }),
+      },
+    );
+    notice("路由审核已保存。");
+    await selectRouteTrace(state.selectedTraceId, true);
+    await loadRouteTraces(true);
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function applyTraceGraphScale() {
+  const svg = byId("trace-graph").querySelector("svg");
+  if (!svg) return;
+  const viewBoxWidth = Number(svg.viewBox?.baseVal?.width) || 1440;
+  svg.style.width = `${Math.max(1800, viewBoxWidth * traceGraphScale)}px`;
+  svg.style.maxWidth = "none";
+  svg.style.height = "auto";
+}
+
+function fitTraceGraph(smooth = true) {
+  const svg = byId("trace-graph").querySelector("svg");
+  const viewport = byId("trace-graph-viewport");
+  if (!svg || !viewport) return;
+  const viewBoxWidth = Number(svg.viewBox?.baseVal?.width) || 1440;
+  traceGraphScale = Math.max(
+    0.45,
+    Math.min(1.4, (viewport.clientWidth - 52) / viewBoxWidth),
+  );
+  applyTraceGraphScale();
+  viewport.scrollTo({
+    left: Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2),
+    top: 0,
+    behavior: smooth ? "smooth" : "auto",
+  });
+}
+
+function focusTraceCurrentNode() {
+  const steps = traceGraphSteps();
+  const nodeId = steps[steps.length - 1]?.node_id;
+  if (nodeId) selectTraceGraphNode(nodeId);
+}
+
+function cssEscape(value) {
+  if (window.CSS?.escape) return window.CSS.escape(value);
+  return String(value).replaceAll('"', '\\"');
 }
 
 function formatCacheHit(tokens, ratio) {
@@ -856,6 +1686,7 @@ function switchView(view) {
   });
   byId("view-title").textContent = viewTitles[view];
   if (view === "requests") renderRequestTable();
+  if (view === "audit") void loadRouteAudit();
   if (view === "clients") loadClients(true);
 }
 
@@ -866,6 +1697,7 @@ function startPolling() {
     if (!document.hidden && state.key) {
       loadDashboard(true);
       if (state.view === "clients") loadClients(true);
+      if (state.view === "audit") loadRouteTraces(true);
     }
   }, 5000);
 }
@@ -874,18 +1706,65 @@ function healthBadge(healthy) {
   return `<span class="badge ${healthy ? "success" : "danger"}"><i></i>${healthy ? "健康" : "不可用"}</span>`;
 }
 
-function statusBadge(status, code) {
-  const tone = status === "succeeded"
+function statusBadge(
+  status,
+  code,
+  errorCode = null,
+  enteredRouting = false,
+) {
+  let tone = status === "succeeded"
     ? "success"
     : status === "running"
       ? "running"
-      : status === "stale"
+      : status === "stale" || status === "interrupted"
         ? "warning"
         : "danger";
-  const label = code && status === "failed"
-    ? `${code} 失败`
-    : statusLabels[status] || status;
+  let label = statusLabels[status] || status;
+  if (status === "failed") {
+    if (
+      [401, 403].includes(Number(code))
+      || errorCode === "invalid_api_key"
+    ) {
+      tone = "warning";
+      label = "权限未授权";
+    } else if (Number(code) === 429) {
+      tone = "warning";
+      label = "容量或限流";
+    } else if ([400, 409, 413, 422].includes(Number(code))) {
+      if (enteredRouting) {
+        label = "无可用路由";
+      } else {
+        tone = "warning";
+        label = "请求未进入路由";
+      }
+    } else {
+      label = `${code || ""} 路由失败`.trim();
+    }
+  }
   return `<span class="badge ${tone}"><i></i>${escapeHtml(label)}</span>`;
+}
+
+function rejectionReasonLabel(value) {
+  return {
+    excluded: "本轮已排除",
+    disabled: "端点未启用",
+    auto_disabled: "未加入 Auto 候选",
+    cooldown: "故障冷却中",
+    unhealthy_or_stale: "健康状态不可用",
+    physical_deployment: "无合格物理部署",
+    modality: "模态不匹配",
+    capability: "协议能力不匹配",
+    task: "任务画像不匹配",
+    context: "上下文不足",
+    cloud_disabled: "云端已关闭",
+    cloud_auto_disabled: "云端自动升级关闭",
+    cloud_model_not_allowed: "云模型未授权",
+    cloud_provider_not_allowed: "Provider 未授权",
+    cloud_budget: "云端预算不足",
+    cloud_pricing: "缺少云端价格",
+    tier_downgrade: "不允许会话降级",
+    tier: "模型层级不足",
+  }[value] || value;
 }
 
 function reasonLabel(value) {
@@ -1047,6 +1926,73 @@ byId("settings-form").addEventListener("submit", saveSettings);
 byId("auto-refresh").addEventListener("change", startPolling);
 byId("node-filter").addEventListener("change", renderRequestTable);
 byId("status-filter").addEventListener("change", renderRequestTable);
+[
+  "trace-mode-filter",
+  "trace-review-filter",
+  "trace-client-filter",
+  "trace-task-filter",
+  "trace-model-filter",
+  "trace-status-filter",
+].forEach((id) => {
+  byId(id).addEventListener("change", () => void loadRouteTraces());
+});
+byId("trace-search").addEventListener("input", () => {
+  clearTimeout(traceSearchTimer);
+  traceSearchTimer = setTimeout(() => void loadRouteTraces(), 350);
+});
+byId("trace-group-conversation").addEventListener("change", renderTraceList);
+byId("trace-filter-reset").addEventListener("click", () => {
+  byId("trace-mode-filter").value = "auto";
+  byId("trace-review-filter").value = "unreviewed";
+  byId("trace-client-filter").value = "";
+  byId("trace-task-filter").value = "";
+  byId("trace-model-filter").value = "";
+  byId("trace-status-filter").value = "";
+  byId("trace-search").value = "";
+  byId("trace-group-conversation").checked = false;
+  void loadRouteTraces();
+});
+byId("trace-load-more").addEventListener("click", () => {
+  void loadRouteTraces(false, true);
+});
+byId("trace-review-form").addEventListener("submit", submitTraceReview);
+byId("trace-pan-left").addEventListener("click", () => {
+  const viewport = byId("trace-graph-viewport");
+  viewport.scrollBy({
+    left: -Math.max(280, viewport.clientWidth * 0.7),
+    behavior: "smooth",
+  });
+});
+byId("trace-pan-right").addEventListener("click", () => {
+  const viewport = byId("trace-graph-viewport");
+  viewport.scrollBy({
+    left: Math.max(280, viewport.clientWidth * 0.7),
+    behavior: "smooth",
+  });
+});
+byId("trace-zoom-out").addEventListener("click", () => {
+  traceGraphScale = Math.max(0.45, traceGraphScale - 0.1);
+  applyTraceGraphScale();
+});
+byId("trace-zoom-in").addEventListener("click", () => {
+  traceGraphScale = Math.min(1.8, traceGraphScale + 0.1);
+  applyTraceGraphScale();
+});
+byId("trace-fit").addEventListener("click", () => fitTraceGraph());
+byId("trace-current").addEventListener("click", focusTraceCurrentNode);
+byId("trace-fullscreen").addEventListener("click", async () => {
+  const viewport = byId("trace-graph-viewport");
+  try {
+    if (document.fullscreenElement === viewport) {
+      await document.exitFullscreen();
+    } else {
+      await viewport.requestFullscreen();
+      fitTraceGraph(false);
+    }
+  } catch (error) {
+    notice(`无法进入全屏：${error.message}`, true);
+  }
+});
 byId("client-status-filter").addEventListener("change", renderClients);
 byId("create-client").addEventListener("click", () => openClientDialog());
 byId("client-form").addEventListener("submit", saveClient);
