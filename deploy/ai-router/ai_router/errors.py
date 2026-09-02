@@ -107,3 +107,12 @@ class InvalidToolHistoryError(RouterError):
                 "reason": reason,
             },
         )
+
+
+class TrainingArchiveUnavailableError(RouterError):
+    def __init__(self, message: str = "encrypted training archive is unavailable") -> None:
+        super().__init__(
+            message,
+            status_code=503,
+            code="training_archive_unavailable",
+        )

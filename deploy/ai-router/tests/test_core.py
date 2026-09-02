@@ -68,6 +68,7 @@ from ai_router.token_counter import (
     SimpleTokenCounter,
     request_modalities,
 )
+from ai_router.training_archive import TrainingArchive
 from ai_router.types import (
     ConversationState,
     EndpointCapabilities,
@@ -334,6 +335,173 @@ def test_tail_control_tls_is_isolated_and_installable() -> None:
     renewal_text = renewal.read_text(encoding="utf-8")
     assert "certificate_public_key_fingerprint" in renewal_text
     assert "private_key_fingerprint" in renewal_text
+
+
+def test_training_archive_encrypts_deduplicates_and_exports(
+    tmp_path: Path,
+) -> None:
+    key_path = tmp_path / "training.key"
+    key_path.write_bytes(Fernet.generate_key())
+    database_path = tmp_path / "conversations.sqlite3"
+    archive = TrainingArchive(str(database_path), str(key_path))
+    token = run(
+        archive.begin(
+            request_id="request-1",
+            conversation_id="conversation-1",
+            conversation_mode="stateful",
+            client_id="client-1",
+            key_id="key-1",
+            protocol="chat",
+            received_body={
+                "model": "auto",
+                "messages": [
+                    {"role": "user", "content": "USER_SECRET_PROMPT"}
+                ],
+            },
+            instance_id="router-api-local",
+            boot_id="boot-1",
+        )
+    )
+    assert token
+    run(
+        archive.mark_routed(
+            token,
+            effective_body={
+                "messages": [
+                    {"role": "user", "content": "USER_SECRET_PROMPT"}
+                ]
+            },
+            routed_body={
+                "messages": [
+                    {"role": "user", "content": "USER_SECRET_PROMPT"}
+                ]
+            },
+            route={
+                "attempt": 1,
+                "selected_model": "local-model",
+                "endpoint_id": "local-endpoint",
+            },
+        )
+    )
+    run(
+        archive.complete(
+            token,
+            status_code=200,
+            response_payload=json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "ASSISTANT_SECRET_RESPONSE",
+                            }
+                        }
+                    ]
+                }
+            ).encode(),
+        )
+    )
+    duplicate = run(
+        archive.begin(
+            request_id="request-1",
+            conversation_id="conversation-1",
+            conversation_mode="stateful",
+            client_id="client-1",
+            key_id="key-1",
+            protocol="chat",
+            received_body={"messages": []},
+            instance_id="router-api-tail",
+            boot_id="boot-2",
+        )
+    )
+    assert duplicate is None
+
+    failed = run(
+        archive.begin(
+            request_id="request-2",
+            conversation_id="conversation-2",
+            conversation_mode="inferred",
+            client_id="client-1",
+            key_id="key-1",
+            protocol="responses",
+            received_body={"input": "FAILED_SECRET_PROMPT"},
+            instance_id="router-api-tail",
+            boot_id="boot-2",
+        )
+    )
+    run(
+        archive.fail(
+            failed,
+            status_code=503,
+            error={"type": "test_failure"},
+        )
+    )
+
+    state_key = Fernet.generate_key()
+    state_cipher = Fernet(state_key)
+    snapshot_messages = [
+        {"role": "user", "content": "BACKFILL_SECRET_PROMPT"},
+        {"role": "assistant", "content": "BACKFILL_SECRET_RESPONSE"},
+    ]
+    state = {
+        "conversation_id": "legacy-conversation",
+        "encrypted_capsule": state_cipher.encrypt(
+            json.dumps(snapshot_messages).encode()
+        ).decode(),
+        "boundary_hash": "boundary",
+        "last_seen": time.time(),
+        "public_model": "legacy-model",
+        "endpoint_id": "legacy-endpoint",
+    }
+    assert run(
+        archive.backfill_conversation_snapshots(
+            [state],
+            state_key.decode(),
+        )
+    ) == 1
+    assert run(
+        archive.backfill_conversation_snapshots(
+            [state],
+            state_key.decode(),
+        )
+    ) == 0
+
+    status = run(archive.status())
+    assert status["records"] == 3
+    assert status["trainable_records"] == 2
+    assert status["incomplete_records"] == 0
+    database_bytes = database_path.read_bytes()
+    for secret in (
+        b"USER_SECRET_PROMPT",
+        b"ASSISTANT_SECRET_RESPONSE",
+        b"FAILED_SECRET_PROMPT",
+        b"BACKFILL_SECRET_PROMPT",
+    ):
+        assert secret not in database_bytes
+
+    output_path = tmp_path / "export" / "training.jsonl"
+    assert run(
+        archive.export_jsonl(
+            str(output_path),
+            trainable_only=True,
+        )
+    ) == 2
+    exported = [
+        json.loads(line)
+        for line in output_path.read_text(encoding="utf-8").splitlines()
+    ]
+    request_record = next(
+        item
+        for item in exported
+        if item["payload"]["record_type"] == "request"
+    )
+    assert request_record["payload"]["request"]["received_body"][
+        "messages"
+    ][0]["content"] == "USER_SECRET_PROMPT"
+    assert request_record["payload"]["response"]["body"]["value"][
+        "choices"
+    ][0]["message"]["content"] == "ASSISTANT_SECRET_RESPONSE"
+    assert output_path.stat().st_mode & 0o777 == 0o600
 
 
 def test_legacy_five_weight_runtime_remains_loadable(
@@ -3016,6 +3184,17 @@ def test_public_api_explicit_model_proxy(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
     monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    training_key = tmp_path / "training.key"
+    training_key.write_bytes(Fernet.generate_key())
+    monkeypatch.setenv("AI_ROUTER_TRAINING_ENABLED", "true")
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_DB_PATH",
+        str(tmp_path / "training.sqlite3"),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_KEY_PATH",
+        str(training_key),
+    )
 
     runtime = build_runtime(
         settings=settings(tmp_path),
@@ -3073,6 +3252,124 @@ def test_public_api_explicit_model_proxy(tmp_path: Path, monkeypatch) -> None:
     assert response.headers["x-1panel-conversation-id"].startswith(
         "inferred-"
     )
+    assert runtime.training is not None
+    training_status = run(runtime.training.status())
+    assert training_status["records"] == 1
+    assert training_status["trainable_records"] == 1
+    output_path = tmp_path / "training-export.jsonl"
+    assert run(runtime.training.export_jsonl(str(output_path))) == 1
+    training_record = json.loads(
+        output_path.read_text(encoding="utf-8").strip()
+    )["payload"]
+    assert training_record["request"]["received_body"]["messages"] == [
+        {"role": "user", "content": "hello"}
+    ]
+    assert training_record["request"]["effective_body"]["messages"] == [
+        {"role": "user", "content": "hello"}
+    ]
+    assert training_record["routing_attempts"][0]["routed_body"][
+        "messages"
+    ] == [{"role": "user", "content": "hello"}]
+    assert training_record["response"]["body"]["value"]["choices"][0][
+        "message"
+    ]["content"] == "ok"
+    assert b"hello" not in (tmp_path / "training.sqlite3").read_bytes()
+    run(runtime.internal_client.aclose())
+
+
+def test_streaming_response_is_written_to_training_archive(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("edge-qwen38-flash")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "stream-audit.jsonl"),
+    )
+    training_key = tmp_path / "training.key"
+    training_key.write_bytes(Fernet.generate_key())
+    database_path = tmp_path / "training.sqlite3"
+    monkeypatch.setenv("AI_ROUTER_TRAINING_ENABLED", "true")
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_DB_PATH",
+        str(database_path),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_KEY_PATH",
+        str(training_key),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        content = (
+            'data: {"id":"chatcmpl-stream","choices":[{"delta":'
+            '{"role":"assistant"}}]}\n\n'
+            'data: {"id":"chatcmpl-stream","choices":[{"delta":'
+            '{"content":"STREAM_SECRET_RESPONSE"}}]}\n\n'
+            "data: [DONE]\n\n"
+        ).encode()
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            content=content,
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "messages": [
+                    {"role": "user", "content": "STREAM_SECRET_PROMPT"}
+                ],
+                "stream": True,
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert "STREAM_SECRET_RESPONSE" in response.text
+    assert runtime.training is not None
+    status = run(runtime.training.status())
+    assert status["records"] == 1
+    assert status["trainable_records"] == 1
+    output_path = tmp_path / "stream-export.jsonl"
+    assert run(runtime.training.export_jsonl(str(output_path))) == 1
+    payload = json.loads(
+        output_path.read_text(encoding="utf-8").strip()
+    )["payload"]
+    assert payload["response"]["assistant_items"] == [
+        {
+            "role": "assistant",
+            "content": "STREAM_SECRET_RESPONSE",
+        }
+    ]
+    database_bytes = database_path.read_bytes()
+    assert b"STREAM_SECRET_PROMPT" not in database_bytes
+    assert b"STREAM_SECRET_RESPONSE" not in database_bytes
     run(runtime.internal_client.aclose())
 
 
@@ -3373,6 +3670,17 @@ def test_explicit_busy_model_returns_429_without_cooldown(
     monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
     monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
     monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    training_key = tmp_path / "training.key"
+    training_key.write_bytes(Fernet.generate_key())
+    monkeypatch.setenv("AI_ROUTER_TRAINING_ENABLED", "true")
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_DB_PATH",
+        str(tmp_path / "training.sqlite3"),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_KEY_PATH",
+        str(training_key),
+    )
     runtime = build_runtime(
         settings=value,
         registry=registry,
@@ -3416,6 +3724,11 @@ def test_explicit_busy_model_returns_429_without_cooldown(
     assert response.json()["error"]["code"] == "model_capacity_busy"
     assert response.headers["retry-after"] == "1"
     assert fake_health.failed == []
+    assert runtime.training is not None
+    training_status = run(runtime.training.status())
+    assert training_status["records"] == 1
+    assert training_status["trainable_records"] == 0
+    assert training_status["incomplete_records"] == 0
     run(holder.release())
     run(runtime.internal_client.aclose())
 

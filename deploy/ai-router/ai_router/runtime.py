@@ -21,6 +21,7 @@ from .policy import ConversationRepository, RoutingPolicy
 from .scheduler import ClientLimiter, Scheduler
 from .store import InMemoryStateStore, RedisStateStore, StateStore
 from .token_counter import HuggingFaceTokenCounter, TokenCounter
+from .training_archive import TrainingArchive
 
 
 @dataclass
@@ -40,11 +41,13 @@ class RouterRuntime:
     compactor: ContextCompactor
     policy: RoutingPolicy
     audit: AuditLog
+    training: TrainingArchive | None
     internal_client: httpx.AsyncClient
     internal_base_url: str
     internal_api_key: str
     instance_id: str
     boot_id: str
+    state_encryption_key: str = field(repr=False)
     track_instance: bool = False
     draining: bool = False
     started_at: float = field(default_factory=time.time)
@@ -81,6 +84,19 @@ class RouterRuntime:
                 "legacy_client_imported",
                 client_id=item["client_id"],
                 key_id=item["key_id"],
+            )
+        if (
+            self.training
+            and await self.training.needs_legacy_backfill()
+        ):
+            states = await self.store.list_json("router:conversation:")
+            backfilled = await self.training.backfill_conversation_snapshots(
+                states,
+                self.state_encryption_key,
+            )
+            self.audit.write(
+                "training_archive_backfill_completed",
+                records=backfilled,
             )
         if not self.track_instance:
             return
@@ -330,6 +346,7 @@ def build_runtime(
         "http://litellm:4000",
     ).rstrip("/")
     internal_api_key = _required_env("AI_ROUTER_LITELLM_MASTER_KEY")
+    state_encryption_key = _required_env("AI_ROUTER_STATE_KEY")
     health_settings = settings.section("health")
     health = HealthMonitor(
         store,
@@ -343,7 +360,7 @@ def build_runtime(
     )
     compactor = ContextCompactor(
         token_counter,
-        CapsuleCipher(_required_env("AI_ROUTER_STATE_KEY")),
+        CapsuleCipher(state_encryption_key),
         internal_base_url=internal_base_url,
         internal_api_key=internal_api_key,
         model_id=str(settings.section("compaction").get("model_id", "")),
@@ -361,8 +378,14 @@ def build_runtime(
     clients = ClientAccountManager(
         store,
         settings,
-        _required_env("AI_ROUTER_STATE_KEY"),
+        state_encryption_key,
     )
+    training = None
+    if _enabled_env("AI_ROUTER_TRAINING_ENABLED"):
+        training = TrainingArchive(
+            _required_env("AI_ROUTER_TRAINING_DB_PATH"),
+            _required_env("AI_ROUTER_TRAINING_KEY_PATH"),
+        )
     return RouterRuntime(
         settings=settings,
         registry=registry,
@@ -389,6 +412,7 @@ def build_runtime(
         compactor=compactor,
         policy=RoutingPolicy(registry, settings, health),
         audit=AuditLog(audit_path),
+        training=training,
         internal_client=httpx.AsyncClient(
             timeout=httpx.Timeout(900.0, connect=5.0),
         ),
@@ -396,6 +420,7 @@ def build_runtime(
         internal_api_key=internal_api_key,
         instance_id=resolved_instance_id,
         boot_id=resolved_boot_id,
+        state_encryption_key=state_encryption_key,
         track_instance=bool(configured_instance_id),
     )
 
@@ -416,3 +441,12 @@ def _required_env(name: str) -> str:
     if not value:
         raise RuntimeError(f"{name} is required")
     return value
+
+
+def _enabled_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }

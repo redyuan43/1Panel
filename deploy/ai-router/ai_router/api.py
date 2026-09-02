@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -81,6 +82,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             "instance_id": current.instance_id,
             "boot_id": current.boot_id,
             "draining": current.draining,
+            "training_archive": current.training is not None,
         }
 
     @app.get("/internal/status")
@@ -113,6 +115,14 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             {},
         )
         return {"ok": True, "instance": current_state}
+
+    @app.get("/internal/training/status")
+    async def internal_training_status(request: Request) -> dict[str, Any]:
+        current = _runtime(request)
+        current.auth.authenticate_admin(request.headers.get("authorization"))
+        if current.training is None:
+            return {"enabled": False}
+        return await current.training.status()
 
     @app.get("/v1/models")
     async def models(request: Request) -> JSONResponse:
@@ -228,6 +238,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             status_code=400,
             code="invalid_request",
         )
+    received_body = json.loads(json.dumps(body))
 
     requested_model = str(body.get("model", "")).strip()
     if not requested_model:
@@ -264,7 +275,28 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         api_kind,
         authenticated.policy.id,
     )
-    lease = await current.scheduler.begin_request(conversation_id)
+    training_token = None
+    if current.training is not None:
+        training_token = await current.training.begin(
+            request_id=request_id,
+            conversation_id=conversation_id,
+            conversation_mode=conversation_mode,
+            client_id=authenticated.policy.id,
+            key_id=authenticated.key_id,
+            protocol=api_kind,
+            received_body=received_body,
+            instance_id=current.instance_id,
+            boot_id=current.boot_id,
+        )
+    try:
+        lease = await current.scheduler.begin_request(conversation_id)
+    except BaseException as exc:
+        await _fail_training_record(
+            current,
+            training_token,
+            exc,
+        )
+        raise
     parallel_acquired = False
     stream_owned = False
     request_tracked = False
@@ -290,6 +322,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         effective_body = normalized_effective.body
         tool_history_repairs += normalized_effective.repairs
         required_capabilities = normalized_effective.required
+        if current.training is not None:
+            await current.training.set_effective_context(
+                training_token,
+                effective_body=effective_body,
+            )
         prompt_tokens = current.token_counter.count_request(
             effective_body,
             api_kind,
@@ -391,6 +428,35 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 )
                 decision.attempts = attempt
                 decision.tool_history_repairs = tool_history_repairs
+                if current.training is not None:
+                    await current.training.mark_routed(
+                        training_token,
+                        effective_body=effective_body,
+                        routed_body=routed_body,
+                        route={
+                            "attempt": attempt,
+                            "requested_model": decision.requested_model,
+                            "selected_model": (
+                                decision.endpoint.public_model
+                            ),
+                            "endpoint_id": decision.endpoint.id,
+                            "deployment_id": (
+                                decision.deployment_id
+                                or decision.endpoint.id
+                            ),
+                            "node": decision.endpoint.node,
+                            "task": decision.task,
+                            "reason": decision.reason,
+                            "affinity": decision.affinity,
+                            "prompt_tokens": decision.prompt_tokens,
+                            "output_reserve_tokens": (
+                                decision.output_reserve_tokens
+                            ),
+                            "required_capabilities": list(
+                                decision.required_capabilities
+                            ),
+                        },
+                    )
                 _audit_started(
                     current,
                     request_id=request_id,
@@ -478,6 +544,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         started_at=request.state.started_at,
                         cache_snapshot=cache_snapshot,
                     )
+                    if current.training is not None:
+                        await current.training.fail(
+                            training_token,
+                            status_code=upstream.status_code,
+                            error={
+                                "type": "upstream_error",
+                                "endpoint_id": decision.endpoint.id,
+                            },
+                            response_payload=payload,
+                        )
                     return Response(
                         content=payload,
                         status_code=upstream.status_code,
@@ -509,6 +585,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             state=state,
                             body=routed_body,
                             api_kind=api_kind,
+                            training_token=training_token,
                             started_at=request.state.started_at,
                             cache_snapshot=cache_snapshot,
                         ),
@@ -529,6 +606,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     api_kind=api_kind,
                     response_payload=payload,
                 )
+                if current.training is not None:
+                    await current.training.complete(
+                        training_token,
+                        status_code=upstream.status_code,
+                        response_payload=payload,
+                    )
                 await _audit(
                     current,
                     request_id=request_id,
@@ -593,6 +676,13 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 raise
 
         raise last_error or NoEligibleModelError()
+    except BaseException as exc:
+        await _fail_training_record(
+            current,
+            training_token,
+            exc,
+        )
+        raise
     finally:
         if not stream_owned:
             await lease.release()
@@ -1234,6 +1324,7 @@ async def _stream_response(
     state: ConversationState | None,
     body: dict[str, Any],
     api_kind: str,
+    training_token: str | None,
     started_at: float,
     cache_snapshot: dict[str, float] | None,
 ) -> AsyncIterator[bytes]:
@@ -1268,6 +1359,29 @@ async def _stream_response(
                     api_kind=api_kind,
                     assistant_items=accumulator.assistant_items(),
                 )
+                if current.training is not None:
+                    await asyncio.shield(
+                        current.training.complete(
+                            training_token,
+                            status_code=status_code,
+                            assistant_items=accumulator.assistant_items(),
+                            usage=accumulator.usage,
+                        )
+                    )
+            elif current.training is not None:
+                await asyncio.shield(
+                    current.training.fail(
+                        training_token,
+                        status_code=499,
+                        error={
+                            "type": "stream_interrupted",
+                            "message": (
+                                "stream ended before a complete response"
+                            ),
+                        },
+                        interrupted=True,
+                    )
+                )
             await _audit(
                 current,
                 request_id=request_id,
@@ -1287,6 +1401,34 @@ async def _stream_response(
                 lease.owner_token,
             )
             await current.track_request_finished(lease.owner_token)
+
+
+async def _fail_training_record(
+    current: RouterRuntime,
+    token: str | None,
+    exc: BaseException,
+) -> None:
+    if current.training is None or not token:
+        return
+    status_code = int(getattr(exc, "status_code", 500))
+    interrupted = isinstance(exc, asyncio.CancelledError)
+    if interrupted:
+        status_code = 499
+    error = {
+        "type": type(exc).__name__,
+        "message": str(exc)[:2000],
+    }
+    if isinstance(exc, RouterError):
+        error["code"] = exc.code
+        error["details"] = exc.details
+    await asyncio.shield(
+        current.training.fail(
+            token,
+            status_code=status_code,
+            error=error,
+            interrupted=interrupted,
+        )
+    )
 
 
 def _response_headers(

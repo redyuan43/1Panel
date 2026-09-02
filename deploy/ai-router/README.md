@@ -7,6 +7,8 @@ Go/Vue 主体，也不依赖企业版 AI Gateway。1Panel 通过 Custom Provider
 
 Agent 与第三方调用示例见
 [`docs/api-client-guide.md`](docs/api-client-guide.md)。
+加密训练对话归档与导出见
+[`docs/training-archive.md`](docs/training-archive.md)。
 
 ## 当前能力
 
@@ -25,6 +27,7 @@ Agent 与第三方调用示例见
 - 独立设置页与 JSONL 审计日志
 - 自动刷新的运维控制台，展示运行中请求、路由结果、告警和最近流量
 - Redis 持久会话状态；LiteLLM 和 Redis 不暴露宿主端口
+- 独立 SQLite 训练归档；完整对话压缩并加密后永久保存
 - Codex Pro 订阅通过独立 OAuth 适配器接入，凭据不与桌面 Codex 共用
 - 图片和音频二进制数据不按 Base64 文本计入 TPM；媒体使用独立保守 Token
   估算，请求体大小由 32 MiB 上限单独保护
@@ -344,6 +347,7 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 sudo mkdir -p "/opt/1panel/ai-router/audit" "/opt/1panel/ai-router/redis"
 sudo chown -R "10001:10001" "/opt/1panel/ai-router"
 sudo "./scripts/install-tail-control-tls.sh"
+sudo "./scripts/install-training-archive.sh"
 docker compose config
 docker compose build
 docker compose up -d
