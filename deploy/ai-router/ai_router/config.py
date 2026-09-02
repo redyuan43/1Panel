@@ -180,6 +180,23 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
         raise ValueError(
             "endpoint capabilities.tools must be none, single, or parallel"
         )
+    tool_choice_modes = tuple(
+        str(item)
+        for item in capabilities_value.get("tool_choice_modes", [])
+    )
+    if not set(tool_choice_modes).issubset(
+        {"auto", "none", "required", "function"}
+    ):
+        raise ValueError(
+            "endpoint tool_choice_modes contains an unsupported mode"
+        )
+    tool_choice_supported = bool(
+        capabilities_value.get("tool_choice", tools_mode != "none")
+    )
+    if tool_choice_modes and not tool_choice_supported:
+        raise ValueError(
+            "endpoint tool_choice_modes requires tool_choice support"
+        )
     structured_output = tuple(
         str(item)
         for item in capabilities_value.get("structured_output", [])
@@ -213,9 +230,8 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
             chat=bool(capabilities_value.get("chat", True)),
             responses=responses_mode,
             tools=tools_mode,
-            tool_choice=bool(
-                capabilities_value.get("tool_choice", tools_mode != "none")
-            ),
+            tool_choice=tool_choice_supported,
+            tool_choice_modes=tool_choice_modes,
             structured_output=structured_output,
             streaming=bool(capabilities_value.get("streaming", True)),
             validation_status=str(

@@ -46,9 +46,20 @@ def request_capabilities(
         tools=bool(body.get("tools")),
         parallel_tools=bool(body.get("parallel_tool_calls")),
         tool_choice=body.get("tool_choice") is not None,
+        tool_choice_mode=_tool_choice_mode(body.get("tool_choice")),
         structured_output=structured_output,
         streaming=bool(body.get("stream")),
     )
+
+
+def _tool_choice_mode(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("type") or "function")
+    return "unknown"
 
 
 def _structured_output(

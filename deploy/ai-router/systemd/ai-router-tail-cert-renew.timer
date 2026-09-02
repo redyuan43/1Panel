@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the AI Router tail control TLS certificate weekly
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=1h
+Unit=ai-router-tail-cert-renew.service
+
+[Install]
+WantedBy=timers.target

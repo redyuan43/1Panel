@@ -245,7 +245,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 6
+    assert len(registry.endpoints) == 7
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
@@ -267,6 +267,17 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert amd.auto_candidate is True
     assert registry.by_id("ivan-qwen38-rocmfpx-128k") is None
     assert registry.by_id("cloud-deepseek-v4-flash").max_concurrency == 8
+    glm = registry.by_id("zhipu-glm-5.3-flash")
+    assert glm is not None
+    assert glm.public_model == "zhipu/glm-5.3-flash"
+    assert glm.modalities == ("text", "image")
+    assert glm.safe_context_tokens == 1000000
+    assert glm.auto_candidate is False
+    assert glm.quality["code"] > registry.by_id(
+        "cloud-deepseek-v4-flash"
+    ).quality["code"]
+    assert glm.metadata["billing_mode"] == "subscription"
+    assert glm.capabilities.tool_choice_modes == ("auto",)
     codex = registry.by_id("codex-pro-gpt-5.6-sol")
     assert codex is not None
     assert codex.public_model == "codex-pro/gpt-5.6-sol"
@@ -285,10 +296,44 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert policies["check-boards"].max_parallel_requests == 4
     assert all(
         endpoint.capabilities.chat
-        and endpoint.capabilities.responses == "native"
         and endpoint.capabilities.tools == "parallel"
         for endpoint in registry.endpoints
     )
+    assert glm.capabilities.responses == "adapter"
+    assert all(
+        endpoint.capabilities.responses == "native"
+        for endpoint in registry.endpoints
+        if endpoint.id != glm.id
+    )
+
+
+def test_tail_control_tls_is_isolated_and_installable() -> None:
+    compose = yaml.safe_load(
+        (ROOT / "compose.yaml").read_text(encoding="utf-8")
+    )
+    services = compose["services"]
+    tail_control = services["router-control-tail"]
+    tls_mount = "/opt/1panel/ai-router-control-tls:/tls:ro"
+    assert tls_mount in tail_control["volumes"]
+    assert "/tls/" in tail_control["command"][-1]
+    for service_id, service in services.items():
+        if service_id == "router-control-tail":
+            continue
+        assert tls_mount not in service.get("volumes", [])
+
+    installer = ROOT / "scripts" / "install-tail-control-tls.sh"
+    renewal = ROOT / "scripts" / "renew-tail-control-cert.sh"
+    assert installer.stat().st_mode & 0o111
+    assert renewal.stat().st_mode & 0o111
+    assert "AI_ROUTER_TLS_SKIP_RESTART=1" in installer.read_text(
+        encoding="utf-8"
+    )
+    assert "/opt/1panel/ai-router/tls" in installer.read_text(
+        encoding="utf-8"
+    )
+    renewal_text = renewal.read_text(encoding="utf-8")
+    assert "certificate_public_key_fingerprint" in renewal_text
+    assert "private_key_fingerprint" in renewal_text
 
 
 def test_legacy_five_weight_runtime_remains_loadable(
@@ -1417,6 +1462,123 @@ def test_subscription_frontier_is_a_soft_auto_preference(
     assert normal.endpoint.cloud is False
 
 
+def test_unvalidated_glm_requires_an_explicit_model(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 5,
+                "allowed_providers": ["zhipu-coding", "deepseek"],
+                "allowed_models": [
+                    "zhipu/glm-5.3-flash",
+                    "deepseek/deepseek-v4-flash",
+                ],
+            }
+        }
+    )
+    statuses = {
+        item.id: healthy(
+            item.id,
+            context=item.safe_context_tokens,
+            workers=ai_workers()
+            if item.backend_type == "ai_pool"
+            else None,
+        )
+        for item in registry.endpoints
+    }
+    automatic = run(
+        RoutingPolicy(
+            registry,
+            value,
+            FakeHealth(statuses),
+        ).choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "code",
+                None,
+                0.95,
+                "complex_code",
+                "subscription-frontier",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="chat",
+                tools=True,
+            ),
+            conversation=None,
+            excluded_endpoint_ids={"codex-pro-gpt-5.6-sol"},
+        )
+    )
+    assert automatic.endpoint.cloud is False
+    assert "zhipu-glm-5.3-flash:auto_disabled" in (
+        automatic.candidate_rejections
+    )
+
+    explicit = run(
+        RoutingPolicy(
+            registry,
+            value,
+            FakeHealth(statuses),
+        ).choose(
+            requested_model="zhipu/glm-5.3-flash",
+            evaluation=Evaluation(
+                "code",
+                None,
+                0.95,
+                "explicit_validation",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=True,
+            required_capabilities=RequestCapabilities(
+                protocol="chat",
+                tools=True,
+                tool_choice=True,
+                tool_choice_mode="auto",
+            ),
+            conversation=None,
+        )
+    )
+    assert explicit.endpoint.id == "zhipu-glm-5.3-flash"
+    assert explicit.reason == "explicit_model"
+    with pytest.raises(NoEligibleModelError):
+        run(
+            RoutingPolicy(
+                registry,
+                value,
+                FakeHealth(statuses),
+            ).choose(
+                requested_model="zhipu/glm-5.3-flash",
+                evaluation=Evaluation(
+                    "code",
+                    None,
+                    0.95,
+                    "unsupported_tool_choice",
+                ),
+                prompt_tokens=100,
+                output_reserve_tokens=100,
+                modalities={"text"},
+                has_tools=True,
+                required_capabilities=RequestCapabilities(
+                    protocol="chat",
+                    tools=True,
+                    tool_choice=True,
+                    tool_choice_mode="required",
+                ),
+                conversation=None,
+            )
+        )
+
+
 def test_subscription_endpoint_does_not_reserve_usd_budget(
     tmp_path: Path,
 ) -> None:
@@ -2121,6 +2283,7 @@ def test_validated_vision_endpoints_are_registered_for_images() -> None:
         "ivan-qwen38-flash-128k",
         "amd-qwen38-rocmfpx-128k",
         "codex-pro-gpt-5.6-sol",
+        "zhipu-glm-5.3-flash",
     }
     actual = {
         endpoint.id
@@ -2166,6 +2329,10 @@ def test_models_endpoint_reports_vision_capabilities(
     assert models[
         "RadixArk/Qwen3.8-Flash-Next-NVFP4"
     ]["supportsImages"] is False
+    assert models["zhipu/glm-5.3-flash"]["supportsImages"] is True
+    assert models["zhipu/glm-5.3-flash"]["capabilities"][
+        "tool_choice_modes"
+    ] == ["auto"]
     run(runtime.close())
 
 
@@ -2688,6 +2855,7 @@ def test_endpoint_capability_matrix_is_protocol_aware() -> None:
         responses="native",
         tools="parallel",
         tool_choice=True,
+        tool_choice_modes=("auto",),
         structured_output=("json_object", "json_schema"),
         streaming=True,
     )
@@ -2697,14 +2865,50 @@ def test_endpoint_capability_matrix_is_protocol_aware() -> None:
             tools=True,
             parallel_tools=True,
             tool_choice=True,
+            tool_choice_mode="auto",
             structured_output="json_schema",
             streaming=True,
+        )
+    )
+    assert not capabilities.supports(
+        RequestCapabilities(
+            protocol="chat",
+            tools=True,
+            tool_choice=True,
+            tool_choice_mode="required",
         )
     )
     assert not EndpointCapabilities(
         chat=True,
         responses="none",
     ).supports(RequestCapabilities(protocol="responses"))
+
+
+def test_request_capabilities_preserve_tool_choice_mode() -> None:
+    automatic = normalize_request(
+        {"messages": [], "tool_choice": "auto"},
+        "chat",
+        validate_history=False,
+    )
+    required = normalize_request(
+        {"messages": [], "tool_choice": "required"},
+        "chat",
+        validate_history=False,
+    )
+    function = normalize_request(
+        {
+            "messages": [],
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "lookup"},
+            },
+        },
+        "chat",
+        validate_history=False,
+    )
+    assert automatic.required.tool_choice_mode == "auto"
+    assert required.required.tool_choice_mode == "required"
+    assert function.required.tool_choice_mode == "function"
 
 
 def test_local_responses_format_is_mirrored_for_backend_compatibility() -> None:
@@ -4645,7 +4849,7 @@ def test_control_dashboard_aggregates_runtime_state(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["summary"]["healthy_endpoints"] == 6
+    assert payload["summary"]["healthy_endpoints"] == 7
     assert payload["summary"]["ready_workers"] == 2
     assert payload["summary"]["active_requests"] == 1
     assert payload["summary"]["success_rate"] == 1

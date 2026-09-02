@@ -10,6 +10,7 @@ class RequestCapabilities:
     tools: bool = False
     parallel_tools: bool = False
     tool_choice: bool = False
+    tool_choice_mode: str | None = None
     structured_output: str | None = None
     streaming: bool = False
 
@@ -21,6 +22,8 @@ class RequestCapabilities:
             values.append("parallel_tools")
         if self.tool_choice:
             values.append("tool_choice")
+            if self.tool_choice_mode:
+                values.append(f"tool_choice:{self.tool_choice_mode}")
         if self.structured_output:
             values.append(self.structured_output)
         if self.streaming:
@@ -34,6 +37,7 @@ class EndpointCapabilities:
     responses: str = "none"
     tools: str = "none"
     tool_choice: bool = False
+    tool_choice_modes: tuple[str, ...] = ()
     structured_output: tuple[str, ...] = ()
     streaming: bool = True
     validation_status: str = "unverified"
@@ -49,6 +53,12 @@ class EndpointCapabilities:
         if required.parallel_tools and self.tools != "parallel":
             return False
         if required.tool_choice and not self.tool_choice:
+            return False
+        if (
+            required.tool_choice_mode
+            and self.tool_choice_modes
+            and required.tool_choice_mode not in self.tool_choice_modes
+        ):
             return False
         if (
             required.structured_output

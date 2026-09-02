@@ -137,9 +137,30 @@ initialization error。2026-09-02 物理移除该 V100 SXM2 16GB 后重新启动
 AMD 与 Ivan 是两台独立设备，可以作为两路独立物理容量调度。协议验收后
 AMD 已参与 `auto`；尚未完成的同口径质量基准只影响排序分。
 
+## Zhipu Cloud：GLM-5.3-Flash
+
+| 字段 | 当前值 |
+| --- | --- |
+| 对外模型 ID | `zhipu/glm-5.3-flash` |
+| Provider 模型 | `glm-5.3-flash` |
+| Base URL | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| API Key 环境变量 | `AI_ROUTER_GLM_API_KEY` |
+| 输入模态 | 文本、图像；官方另声明支持视频和文件 |
+| 输出模态 | 文本 |
+| 上下文 | 官方 1M，边界未实测 |
+| 最大输出 | 官方 128K，未实测 |
+| 路由定位 | `subscription-frontier`；`auto_candidate=false`，仅允许显式验收 |
+| 工具选择 | 当前仅声明支持 `tool_choice=auto` |
+| 当前状态 | 注册模板已加入，尚未完成生产验收 |
+
+该端点使用 GLM Coding Plan 专属 OpenAI 兼容地址。Coding Plan Key 与普通
+开放平台 Key 不通用；正式启用前必须验证 `/models`、文本、图像、工具调用、
+流式输出、Responses 适配和长上下文边界。
+
 ## 尚未验证
 
 - Edge/Ivan/AMD 的完整 GPU 拓扑和量化工件文件校验
 - 500K/262K 长上下文边界
 - AI 多图片和长时间视觉稳定性；Edge 图像运行时修复
+- GLM-5.3-Flash 的真实 Coding Plan Key、协议能力和 1M 上下文边界
 - 确定性质量基准分

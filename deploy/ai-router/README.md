@@ -163,9 +163,11 @@ GET  /internal/status
 
 复杂编程和安全分析可被评估器标记为软性的
 `subscription-frontier` 偏好。该偏好首先尝试
-`codex-pro/gpt-5.6-sol`；Sol 账号繁忙、冷却或不可用时立即恢复
-`local_first`，不会因为偏好而拒绝本地模型。全部本地容量也不可用时，
-才继续尝试受预算保护的 DeepSeek。
+`codex-pro/gpt-5.6-sol`。GLM 使用 Coding Plan 订阅端点，官方声明支持
+原生图像输入、1M 上下文和 128K 最大输出；当前注册能力尚未经过本路由真实
+请求验收，因此保持 `auto_candidate=false`，只允许显式模型请求用于验收。
+Sol 不可用时立即恢复 `local_first`，全部本地容量也不可用时才继续尝试受
+预算保护的 DeepSeek。
 
 ## Codex Pro 订阅适配器
 
@@ -280,7 +282,7 @@ Qwen3-ASR-0.6B 等边缘模型时，增加独立端点并声明准确模态、�
 ```yaml
 cloud:
   enabled: true
-  auto_escalate: true
+  auto_escalate: false
   monthly_budget: 50
   allowed_providers:
     - openai
@@ -291,6 +293,32 @@ cloud:
 云端端点还必须在 `metadata` 中声明 `provider`、
 `input_cost_per_million_usd` 和 `output_cost_per_million_usd`。网关按请求的
 prompt token 和最大输出预留成本，避免并发请求穿透月度预算。
+
+订阅端点使用 `metadata.billing_mode: subscription`，不进入美元预算账本，
+但仍必须显式加入云端允许列表。GLM-5.3-Flash 的 Coding Plan 模板为：
+
+```yaml
+cloud:
+  enabled: true
+  auto_escalate: true
+  monthly_budget: 0
+  allowed_providers:
+    - zhipu-coding
+  allowed_models:
+    - zhipu/glm-5.3-flash
+```
+
+真实 Coding Plan Key 写入 `/opt/1panel/ai-router/router.env`：
+
+```text
+AI_ROUTER_GLM_API_KEY=<your-zhipu-coding-plan-key>
+```
+
+Coding Plan Key 与普通开放平台 Key 不通用。本模板使用专属 OpenAI 兼容
+Base URL `https://open.bigmodel.cn/api/coding/paas/v4`。
+验收期间显式指定 `model=zhipu/glm-5.3-flash`。只有完成文本、图像、工具、
+流式、Responses 适配和长上下文实测后，才同时启用注册表的
+`auto_candidate` 与运行设置的 `cloud.auto_escalate`。
 
 ## 1Panel 接入
 
@@ -315,6 +343,7 @@ cd "/home/ai/github/1Panel/deploy/ai-router"
 python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 sudo mkdir -p "/opt/1panel/ai-router/audit" "/opt/1panel/ai-router/redis"
 sudo chown -R "10001:10001" "/opt/1panel/ai-router"
+sudo "./scripts/install-tail-control-tls.sh"
 docker compose config
 docker compose build
 docker compose up -d

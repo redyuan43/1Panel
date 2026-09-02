@@ -163,6 +163,10 @@ services:
 
   router-control-tail:
     <<: *host-service
+    volumes:
+      - /opt/1panel/ai-router:/data
+      - /opt/1panel/ai-router/tokenizer:/models/tokenizer:ro
+      - /opt/1panel/ai-router-control-tls:/tls:ro
     command:
       - /bin/sh
       - -c
@@ -170,6 +174,8 @@ services:
         exec uvicorn ai_router.control:app
         --host "$$AI_ROUTER_TAILSCALE_IP" --port 4001
         --proxy-headers --forwarded-allow-ips "*"
+        --ssl-certfile /tls/ai-x10drg.taild500c8.ts.net.crt
+        --ssl-keyfile /tls/ai-x10drg.taild500c8.ts.net.key
     depends_on:
       redis:
         condition: service_healthy

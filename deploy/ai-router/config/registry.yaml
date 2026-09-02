@@ -258,6 +258,60 @@ endpoints:
       catalog_max_context_tokens: 872000
       vision_status: live-validated-2026-09-02
 
+  - id: zhipu-glm-5.3-flash
+    public_model: zhipu/glm-5.3-flash
+    provider_model: glm-5.3-flash
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4
+    node: zhipu-cloud
+    role: responder
+    tier: subscription-frontier
+    tier_rank: 50
+    modalities:
+      - text
+      - image
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 1000000
+    configured_context_tokens: 1000000
+    max_concurrency: 1
+    backend_type: openai
+    health_url: https://open.bigmodel.cn/api/coding/paas/v4/models
+    backend_api_key_env: AI_ROUTER_GLM_API_KEY
+    enabled: true
+    auto_candidate: false
+    cloud: true
+    capabilities:
+      chat: true
+      responses: adapter
+      tools: parallel
+      tool_choice: true
+      tool_choice_modes:
+        - auto
+      structured_output:
+        - json_object
+      streaming: true
+      validation_status: official-documented-unverified
+      validated_at: ""
+    quality:
+      general: 100
+      code: 105
+      batch: 100
+      long-context: 100
+    metadata:
+      provider: zhipu-coding
+      billing_mode: subscription
+      context_status: official-1m-unverified-boundary
+      quality_status: user-directed-code-priority-unbenchmarked
+      max_output_tokens: 128000
+      thinking_via_extra_body: true
+      reasoning_effort_default: max
+      vision_status: official-documented-unverified
+      image_min_tokens: 1024
+      documentation_url: https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash
+
   - id: cloud-deepseek-v4-flash
     public_model: deepseek/deepseek-v4-flash
     provider_model: deepseek-v4-flash

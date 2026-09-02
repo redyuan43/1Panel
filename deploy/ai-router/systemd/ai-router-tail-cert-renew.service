@@ -1,0 +1,9 @@
+[Unit]
+Description=Renew the AI Router tail control TLS certificate
+After=network-online.target tailscaled.service docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+UMask=0077
+ExecStart=/opt/1panel/ai-router/bin/renew-tail-control-cert

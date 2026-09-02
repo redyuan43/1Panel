@@ -66,8 +66,9 @@ export AI_ROUTER_API_KEY="<client-api-key>"
 
 复杂、多文件、架构、调试、安全和并发类编程任务使用 `model=auto` 即可。
 Router 会把这类请求标记为软性的 `subscription-frontier` 偏好，优先尝试
-`codex-pro/gpt-5.6-sol`；Sol 账号繁忙、冷却或不可用时立即回退兼容本地
-模型，之后才考虑受预算保护的 DeepSeek。
+`codex-pro/gpt-5.6-sol`；Sol 不可用时立即回退兼容本地模型，之后才考虑
+受预算保护的 DeepSeek。`zhipu/glm-5.3-flash` 当前仅供显式模型验收，
+尚未加入 `auto`。
 
 只有必须固定使用 Sol、并且可以接受账号繁忙时直接返回 `429` 的调用方，才
 显式指定：
@@ -199,6 +200,7 @@ curl --fail-with-body \
 | Ivan Qwen3.8 128K | 启用 | mmproj + 1024 image tokens，图像切换实测通过 |
 | AMD ROCmFP4 128K | 启用 | mmproj + 1024 image tokens，图像切换实测通过 |
 | Codex Pro Sol | 启用 | Codex Responses 图像输入真实通过 |
+| GLM-5.3-Flash | 待启用 | 官方声明原生多模态；仅允许显式验收，真实 Key 请求尚未验收 |
 | AI P40/V100 池 | 未启用 | 小图通过，但高分辨率 mtmd chunk 在 P40/V100 均耗尽 decode workspace |
 | Edge Flash Next | 未启用 | 当前 vLLM 图像请求会导致容器退出 |
 | DeepSeek | 未启用 | API 明确返回 `This model does not support image` |

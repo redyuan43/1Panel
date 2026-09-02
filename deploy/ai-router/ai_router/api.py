@@ -177,6 +177,17 @@ def _model_descriptor(
                 endpoint.capabilities.responses != "none"
                 for endpoint in endpoints
             ),
+            "tool_choice": any(
+                endpoint.capabilities.tool_choice
+                for endpoint in endpoints
+            ),
+            "tool_choice_modes": sorted(
+                {
+                    mode
+                    for endpoint in endpoints
+                    for mode in endpoint.capabilities.tool_choice_modes
+                }
+            ),
         },
     }
 
