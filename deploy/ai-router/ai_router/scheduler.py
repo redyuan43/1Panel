@@ -154,7 +154,16 @@ class Scheduler:
 
         try:
             while True:
-                if await self.store.queue_head(queue_key) == queue_member:
+                stale_before = (
+                    time.time() - self.lock_ttl_seconds - 60.0
+                )
+                if (
+                    await self.store.queue_head(
+                        queue_key,
+                        stale_before=stale_before,
+                    )
+                    == queue_member
+                ):
                     for deployment_id in deployment_ids:
                         deployment_key = (
                             f"router:deployment-capacity:{deployment_id}"

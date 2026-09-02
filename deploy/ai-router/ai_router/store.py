@@ -34,7 +34,11 @@ class StateStore(Protocol):
 
     async def enqueue(self, key: str, member: str, score: float) -> None: ...
 
-    async def queue_head(self, key: str) -> str | None: ...
+    async def queue_head(
+        self,
+        key: str,
+        stale_before: float | None = None,
+    ) -> str | None: ...
 
     async def dequeue(self, key: str, member: str) -> None: ...
 
@@ -150,9 +154,21 @@ class InMemoryStateStore:
         async with self._lock:
             self._queues[key][member] = score
 
-    async def queue_head(self, key: str) -> str | None:
+    async def queue_head(
+        self,
+        key: str,
+        stale_before: float | None = None,
+    ) -> str | None:
         async with self._lock:
             values = self._queues.get(key, {})
+            if stale_before is not None:
+                stale = [
+                    member
+                    for member, score in values.items()
+                    if score < stale_before
+                ]
+                for member in stale:
+                    values.pop(member, None)
             if not values:
                 return None
             return min(values, key=lambda item: (values[item], item))
@@ -338,7 +354,17 @@ class RedisStateStore:
     async def enqueue(self, key: str, member: str, score: float) -> None:
         await self._client.zadd(key, {member: score})
 
-    async def queue_head(self, key: str) -> str | None:
+    async def queue_head(
+        self,
+        key: str,
+        stale_before: float | None = None,
+    ) -> str | None:
+        if stale_before is not None:
+            await self._client.zremrangebyscore(
+                key,
+                "-inf",
+                stale_before,
+            )
         values = await self._client.zrange(key, 0, 0)
         return values[0] if values else None
 
