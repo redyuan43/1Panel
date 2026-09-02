@@ -611,7 +611,10 @@ function renderEndpointTable(endpoints) {
         <span class="table-secondary">${escapeHtml(endpoint.id)}</span>
       </td>
       <td>${escapeHtml(endpoint.tier)}</td>
-      <td>${formatTokens(status.eligible_context_tokens || endpoint.safe_context_tokens)}</td>
+      <td>
+        <strong class="table-primary">${formatTokens(status.eligible_context_tokens || endpoint.safe_context_tokens)}</strong>
+        <span class="table-secondary">配置 ${formatTokens(endpoint.configured_context_tokens)}</span>
+      </td>
       <td>${status.healthy ? `${Math.round(status.load_headroom * 100)}%` : "—"}</td>
       <td>${capabilitySummary(endpoint.capabilities, status.detail?.effective_modalities || endpoint.modalities)}</td>
       <td>

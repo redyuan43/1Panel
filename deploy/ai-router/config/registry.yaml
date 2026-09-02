@@ -112,7 +112,7 @@ endpoints:
       - code
       - batch
       - long-context
-    safe_context_tokens: 262144
+    safe_context_tokens: 500000
     configured_context_tokens: 500000
     max_concurrency: 1
     backend_type: vllm
@@ -137,9 +137,10 @@ endpoints:
       code: 100
       batch: 100
     metadata:
-      context_status: safe-limit-pending-live-validation
+      context_status: runtime-reported-500k
       quality_status: benchmarked-2026-09-01
       quality_report: /opt/1panel/ai-router/benchmarks/report-edge-20260901.json
+      vision_status: disabled-runtime-crash-2026-09-02
 
   - id: ivan-qwen38-flash-128k
     public_model: huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
@@ -263,7 +264,7 @@ endpoints:
       - code
       - batch
       - long-context
-    safe_context_tokens: 131072
+    safe_context_tokens: 272000
     configured_context_tokens: 272000
     max_concurrency: 1
     backend_type: codex_pool
@@ -291,7 +292,7 @@ endpoints:
     metadata:
       provider: openai-codex
       billing_mode: subscription
-      context_status: catalog-272k-safe-128k
+      context_status: catalog-272k
       quality_status: configured-frontier-priority-unbenchmarked
       reasoning_effort_default: medium
       model_catalog_required: true

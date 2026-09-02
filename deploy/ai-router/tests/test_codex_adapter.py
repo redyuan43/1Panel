@@ -169,6 +169,7 @@ def test_codex_adapter_catalog_chat_tools_and_state(
 
     with TestClient(app) as client:
         health = client.get("/health")
+        assert health.json()["safe_context_tokens"] == 272000
         response = client.post(
             "/v1/accounts/primary/chat/completions",
             headers={

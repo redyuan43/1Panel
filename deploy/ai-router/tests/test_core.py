@@ -384,6 +384,11 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert ai.deployment_profiles[0].short_request_rank == 0
     assert ai.deployment_profiles[1].short_request_rank == 10
     assert ai.deployment_profiles[2].short_request_rank == 20
+    edge = registry.by_id("edge-qwen38-flash")
+    assert edge is not None
+    assert edge.modalities == ("text",)
+    assert edge.safe_context_tokens == 500000
+    assert edge.configured_context_tokens == 500000
     amd = registry.by_id("amd-qwen38-rocmfpx-128k")
     assert amd is not None
     assert amd.public_model == (
@@ -408,6 +413,8 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     codex = registry.by_id("codex-pro-gpt-5.6-sol")
     assert codex is not None
     assert codex.public_model == "codex-pro/gpt-5.6-sol"
+    assert codex.safe_context_tokens == 272000
+    assert codex.configured_context_tokens == 272000
     assert codex.auto_candidate is True
     assert codex.metadata["billing_mode"] == "subscription"
     assert value.section("routing")["affinity_capacity_wait_seconds"] == 3

@@ -79,16 +79,18 @@ initialization error。2026-09-02 物理移除该 V100 SXM2 16GB 后重新启动
 | 模型 ID | `RadixArk/Qwen3.8-Flash-Next-NVFP4` |
 | 推理后端 | vLLM |
 | 配置上下文 | 500000 |
-| 初始安全上下文 | 262144，仍需真实长请求验证 |
+| 路由安全上下文 | 500000，与当前 vLLM `max_model_len` 一致 |
 | 路由并发 | 1 |
 | GPU 拓扑 | 未验证 |
-| 模态 | 当前生产只开放文本；视觉配置存在，但真实图像请求曾导致容器退出 |
+| 模态 | 仅文本；视觉运行时曾在真实图片请求中退出，生产禁用 |
 | 服务管理方式 | `qwen38-flash-next-vllm.service`，用户级 systemd |
 | Chat/Responses | 非流式、流式、单/并行工具、续轮和 JSON Object/Schema 已验证 |
 
 2026-09-02 的视觉探测返回 HTTP 500 后，`--rm` 容器退出并使 `18300`
 离线。原 systemd 服务随后恢复，健康检查和短文本 `EDGE_TEXT_OK` 均通过。
-修复图像运行时并重新验收前，Edge 不进入视觉候选。
+当前运行工件包含 vision config 和 `Qwen3VLProcessor` 预处理配置，Router
+仍禁用 Edge 图像路由；只有独立修复运行时并通过真实图片验收后才能重新开放，
+模型文件含视觉结构本身不作为生产能力证明。
 
 ## SSH Ivan
 

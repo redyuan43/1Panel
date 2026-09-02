@@ -24,7 +24,7 @@ from .codex_auth import (
 
 
 MODEL_ID = "gpt-5.6-sol"
-SAFE_CONTEXT_TOKENS = 131072
+SAFE_CONTEXT_TOKENS = 272000
 CATALOG_TTL_SECONDS = 300
 ACCOUNT_HEADER = "x-1panel-codex-account"
 
