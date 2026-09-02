@@ -219,9 +219,9 @@ def six_ai_workers() -> list[dict]:
     workers = [
         {
             "worker_id": f"worker-{index}",
-            "api_base": f"http://127.0.0.1:{18111 + index}/v1",
+            "api_base": f"http://127.0.0.1:{18112 + index}/v1",
             "profile_id": "p40-qwen38-64k",
-            "port": 18111 + index,
+            "port": 18112 + index,
             "tier": "p40_single",
             "priority": 2,
             "gpu_ids": [str(index)],
@@ -240,8 +240,33 @@ def six_ai_workers() -> list[dict]:
             "config_drift": [],
             "short_request_rank": 0,
         }
-        for index in range(5)
+        for index in range(4)
     ]
+    workers.append(
+        {
+            "worker_id": "worker-4",
+            "api_base": "http://127.0.0.1:18111/v1",
+            "profile_id": "v10016-p40-qwen38-262k",
+            "port": 18111,
+            "tier": "v100_16_p40_pair",
+            "priority": 1,
+            "gpu_ids": ["3", "0"],
+            "gpu_uuids": ["GPU-v100-16", "GPU-p40-pair"],
+            "names": ["Tesla V100-SXM2-16GB", "Tesla P40"],
+            "ready": True,
+            "state": "available",
+            "context_size": 262144,
+            "safe_context_tokens": 262144,
+            "cache_type_k": "q8_0",
+            "cache_type_v": "q8_0",
+            "modalities": ["text"],
+            "vision_status": "unverified",
+            "max_images": None,
+            "runtime_fingerprint": "v10016-p40-runtime",
+            "config_drift": [],
+            "short_request_rank": 20,
+        }
+    )
     workers.append(
         {
             "worker_id": "worker-5",
@@ -350,13 +375,15 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert ivan.auto_candidate is True
     ai = registry.by_id("ai-qwen38-27b")
     assert ai is not None
-    assert ai.safe_context_tokens == 196608
+    assert ai.safe_context_tokens == 262144
     assert [item.id for item in ai.deployment_profiles] == [
         "p40-qwen38-64k",
         "v10032-qwen38-196k",
+        "v10016-p40-qwen38-262k",
     ]
     assert ai.deployment_profiles[0].short_request_rank == 0
     assert ai.deployment_profiles[1].short_request_rank == 10
+    assert ai.deployment_profiles[2].short_request_rank == 20
     amd = registry.by_id("amd-qwen38-rocmfpx-128k")
     assert amd is not None
     assert amd.public_model == (
@@ -1204,7 +1231,7 @@ def test_ai_pool_health_builds_physical_deployments_and_quarantines_drift(
         for item in status.detail["workers"]
     }
     assert status.healthy is True
-    assert status.eligible_context_tokens == 196608
+    assert status.eligible_context_tokens == 262144
     assert status.detail["effective_modalities"] == ["image", "text"]
     assert status.detail["schedulable_workers"] == 5
     assert by_id["worker-0"]["profile_id"] == "p40-qwen38-64k"
@@ -1212,6 +1239,11 @@ def test_ai_pool_health_builds_physical_deployments_and_quarantines_drift(
     assert by_id["worker-0"]["schedulable"] is True
     assert by_id["worker-1"]["config_drift"] == ("cache_type_k",)
     assert by_id["worker-1"]["schedulable"] is False
+    assert (
+        by_id["worker-4"]["profile_id"]
+        == "v10016-p40-qwen38-262k"
+    )
+    assert by_id["worker-4"]["schedulable"] is True
     assert by_id["worker-5"]["profile_id"] == "v10032-qwen38-196k"
 
 
@@ -1304,7 +1336,7 @@ def test_short_requests_hash_across_p40s_and_reserve_v100(
         ).deployment_id
         for index in range(100)
     }
-    assert selected == {f"worker-{index}" for index in range(5)}
+    assert selected == {f"worker-{index}" for index in range(4)}
     v100 = run(
         policy.choose(
             requested_model=endpoint.public_model,

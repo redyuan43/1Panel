@@ -81,7 +81,9 @@ POST  /api/clients/{client_id}/keys/{key_id}/revoke
 AI 主机的 `18103` 是逻辑模型池。路由容器使用 host network，
 Chat Completions 会根据健康信息选择具体
 worker 端口，并把会话固定到 `worker_id`。每个物理 worker 独立保持一路并发，
-当前六个 worker 最多可并行处理六个请求，同一 worker 不会超过一路并发。
+当前 7 张 GPU 组成六个 worker：4 个单 P40、1 个 V100 32GB，以及 1 个
+V100 16GB + P40 混合 worker。池最多可并行处理六个请求，同一 worker
+不会超过一路并发。
 Responses API 暂时通过 LiteLLM 访问逻辑池，因为物理 worker 的 Responses
 POST 能力尚未完成真实请求验证，响应会标记为逻辑池亲和。
 

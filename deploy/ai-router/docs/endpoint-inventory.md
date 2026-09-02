@@ -25,10 +25,10 @@
 | Draft 工件 | `Qwen3.8-27B-DFlash2-Q4_K_M.gguf` |
 | 编排 | 健康信息报告 `ray_actor` |
 | Speculative | 健康信息报告 `draft-dflash`，`draft_n_max=5` |
-| 配置/安全上下文 | 注册配置 262144；当前健康池上限 196608，P40 worker 为 65536 |
+| 配置/安全上下文 | 注册配置和健康池上限 262144；V100 32GB 为 196608，单 P40 为 65536 |
 | 路由并发 | 每个物理 worker 为 1；健康时池总并发上限为 6 |
 | API 兼容 | Chat Completions、Responses、流式、工具和结构化输出已验证 |
-| 模态 | 生产只开放文本；小图直连通过，但高分辨率 mtmd chunk 在 P40/V100 均失败 |
+| 模态 | 单 P40 和 V100 32GB 开放单图；V100 16GB + P40 混合 worker 暂只开放文本 |
 | Responses | Router 直接绑定物理 worker，不经过 LiteLLM 逻辑池 |
 | 服务管理方式 | `bonsai-local-pool-v2.service`，`active/enabled` |
 
@@ -37,7 +37,7 @@
 | 端口 | GPU 拓扑 | KV cache | 安全上下文 |
 | --- | --- | --- | --- |
 | 18110 | Tesla V100-PCIE-32GB | F16/F16 | 196608 |
-| 18111 | Tesla P40 | Q8_0/Q8_0 | 65536 |
+| 18111 | Tesla V100-SXM2-16GB + Tesla P40，`tensor_split=2,3` | Q8_0/Q8_0 | 262144 |
 | 18112 | Tesla P40 | Q8_0/Q8_0 | 65536 |
 | 18113 | Tesla P40 | Q8_0/Q8_0 | 65536 |
 | 18114 | Tesla P40 | Q8_0/Q8_0 | 65536 |
@@ -55,11 +55,18 @@ initialization error。2026-09-02 物理移除该 V100 SXM2 16GB 后重新启动
 系统稳定识别 5 张 P40 和 1 张 V100 PCIe 32GB；六个 worker 均完成真实
 文本生成，启动后未出现新 Xid、GPU reset 或 OOM。
 
+2026-09-02 17:58 再次安装 V100 SXM2 16GB 后，主机稳定识别 7 张 GPU。
+`18111` 使用该 V100 与一张 P40 组成 262144 上下文混合 worker；其余为
+4 个单 P40 worker 和 1 个 V100 PCIe 32GB worker。重启后的内核日志暂无
+新 Xid、GPU reset、OOM 或待退役显存页。由于该卡有历史掉总线记录，Router
+将其作为独立 deployment 隔离健康、容量和 cooldown。
+
 同日使用 271x210 PNG 直连 AI 池，模型正确返回“红色”；约 4 MiB Base64
 的 1024x1024 红色 BMP 也曾在 P40 worker 返回“红色”。但随后来自 nx4 的
 更高分辨率图片在 P40 和 V100 上均出现
-`failed to find a memory slot for batch of size 920`，因此 AI 保留 mmproj
-用于后续运行时修复，不进入生产视觉候选。
+`failed to find a memory slot for batch of size 920`。Router 现将已验收的
+单图输入缩放到最长边 1024，并限制每次最多一图；新 V100 16GB + P40 混合
+worker 的视觉能力仍标记为未验证。
 
 ## SSH Edge
 
