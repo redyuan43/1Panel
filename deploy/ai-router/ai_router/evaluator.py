@@ -8,7 +8,7 @@ import httpx
 
 from .errors import RouterError
 from .token_counter import redact_media_payloads
-from .types import Evaluation
+from .types import Evaluation, ModelCallTarget
 
 
 ALLOWED_TASKS = {"general", "code", "batch", "long-context", "home-automation", "asr"}
@@ -44,7 +44,9 @@ class TaskEvaluator:
         prompt_tokens: int,
         current_task: str | None,
         is_new_conversation: bool,
-        before_model_call: Callable[[], Awaitable[None]] | None = None,
+        before_model_call: (
+            Callable[[], Awaitable[ModelCallTarget | None]] | None
+        ) = None,
         after_model_call: Callable[[], Awaitable[None]] | None = None,
     ) -> Evaluation:
         required_tier = headers.get("x-1panel-route-tier", "").strip().lower()
@@ -135,12 +137,13 @@ class TaskEvaluator:
         if complex_code:
             return complex_code
         acquired = False
+        target = None
         try:
             try:
                 if before_model_call:
-                    await before_model_call()
+                    target = await before_model_call()
                     acquired = True
-                result = await self._call_model(body)
+                result = await self._call_model(body, target=target)
             except Exception:
                 return Evaluation(
                     current_task or tool_task or "general",
@@ -250,8 +253,17 @@ class TaskEvaluator:
             preferred_tier="subscription-frontier",
         )
 
-    async def _call_model(self, body: dict[str, Any]) -> Evaluation:
-        model = str(self.settings.get("model_id", "")).strip()
+    async def _call_model(
+        self,
+        body: dict[str, Any],
+        *,
+        target: ModelCallTarget | None = None,
+    ) -> Evaluation:
+        model = (
+            target.model
+            if target
+            else str(self.settings.get("model_id", "")).strip()
+        )
         if not model:
             return Evaluation("general", None, 0.0, "evaluator_not_configured")
         prompt = {
@@ -278,8 +290,16 @@ class TaskEvaluator:
             },
         }
         response = await self.client.post(
-            f"{self.internal_base_url}/v1/chat/completions",
-            headers={"Authorization": f"Bearer {self.internal_api_key}"},
+            (
+                f"{target.base_url.rstrip('/')}/chat/completions"
+                if target
+                else f"{self.internal_base_url}/v1/chat/completions"
+            ),
+            headers=(
+                {"Authorization": f"Bearer {target.api_key}"}
+                if target and target.api_key
+                else {"Authorization": f"Bearer {self.internal_api_key}"}
+            ),
             json={
                 "model": model,
                 "messages": [

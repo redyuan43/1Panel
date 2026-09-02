@@ -27,11 +27,21 @@ from .history import (
     history_lookup_identities,
     persist_history,
 )
+from .media import inspect_image_inputs, normalize_ai_images
 from .policy import updated_conversation_state
 from .protocol import normalize_request
 from .runtime import RouterRuntime, build_runtime
 from .token_counter import output_reserve_tokens, request_modalities
-from .types import ConversationState, Endpoint, EndpointStatus, RouteDecision
+from .types import (
+    ConversationState,
+    Endpoint,
+    EndpointStatus,
+    Evaluation,
+    ModelCallTarget,
+    PhysicalDeployment,
+    RequestCapabilities,
+    RouteDecision,
+)
 
 
 RETRYABLE_STATUS_CODES = {429, 502, 503, 504}
@@ -135,7 +145,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         for model in ("auto", *current.registry.public_models()):
             if "*" not in client.policy.models and model not in client.policy.models:
                 continue
-            values.append(_model_descriptor(current, model))
+            values.append(await _model_descriptor(current, model))
         return JSONResponse({"object": "list", "data": values})
 
     @app.post("/v1/chat/completions")
@@ -149,7 +159,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     return app
 
 
-def _model_descriptor(
+async def _model_descriptor(
     current: RouterRuntime,
     model: str,
 ) -> dict[str, Any]:
@@ -162,15 +172,41 @@ def _model_descriptor(
         if model == "auto"
         else current.registry.by_public_model(model)
     )
+    statuses = await current.health.statuses(endpoints)
     modalities = sorted(
         {
             modality
             for endpoint in endpoints
-            for modality in endpoint.modalities
+            for modality in (
+                statuses[endpoint.id].detail.get(
+                    "effective_modalities",
+                    endpoint.modalities,
+                )
+                if endpoint.backend_type == "ai_pool"
+                else endpoint.modalities
+            )
         }
     )
     supports_images = "image" in modalities
-    return {
+    max_image_counts: list[int] = []
+    image_count_unbounded = False
+    for endpoint in endpoints:
+        if endpoint.backend_type == "ai_pool":
+            for worker in statuses[endpoint.id].detail.get("workers", []):
+                if "image" not in worker.get("modalities", []):
+                    continue
+                max_images = worker.get("max_images")
+                if max_images is None:
+                    image_count_unbounded = True
+                else:
+                    max_image_counts.append(int(max_images))
+        elif "image" in endpoint.modalities:
+            max_images = endpoint.metadata.get("max_images")
+            if max_images is None:
+                image_count_unbounded = True
+            else:
+                max_image_counts.append(int(max_images))
+    descriptor = {
         "id": model,
         "object": "model",
         "created": 0,
@@ -200,6 +236,13 @@ def _model_descriptor(
             ),
         },
     }
+    if supports_images:
+        descriptor["maxInputImages"] = (
+            None
+            if image_count_unbounded
+            else max(max_image_counts, default=1)
+        )
+    return descriptor
 
 
 async def _proxy(request: Request, api_kind: str) -> Response:
@@ -361,8 +404,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             )
 
         header_values = {key.lower(): value for key, value in request.headers.items()}
-        async def acquire_evaluator() -> None:
-            await _acquire_internal_model(
+        async def acquire_evaluator() -> ModelCallTarget:
+            return await _acquire_internal_model(
                 current,
                 lease=lease,
                 request_id=f"{request_id}:evaluator",
@@ -370,6 +413,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current.settings.section("evaluator").get("model_id", "")
                 ),
                 wait=False,
+                prompt_tokens=4096,
+                output_reserve_tokens=256,
             )
 
         evaluation = await current.evaluator.evaluate(
@@ -385,12 +430,25 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             after_model_call=lease.release_deployment,
         )
         modalities = request_modalities(effective_body, api_kind)
+        image_inputs = inspect_image_inputs(effective_body)
         has_tools = required_capabilities.tools
-        excluded: set[str] = set()
+        excluded: set[str] = {
+            endpoint.id
+            for endpoint in current.registry.responders()
+            if (
+                requested_model == "auto"
+                and image_inputs.remote
+                and endpoint.backend_type == "ai_pool"
+            )
+        }
         excluded_deployments: set[str] = set()
         max_attempts = int(current.settings.section("failover").get("max_attempts", 2))
         allow_retry = not bool(effective_body.get("stream")) and not has_tools
-        attempts = max_attempts
+        attempts = (
+            max(max_attempts, 3)
+            if "image" in modalities and requested_model == "auto"
+            else max_attempts
+        )
         last_error: RouterError | None = None
         total_capacity_attempts = 0
         total_queue_wait_ms = 0.0
@@ -415,6 +473,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     prompt_tokens=prompt_tokens,
                     output_reserve_tokens=reserve_tokens,
                     modalities=modalities,
+                    image_count=image_inputs.total,
                     has_tools=has_tools,
                     required_capabilities=required_capabilities,
                     conversation=conversation,
@@ -444,6 +503,13 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                                 decision.deployment_id
                                 or decision.endpoint.id
                             ),
+                            "deployment_profile_id": (
+                                decision.deployment_profile_id
+                            ),
+                            "deployment_vision_status": (
+                                decision.deployment_vision_status
+                            ),
+                            "image_resizes": decision.image_resizes,
                             "node": decision.endpoint.node,
                             "task": decision.task,
                             "reason": decision.reason,
@@ -491,6 +557,30 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     api_kind=api_kind,
                     decision=decision,
                 )
+                if (
+                    attempt < attempts
+                    and decision.endpoint.backend_type == "ai_pool"
+                    and "image" in modalities
+                    and upstream.status_code >= 400
+                ):
+                    vision_error_payload = await upstream.aread()
+                    if _is_ai_vision_workspace_failure(
+                        decision,
+                        modalities,
+                        upstream.status_code,
+                        vision_error_payload,
+                    ):
+                        await upstream.aclose()
+                        await current.budget.release(budget_reservation)
+                        budget_reservation = None
+                        await _exclude_failed_vision_profile(
+                            current,
+                            decision,
+                            excluded,
+                            excluded_deployments,
+                        )
+                        await lease.release_deployment()
+                        continue
                 subscription_fallback = bool(
                     requested_model == "auto"
                     and decision.endpoint.metadata.get("billing_mode")
@@ -704,6 +794,7 @@ async def _acquire_route_capacity(
     prompt_tokens: int,
     output_reserve_tokens: int,
     modalities: set[str],
+    image_count: int = 0,
     has_tools: bool,
     required_capabilities: Any,
     conversation: ConversationState | None,
@@ -727,11 +818,13 @@ async def _acquire_route_capacity(
                 prompt_tokens=prompt_tokens,
                 output_reserve_tokens=output_reserve_tokens,
                 modalities=modalities,
+                image_count=image_count,
                 has_tools=has_tools,
                 required_capabilities=required_capabilities,
                 conversation=conversation,
                 excluded_endpoint_ids=excluded_endpoints,
                 excluded_deployment_ids=excluded_deployments,
+                routing_key=request_id,
             )
         except NoEligibleModelError:
             if capacity_busy_seen:
@@ -823,6 +916,7 @@ async def _acquire_route_capacity(
             decision.upstream_api_base = deployment_routes[
                 selected_deployment
             ]
+        _apply_selected_deployment(decision, selected_deployment)
 
         budget_reservation = None
         try:
@@ -969,6 +1063,7 @@ async def _filter_restart_draining_deployments(
         decision.deployment_candidates = filtered
         decision.deployment_id = filtered[0][0]
         decision.upstream_api_base = filtered[0][1]
+        _apply_selected_deployment(decision, filtered[0][0])
         if decision.affinity in {"hit", "logical-hit"}:
             decision.affinity = "physical-failover"
             decision.reason = "physical_worker_unavailable"
@@ -1000,6 +1095,26 @@ def _deployment_available(
             for item in workers
         )
     return status.load_headroom > 0
+
+
+def _apply_selected_deployment(
+    decision: RouteDecision,
+    deployment_id: str,
+) -> None:
+    value = decision.deployment_details.get(deployment_id)
+    if not value:
+        return
+    try:
+        deployment = PhysicalDeployment.from_dict(value)
+    except (KeyError, TypeError, ValueError):
+        return
+    decision.deployment_profile_id = deployment.profile_id
+    decision.deployment_modalities = deployment.modalities
+    decision.deployment_vision_status = deployment.vision_status
+    decision.deployment_safe_context_tokens = (
+        deployment.safe_context_tokens
+    )
+    decision.deployment_max_images = deployment.max_images
 
 
 async def _send_upstream(
@@ -1135,6 +1250,86 @@ async def _exclude_failed_decision(
     await current.health.mark_failure(decision.endpoint.id, cooldown)
 
 
+def _is_ai_vision_workspace_failure(
+    decision: RouteDecision,
+    modalities: set[str],
+    status_code: int,
+    payload: bytes,
+) -> bool:
+    if (
+        decision.endpoint.backend_type != "ai_pool"
+        or "image" not in modalities
+        or status_code < 400
+    ):
+        return False
+    lowered = payload.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            b"failed to find a memory slot",
+            b"mtmd",
+            b"decode workspace",
+            b"batch of size",
+        )
+    )
+
+
+async def _exclude_failed_vision_profile(
+    current: RouterRuntime,
+    decision: RouteDecision,
+    excluded_endpoints: set[str],
+    excluded_deployments: set[str],
+) -> None:
+    deployment_id = decision.deployment_id
+    profile_id = decision.deployment_profile_id
+    if not deployment_id:
+        excluded_endpoints.add(decision.endpoint.id)
+        return
+    cooldown = int(
+        current.settings.section("failover").get("cooldown_seconds", 20)
+    )
+    await current.health.mark_capability_failure(
+        deployment_id,
+        "image",
+        cooldown,
+    )
+    status = await current.health.status(
+        decision.endpoint,
+        force_refresh=True,
+    )
+    deployments: list[PhysicalDeployment] = []
+    for value in status.detail.get("workers", []):
+        try:
+            deployments.append(PhysicalDeployment.from_dict(value))
+        except (KeyError, TypeError, ValueError):
+            continue
+    matching = {
+        item.worker_id
+        for item in deployments
+        if item.profile_id == profile_id
+    }
+    excluded_deployments.update(matching or {deployment_id})
+    remaining = [
+        item
+        for item in deployments
+        if (
+            item.schedulable
+            and item.worker_id not in excluded_deployments
+            and "image" in item.modalities
+        )
+    ]
+    if not remaining:
+        excluded_endpoints.add(decision.endpoint.id)
+    current.audit.write(
+        "vision_deployment_failed",
+        endpoint_id=decision.endpoint.id,
+        deployment_id=deployment_id,
+        deployment_profile_id=profile_id,
+        excluded_profile_deployments=sorted(matching),
+        fallback_available=bool(remaining),
+    )
+
+
 async def _prepare_routed_body(
     current: RouterRuntime,
     body: dict[str, Any],
@@ -1143,57 +1338,88 @@ async def _prepare_routed_body(
     decision: RouteDecision,
     request_id: str,
 ) -> tuple[dict[str, Any], Any | None]:
-    if not decision.migration:
-        routed = json.loads(json.dumps(body))
-        if (
-            api_kind == "responses"
-            and decision.endpoint.backend_type == "codex_pool"
-        ):
-            routed.pop("conversation", None)
-            routed.pop("previous_response_id", None)
-        return routed, None
-    if (
-        api_kind == "chat"
-        and decision.prompt_tokens + decision.output_reserve_tokens
-        <= decision.endpoint.safe_context_tokens
-    ):
-        return body, None
-    if not bool(current.settings.section("compaction").get("enabled", True)):
-        raise RouterError(
-            "cross-model upgrade requires context compaction",
-            status_code=503,
-            code="compaction_disabled",
-        )
-    compaction_lease = await current.scheduler.begin_request(None)
-    try:
-        await _acquire_internal_model(
-            current,
-            lease=compaction_lease,
-            request_id=f"{request_id}:compactor",
-            model_id=current.compactor.model_id,
-        )
-        capsule = await current.compactor.compact(
-            body,
-            api_kind=api_kind,
-            target_context_tokens=decision.endpoint.safe_context_tokens,
-        )
-    except QueueTimeoutError as exc:
-        raise CompactionUnavailableError(
-            "the compaction model queue did not become available in time"
-        ) from exc
-    finally:
-        await compaction_lease.release()
-    compacted_messages = current.compactor.cipher.decrypt(
-        capsule.encrypted_messages
+    target_context = (
+        decision.deployment_safe_context_tokens
+        or decision.endpoint.safe_context_tokens
     )
-    routed = replace_messages(body, api_kind, compacted_messages)
+    capsule = None
+    if (
+        not decision.migration
+        or (
+            api_kind == "chat"
+            and decision.prompt_tokens + decision.output_reserve_tokens
+            <= target_context
+        )
+    ):
+        routed = json.loads(json.dumps(body))
+    else:
+        if not bool(
+            current.settings.section("compaction").get("enabled", True)
+        ):
+            raise RouterError(
+                "cross-model upgrade requires context compaction",
+                status_code=503,
+                code="compaction_disabled",
+            )
+        compaction_lease = await current.scheduler.begin_request(None)
+        try:
+            compaction_target = await _acquire_internal_model(
+                current,
+                lease=compaction_lease,
+                request_id=f"{request_id}:compactor",
+                model_id=current.compactor.model_id,
+                prompt_tokens=current.token_counter.count_request(
+                    body,
+                    api_kind,
+                ),
+                output_reserve_tokens=2048,
+            )
+            capsule = await current.compactor.compact(
+                body,
+                api_kind=api_kind,
+                target_context_tokens=target_context,
+                target=compaction_target,
+            )
+        except QueueTimeoutError as exc:
+            raise CompactionUnavailableError(
+                "the compaction model queue did not become available in time"
+            ) from exc
+        finally:
+            await compaction_lease.release()
+        compacted_messages = current.compactor.cipher.decrypt(
+            capsule.encrypted_messages
+        )
+        routed = replace_messages(body, api_kind, compacted_messages)
+        decision.prompt_tokens = capsule.after_tokens
+
+    if (
+        decision.endpoint.backend_type == "ai_pool"
+        and "image" in request_modalities(routed, api_kind)
+    ):
+        image_inputs = inspect_image_inputs(routed)
+        if image_inputs.remote:
+            raise RouterError(
+                "AI physical deployments require embedded image data",
+                status_code=400,
+                code="ai_image_requires_embedded_data",
+                details={"remote_images": image_inputs.remote},
+            )
+        vision = current.settings.section("vision")
+        routed, decision.image_resizes = normalize_ai_images(
+            routed,
+            max_dimension=int(
+                vision.get("ai_max_dimension", 1024)
+            ),
+            max_source_pixels=int(
+                vision.get("max_source_pixels", 40_000_000)
+            ),
+        )
     if (
         api_kind == "responses"
         and decision.endpoint.backend_type == "codex_pool"
     ):
         routed.pop("conversation", None)
         routed.pop("previous_response_id", None)
-    decision.prompt_tokens = capsule.after_tokens
     return routed, capsule
 
 
@@ -1204,7 +1430,9 @@ async def _acquire_internal_model(
     request_id: str,
     model_id: str,
     wait: bool = True,
-) -> None:
+    prompt_tokens: int = 4096,
+    output_reserve_tokens: int = 2048,
+) -> ModelCallTarget:
     endpoint = current.registry.by_id(model_id)
     if endpoint is None or not endpoint.enabled:
         raise RouterError(
@@ -1212,6 +1440,73 @@ async def _acquire_internal_model(
             status_code=503,
             code="internal_model_unavailable",
         )
+    if endpoint.backend_type in {"ai_pool", "codex_pool"}:
+        decision = await current.policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation(
+                "general",
+                None,
+                1.0,
+                "internal_model",
+            ),
+            prompt_tokens=prompt_tokens,
+            output_reserve_tokens=output_reserve_tokens,
+            modalities={"text"},
+            has_tools=False,
+            required_capabilities=RequestCapabilities(
+                protocol="chat",
+            ),
+            conversation=None,
+            routing_key=request_id,
+        )
+        if decision.endpoint.id != endpoint.id:
+            raise RouterError(
+                "internal model resolved to an unexpected endpoint",
+                status_code=503,
+                code="internal_model_unavailable",
+            )
+        candidates = tuple(
+            deployment_id
+            for deployment_id, _url in decision.deployment_candidates
+        ) or (decision.deployment_id or endpoint.id,)
+        if wait:
+            selected = await current.scheduler.acquire_deployment_candidates(
+                lease,
+                endpoint.id,
+                candidates,
+                request_id,
+                timeout_seconds=float(
+                    current.settings.section("queue").get(
+                        "timeout_seconds",
+                        120,
+                    )
+                ),
+                affinity_priority=False,
+                capacity=endpoint.max_concurrency,
+            )
+        else:
+            selected = (
+                await current.scheduler.try_acquire_deployment_candidates(
+                    lease,
+                    candidates,
+                    capacity=endpoint.max_concurrency,
+                )
+            )
+            if not selected:
+                raise QueueTimeoutError()
+        routes = dict(decision.deployment_candidates)
+        decision.deployment_id = selected
+        decision.upstream_api_base = routes.get(
+            selected,
+            decision.upstream_api_base,
+        )
+        _apply_selected_deployment(decision, selected)
+        return ModelCallTarget(
+            base_url=decision.upstream_api_base or endpoint.api_base,
+            model=endpoint.provider_model,
+            api_key=os.environ.get(endpoint.backend_api_key_env, ""),
+        )
+
     if wait:
         await current.scheduler.acquire_deployment(
             lease,
@@ -1226,14 +1521,19 @@ async def _acquire_internal_model(
             affinity_priority=False,
             capacity=endpoint.max_concurrency,
         )
-        return
-    acquired = await current.scheduler.try_acquire_deployment_candidates(
-        lease,
-        (endpoint.id,),
-        capacity=endpoint.max_concurrency,
+    else:
+        acquired = await current.scheduler.try_acquire_deployment_candidates(
+            lease,
+            (endpoint.id,),
+            capacity=endpoint.max_concurrency,
+        )
+        if not acquired:
+            raise QueueTimeoutError()
+    return ModelCallTarget(
+        base_url=endpoint.api_base,
+        model=endpoint.provider_model,
+        api_key=os.environ.get(endpoint.backend_api_key_env, ""),
     )
-    if not acquired:
-        raise QueueTimeoutError()
 
 
 async def _save_conversation(
@@ -1491,6 +1791,9 @@ async def _audit(
         selected_model=decision.endpoint.public_model,
         endpoint_id=decision.endpoint.id,
         deployment_id=decision.deployment_id or decision.endpoint.id,
+        deployment_profile_id=decision.deployment_profile_id,
+        deployment_vision_status=decision.deployment_vision_status,
+        image_resizes=decision.image_resizes,
         node=decision.endpoint.node,
         task=decision.task,
         reason=decision.reason,
@@ -1672,6 +1975,9 @@ def _audit_started(
         selected_model=decision.endpoint.public_model,
         endpoint_id=decision.endpoint.id,
         deployment_id=decision.deployment_id or decision.endpoint.id,
+        deployment_profile_id=decision.deployment_profile_id,
+        deployment_vision_status=decision.deployment_vision_status,
+        image_resizes=decision.image_resizes,
         node=decision.endpoint.node,
         task=decision.task,
         reason=decision.reason,

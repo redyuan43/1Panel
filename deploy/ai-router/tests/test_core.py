@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import time
 from collections import Counter
@@ -12,6 +14,7 @@ import pytest
 import yaml
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from ai_router.api import (
     _acquire_internal_model,
@@ -41,6 +44,7 @@ from ai_router.errors import (
     RouterError,
 )
 from ai_router.evaluator import TaskEvaluator
+from ai_router.health import HealthMonitor
 from ai_router.history import (
     SSEAccumulator,
     assistant_items_from_response,
@@ -108,6 +112,21 @@ class FakeHealth:
     async def in_cooldown(self, _endpoint_id: str) -> bool:
         return False
 
+    async def in_capability_cooldown(
+        self,
+        _deployment_id: str,
+        _capability: str,
+    ) -> bool:
+        return False
+
+    async def mark_capability_failure(
+        self,
+        deployment_id: str,
+        capability: str,
+        _cooldown_seconds: int,
+    ) -> None:
+        self.failed.append(f"{deployment_id}:{capability}")
+
     async def mark_failure(self, endpoint_id: str, _cooldown_seconds: int) -> None:
         self.failed.append(endpoint_id)
 
@@ -149,35 +168,106 @@ def ai_workers() -> list[dict]:
     return [
         {
             "worker_id": "worker-priority-0",
+            "api_base": "http://127.0.0.1:18110/v1",
+            "profile_id": "v10032-qwen38-196k",
             "port": 18110,
+            "tier": "v100_32_single",
             "priority": 0,
+            "gpu_ids": ["3"],
+            "gpu_uuids": ["GPU-v100"],
+            "names": ["Tesla V100-PCIE-32GB"],
             "ready": True,
             "state": "available",
+            "context_size": 196608,
             "safe_context_tokens": 196608,
+            "cache_type_k": "f16",
+            "cache_type_v": "f16",
+            "modalities": ["text", "image"],
+            "vision_status": "experimental",
+            "max_images": 1,
+            "runtime_fingerprint": "v100-runtime",
+            "config_drift": [],
+            "short_request_rank": 10,
         },
         {
             "worker_id": "worker-priority-1",
+            "api_base": "http://127.0.0.1:18111/v1",
+            "profile_id": "p40-qwen38-64k",
             "port": 18111,
-            "priority": 1,
+            "tier": "p40_single",
+            "priority": 2,
+            "gpu_ids": ["0"],
+            "gpu_uuids": ["GPU-p40"],
+            "names": ["Tesla P40"],
             "ready": True,
             "state": "available",
-            "safe_context_tokens": 262144,
+            "context_size": 65536,
+            "safe_context_tokens": 65536,
+            "cache_type_k": "q8_0",
+            "cache_type_v": "q8_0",
+            "modalities": ["text", "image"],
+            "vision_status": "experimental",
+            "max_images": 1,
+            "runtime_fingerprint": "p40-runtime",
+            "config_drift": [],
+            "short_request_rank": 0,
         },
     ]
 
 
 def six_ai_workers() -> list[dict]:
-    return [
+    workers = [
         {
             "worker_id": f"worker-{index}",
-            "port": 18110 + index,
-            "priority": index,
+            "api_base": f"http://127.0.0.1:{18111 + index}/v1",
+            "profile_id": "p40-qwen38-64k",
+            "port": 18111 + index,
+            "tier": "p40_single",
+            "priority": 2,
+            "gpu_ids": [str(index)],
+            "gpu_uuids": [f"GPU-p40-{index}"],
+            "names": ["Tesla P40"],
             "ready": True,
             "state": "available",
-            "safe_context_tokens": 262144,
+            "context_size": 65536,
+            "safe_context_tokens": 65536,
+            "cache_type_k": "q8_0",
+            "cache_type_v": "q8_0",
+            "modalities": ["text", "image"],
+            "vision_status": "experimental",
+            "max_images": 1,
+            "runtime_fingerprint": f"p40-runtime-{index}",
+            "config_drift": [],
+            "short_request_rank": 0,
         }
-        for index in range(6)
+        for index in range(5)
     ]
+    workers.append(
+        {
+            "worker_id": "worker-5",
+            "api_base": "http://127.0.0.1:18110/v1",
+            "profile_id": "v10032-qwen38-196k",
+            "port": 18110,
+            "tier": "v100_32_single",
+            "priority": 0,
+            "gpu_ids": ["5"],
+            "gpu_uuids": ["GPU-v100"],
+            "names": ["Tesla V100-PCIE-32GB"],
+            "ready": True,
+            "state": "available",
+            "context_size": 196608,
+            "safe_context_tokens": 196608,
+            "cache_type_k": "f16",
+            "cache_type_v": "f16",
+            "modalities": ["text", "image"],
+            "vision_status": "experimental",
+            "max_images": 1,
+            "runtime_fingerprint": "v100-runtime",
+            "config_drift": [],
+            "short_request_rank": 10,
+        }
+    )
+    return workers
 
 
 def pilot_manifest() -> dict:
@@ -258,6 +348,15 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert ivan.safe_context_tokens == 131072
     assert ivan.max_concurrency == 1
     assert ivan.auto_candidate is True
+    ai = registry.by_id("ai-qwen38-27b")
+    assert ai is not None
+    assert ai.safe_context_tokens == 196608
+    assert [item.id for item in ai.deployment_profiles] == [
+        "p40-qwen38-64k",
+        "v10032-qwen38-196k",
+    ]
+    assert ai.deployment_profiles[0].short_request_rank == 0
+    assert ai.deployment_profiles[1].short_request_rank == 10
     amd = registry.by_id("amd-qwen38-rocmfpx-128k")
     assert amd is not None
     assert amd.public_model == (
@@ -1064,6 +1163,58 @@ def test_router_drain_rejects_new_inference_but_keeps_status_available(
     assert status.json()["instance"]["boot_id"] == "boot-drain"
 
 
+def test_ai_pool_health_builds_physical_deployments_and_quarantines_drift(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    workers = six_ai_workers()
+    workers[1]["cache_type_k"] = "f16"
+
+    async def scenario() -> EndpointStatus:
+        async def respond(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "runtime_fingerprint": "runtime-a",
+                    "workers": workers,
+                },
+            )
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(respond)
+        )
+        monitor = HealthMonitor(
+            InMemoryStateStore(),
+            client=client,
+        )
+        try:
+            return await monitor.status(
+                endpoint,
+                force_refresh=True,
+            )
+        finally:
+            await client.aclose()
+
+    status = run(scenario())
+    by_id = {
+        item["worker_id"]: item
+        for item in status.detail["workers"]
+    }
+    assert status.healthy is True
+    assert status.eligible_context_tokens == 196608
+    assert status.detail["effective_modalities"] == ["image", "text"]
+    assert status.detail["schedulable_workers"] == 5
+    assert by_id["worker-0"]["profile_id"] == "p40-qwen38-64k"
+    assert by_id["worker-0"]["max_images"] == 1
+    assert by_id["worker-0"]["schedulable"] is True
+    assert by_id["worker-1"]["config_drift"] == ("cache_type_k",)
+    assert by_id["worker-1"]["schedulable"] is False
+    assert by_id["worker-5"]["profile_id"] == "v10032-qwen38-196k"
+
+
 def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     endpoint = registry.by_id("ai-qwen38-27b")
@@ -1089,11 +1240,11 @@ def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
             conversation=None,
         )
     )
-    assert first.deployment_id == "worker-priority-0"
-    assert first.upstream_api_base == "http://127.0.0.1:18110/v1"
+    assert first.deployment_id == "worker-priority-1"
+    assert first.upstream_api_base == "http://127.0.0.1:18111/v1"
     assert [item[0] for item in first.deployment_candidates] == [
-        "worker-priority-0",
         "worker-priority-1",
+        "worker-priority-0",
     ]
     state = updated_conversation_state(
         None,
@@ -1115,8 +1266,61 @@ def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
     assert second.deployment_id == first.deployment_id
     assert second.affinity == "hit"
     assert second.deployment_candidates == (
-        ("worker-priority-0", "http://127.0.0.1:18110/v1"),
+        ("worker-priority-1", "http://127.0.0.1:18111/v1"),
     )
+
+
+def test_short_requests_hash_across_p40s_and_reserve_v100(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth(
+            {
+                endpoint.id: healthy(
+                    endpoint.id,
+                    context=endpoint.safe_context_tokens,
+                    workers=six_ai_workers(),
+                )
+            }
+        ),
+    )
+    selected = {
+        run(
+            policy.choose(
+                requested_model=endpoint.public_model,
+                evaluation=Evaluation("general", None, 1.0, "test"),
+                prompt_tokens=100,
+                output_reserve_tokens=100,
+                modalities={"text"},
+                has_tools=False,
+                conversation=None,
+                routing_key=f"request-{index}",
+            )
+        ).deployment_id
+        for index in range(100)
+    }
+    assert selected == {f"worker-{index}" for index in range(5)}
+    v100 = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+            excluded_deployment_ids={
+                f"worker-{index}" for index in range(5)
+            },
+            routing_key="v100-fallback",
+        )
+    )
+    assert v100.deployment_id == "worker-5"
 
 
 def test_ai_pool_fails_over_when_affinity_worker_is_externally_leased(
@@ -1149,7 +1353,7 @@ def test_ai_pool_fails_over_when_affinity_worker_is_externally_leased(
         decision=original,
         cache_generation="generation-1",
     )
-    workers[0]["state"] = "leased"
+    workers[1]["state"] = "leased"
     changed = run(
         policy.choose(
             requested_model=endpoint.public_model,
@@ -1161,7 +1365,7 @@ def test_ai_pool_fails_over_when_affinity_worker_is_externally_leased(
             conversation=state,
         )
     )
-    assert changed.deployment_id == "worker-priority-1"
+    assert changed.deployment_id == "worker-priority-0"
     assert changed.affinity == "physical-failover"
     assert changed.reason == "physical_worker_unavailable"
 
@@ -1214,7 +1418,7 @@ def test_ai_pool_filters_workers_by_required_context(tmp_path: Path) -> None:
         policy.choose(
             requested_model=endpoint.public_model,
             evaluation=Evaluation("long-context", None, 1.0, "test"),
-            prompt_tokens=200000,
+            prompt_tokens=110000,
             output_reserve_tokens=100,
             modalities={"text"},
             has_tools=False,
@@ -1222,14 +1426,14 @@ def test_ai_pool_filters_workers_by_required_context(tmp_path: Path) -> None:
         )
     )
     assert decision.deployment_candidates == (
-        ("worker-priority-1", "http://127.0.0.1:18111/v1"),
+        ("worker-priority-0", "http://127.0.0.1:18110/v1"),
     )
     with pytest.raises(NoEligibleModelError):
         run(
             policy.choose(
                 requested_model=endpoint.public_model,
                 evaluation=Evaluation("long-context", None, 1.0, "test"),
-                prompt_tokens=262100,
+                prompt_tokens=196600,
                 output_reserve_tokens=100,
                 modalities={"text"},
                 has_tools=False,
@@ -1949,8 +2153,8 @@ def test_ai_responses_route_binds_a_physical_worker(
             conversation=None,
         )
     )
-    assert decision.deployment_id == "worker-priority-0"
-    assert decision.upstream_api_base == "http://127.0.0.1:18110/v1"
+    assert decision.deployment_id == "worker-priority-1"
+    assert decision.upstream_api_base == "http://127.0.0.1:18111/v1"
     assert decision.native_or_adapter == "native"
 
 
@@ -2416,17 +2620,36 @@ def test_evaluator_capacity_acquisition_does_not_wait(
         store=InMemoryStateStore(),
         token_counter=SimpleTokenCounter(),
     )
-    held = run(runtime.scheduler.begin_request(None))
-    run(
-        runtime.scheduler.acquire_deployment(
-            held,
-            "ai-qwen38-27b",
-            "held-request",
-            timeout_seconds=0,
-            affinity_priority=False,
-            capacity=1,
-        )
+    endpoint = runtime.registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers(),
+            )
+        }
     )
+    runtime.policy = RoutingPolicy(
+        runtime.registry,
+        runtime.settings,
+        runtime.health,
+    )
+    held = []
+    for index, worker in enumerate(ai_workers()):
+        lease = run(runtime.scheduler.begin_request(None))
+        run(
+            runtime.scheduler.acquire_deployment(
+                lease,
+                worker["worker_id"],
+                f"held-request-{index}",
+                timeout_seconds=0,
+                affinity_priority=False,
+                capacity=1,
+            )
+        )
+        held.append(lease)
     evaluator = run(runtime.scheduler.begin_request(None))
     started = time.monotonic()
     with pytest.raises(QueueTimeoutError):
@@ -2440,7 +2663,8 @@ def test_evaluator_capacity_acquisition_does_not_wait(
             )
         )
     assert time.monotonic() - started < 0.5
-    run(held.release())
+    for lease in held:
+        run(lease.release())
     run(evaluator.release())
     run(runtime.close())
 
@@ -2448,6 +2672,7 @@ def test_evaluator_capacity_acquisition_does_not_wait(
 def test_validated_vision_endpoints_are_registered_for_images() -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     expected = {
+        "ai-qwen38-27b",
         "ivan-qwen38-flash-128k",
         "amd-qwen38-rocmfpx-128k",
         "codex-pro-gpt-5.6-sol",
@@ -2475,6 +2700,23 @@ def test_models_endpoint_reports_vision_capabilities(
         store=InMemoryStateStore(),
         token_counter=SimpleTokenCounter(),
     )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers()
+                if endpoint.backend_type == "ai_pool"
+                else None,
+            )
+            for endpoint in runtime.registry.endpoints
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        runtime.registry,
+        runtime.settings,
+        runtime.health,
+    )
     app = create_app(runtime)
     with TestClient(app) as client:
         response = client.get(
@@ -2493,7 +2735,7 @@ def test_models_endpoint_reports_vision_capabilities(
     ]["supportsImages"] is True
     assert models[
         "huihui/Qwen3.8-27B-Q4-DFlash2"
-    ]["supportsImages"] is False
+    ]["supportsImages"] is True
     assert models[
         "RadixArk/Qwen3.8-Flash-Next-NVFP4"
     ]["supportsImages"] is False
@@ -2552,8 +2794,14 @@ def test_large_base64_image_bypasses_text_tpm_and_routes_to_vision(
         runtime.settings,
         runtime.health,
     )
-    encoded = "A" * 4_000_000
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (1024, 1024), "red").save(
+        image_buffer,
+        format="BMP",
+    )
+    encoded = base64.b64encode(image_buffer.getvalue()).decode("ascii")
     local_vision_models = {
+        "huihui/Qwen3.8-27B-Q4-DFlash2",
         "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF",
         "Qwen/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-MTP",
     }
@@ -2614,7 +2862,335 @@ def test_large_base64_image_bypasses_text_tpm_and_routes_to_vision(
         )
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "VISION_OK"
+    assert response.headers["x-1panel-route-node"] in {
+        "ai",
+        "ivan",
+        "amd",
+    }
+    run(runtime.internal_client.aclose())
+
+
+def test_ai_image_is_resized_for_inference_and_original_is_archived(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "vision-training-audit.jsonl"),
+    )
+    training_key = tmp_path / "training.key"
+    training_key.write_bytes(Fernet.generate_key())
+    monkeypatch.setenv("AI_ROUTER_TRAINING_ENABLED", "true")
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_DB_PATH",
+        str(tmp_path / "training.sqlite3"),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_TRAINING_KEY_PATH",
+        str(training_key),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(image_token_estimate=1024),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers(),
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    original_buffer = io.BytesIO()
+    Image.new("RGB", (2048, 1024), "red").save(
+        original_buffer,
+        format="PNG",
+    )
+    original_url = (
+        "data:image/png;base64,"
+        + base64.b64encode(original_buffer.getvalue()).decode("ascii")
+    )
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        assert payload["model"] == endpoint.provider_model
+        routed_url = payload["messages"][0]["content"][1][
+            "image_url"
+        ]["url"]
+        image_bytes = base64.b64decode(routed_url.split(",", 1)[1])
+        with Image.open(io.BytesIO(image_bytes)) as routed_image:
+            assert routed_image.size == (1024, 512)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-ai-vision",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "VISION_OK",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": original_url},
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["x-1panel-image-resized"] == "1"
+    assert response.headers[
+        "x-1panel-route-deployment-profile"
+    ] == "p40-qwen38-64k"
+    assert response.headers["x-1panel-vision-status"] == "experimental"
+    assert runtime.training is not None
+    output_path = tmp_path / "vision-training-export.jsonl"
+    assert run(runtime.training.export_jsonl(str(output_path))) == 1
+    record = json.loads(
+        output_path.read_text(encoding="utf-8").strip()
+    )["payload"]
+    received_url = record["request"]["received_body"]["messages"][0][
+        "content"
+    ][1]["image_url"]["url"]
+    routed_url = record["routing_attempts"][0]["routed_body"][
+        "messages"
+    ][0]["content"][1]["image_url"]["url"]
+    assert received_url == original_url
+    assert routed_url != original_url
+    run(runtime.internal_client.aclose())
+
+
+def test_explicit_ai_rejects_remote_image_without_fetching_it(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "remote-image-audit.jsonl"),
+    )
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers(),
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        raise AssertionError("remote image must not reach AI worker")
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": "https://example.invalid/image.png"
+                                },
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == (
+        "ai_image_requires_embedded_data"
+    )
+    run(runtime.internal_client.aclose())
+
+
+def test_auto_vision_workspace_failure_tries_p40_then_v100_then_falls_back(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    ai = registry.by_id("ai-qwen38-27b")
+    assert ai is not None
+    ai.quality["general"] = 1000
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    audit_path = tmp_path / "vision-fallback-audit.jsonl"
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(audit_path))
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+                workers=ai_workers()
+                if endpoint.backend_type == "ai_pool"
+                else None,
+            )
+            for endpoint in registry.endpoints
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    calls: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.port in {18110, 18111}:
+            return httpx.Response(
+                500,
+                headers={"content-type": "application/json"},
+                json={
+                    "error": {
+                        "message": (
+                            "failed to find a memory slot "
+                            "for batch of size 920"
+                        )
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": "chatcmpl-vision-fallback",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "FALLBACK_OK",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    image_buffer = io.BytesIO()
+    Image.new("RGB", (128, 128), "red").save(
+        image_buffer,
+        format="PNG",
+    )
+    image_url = (
+        "data:image/png;base64,"
+        + base64.b64encode(image_buffer.getvalue()).decode("ascii")
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "describe"},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": image_url},
+                            },
+                        ],
+                    }
+                ],
+                "max_tokens": 16,
+            },
+        )
+    assert response.status_code == 200
+    assert response.json()["choices"][0]["message"]["content"] == (
+        "FALLBACK_OK"
+    )
     assert response.headers["x-1panel-route-node"] in {"ivan", "amd"}
+    assert [httpx.URL(item).port for item in calls[:2]] == [18111, 18110]
+    assert runtime.health.failed == [
+        "worker-priority-1:image",
+        "worker-priority-0:image",
+    ]
+    assert audit_path.read_text(encoding="utf-8").count(
+        "vision_deployment_failed"
+    ) == 2
     run(runtime.internal_client.aclose())
 
 

@@ -24,6 +24,7 @@ EDITABLE_SECTIONS = {
     "health",
     "queue",
     "routing",
+    "vision",
 }
 
 
@@ -259,7 +260,11 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 ),
                 "total_endpoints": len(endpoints),
                 "ready_workers": sum(
-                    bool(item["ready"]) for item in workers
+                    bool(
+                        item["ready"]
+                        and item.get("schedulable", True)
+                    )
+                    for item in workers
                 ),
                 "total_workers": len(workers),
                 "active_requests": len(active),
@@ -412,6 +417,13 @@ def _request_rows(
                 "selected_model": event.get("selected_model"),
                 "endpoint_id": event.get("endpoint_id"),
                 "deployment_id": event.get("deployment_id"),
+                "deployment_profile_id": event.get(
+                    "deployment_profile_id"
+                ),
+                "deployment_vision_status": event.get(
+                    "deployment_vision_status"
+                ),
+                "image_resizes": event.get("image_resizes", 0),
                 "node": event.get("node"),
                 "task": event.get("task"),
                 "reason": event.get("reason"),
@@ -512,7 +524,11 @@ def _alerts(
         )
     unavailable_workers = [
         item for item in workers
-        if not item.get("ready") or item.get("state") != "available"
+        if (
+            not item.get("ready")
+            or not item.get("schedulable", True)
+            or item.get("state") != "available"
+        )
     ]
     if unavailable_workers:
         alerts.append(
@@ -522,6 +538,21 @@ def _alerts(
                 "detail": (
                     f"{len(unavailable_workers)} 个物理 worker "
                     "当前不可调度"
+                ),
+            }
+        )
+    drifted_workers = [
+        item for item in workers
+        if item.get("config_drift")
+    ]
+    if drifted_workers:
+        alerts.append(
+            {
+                "level": "critical",
+                "title": "物理节点配置不一致",
+                "detail": (
+                    f"{len(drifted_workers)} 个 worker "
+                    "已从调度中隔离"
                 ),
             }
         )

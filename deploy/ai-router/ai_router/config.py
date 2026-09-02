@@ -7,7 +7,12 @@ from typing import Any
 
 import yaml
 
-from .types import ClientPolicy, Endpoint, EndpointCapabilities
+from .types import (
+    ClientPolicy,
+    DeploymentProfile,
+    Endpoint,
+    EndpointCapabilities,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -205,6 +210,16 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
         raise ValueError(
             "endpoint structured_output supports only json_object and json_schema"
         )
+    profile_values = value.get("deployment_profiles", []) or []
+    if not isinstance(profile_values, list):
+        raise ValueError("endpoint deployment_profiles must be a list")
+    deployment_profiles = tuple(
+        deployment_profile_from_dict(item)
+        for item in profile_values
+    )
+    profile_ids = [item.id for item in deployment_profiles]
+    if len(profile_ids) != len(set(profile_ids)):
+        raise ValueError("endpoint deployment profile IDs must be unique")
     return Endpoint(
         id=str(value["id"]),
         public_model=str(value["public_model"]),
@@ -244,8 +259,71 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
                 capabilities_value.get("validated_at", "")
             ),
         ),
+        deployment_profiles=deployment_profiles,
         quality={str(key): float(score) for key, score in (value.get("quality", {}) or {}).items()},
         metadata=copy.deepcopy(value.get("metadata", {}) or {}),
+    )
+
+
+def deployment_profile_from_dict(
+    value: dict[str, Any],
+) -> DeploymentProfile:
+    if not isinstance(value, dict):
+        raise ValueError("deployment profile must be an object")
+    required = {
+        "id",
+        "tiers",
+        "modalities",
+        "context_size",
+        "safe_context_tokens",
+        "cache_type_k",
+        "cache_type_v",
+        "short_request_rank",
+    }
+    missing = sorted(required - set(value))
+    if missing:
+        raise ValueError(
+            "deployment profile is missing: " + ", ".join(missing)
+        )
+    tiers = tuple(str(item) for item in value["tiers"])
+    modalities = tuple(str(item) for item in value["modalities"])
+    context_size = int(value["context_size"])
+    safe_context_tokens = int(value["safe_context_tokens"])
+    if not tiers:
+        raise ValueError("deployment profile tiers must not be empty")
+    if not modalities:
+        raise ValueError(
+            "deployment profile modalities must not be empty"
+        )
+    if context_size <= 0 or safe_context_tokens <= 0:
+        raise ValueError(
+            "deployment profile context limits must be positive"
+        )
+    if safe_context_tokens > context_size:
+        raise ValueError(
+            "deployment profile safe context cannot exceed context size"
+        )
+    max_images_value = value.get("max_images")
+    max_images = (
+        int(max_images_value)
+        if max_images_value is not None
+        else None
+    )
+    if max_images is not None and max_images <= 0:
+        raise ValueError(
+            "deployment profile max_images must be positive"
+        )
+    return DeploymentProfile(
+        id=str(value["id"]),
+        tiers=tiers,
+        modalities=modalities,
+        context_size=context_size,
+        safe_context_tokens=safe_context_tokens,
+        cache_type_k=str(value["cache_type_k"]),
+        cache_type_v=str(value["cache_type_v"]),
+        short_request_rank=int(value["short_request_rank"]),
+        vision_status=str(value.get("vision_status", "unverified")),
+        max_images=max_images,
     )
 
 
@@ -274,6 +352,12 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError("limits.image_token_estimate must be positive")
     if int(limits.get("audio_token_estimate", 0)) <= 0:
         raise ValueError("limits.audio_token_estimate must be positive")
+
+    vision = value.get("vision", {})
+    if int(vision.get("ai_max_dimension", 0)) <= 0:
+        raise ValueError("vision.ai_max_dimension must be positive")
+    if int(vision.get("max_source_pixels", 0)) <= 0:
+        raise ValueError("vision.max_source_pixels must be positive")
 
     affinity = value.get("affinity", {})
     affinity_ttl = int(affinity.get("ttl_seconds", 0))

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import replace
 from typing import Any
@@ -13,6 +14,7 @@ from .types import (
     Endpoint,
     EndpointStatus,
     Evaluation,
+    PhysicalDeployment,
     RequestCapabilities,
     RouteDecision,
 )
@@ -105,11 +107,13 @@ class RoutingPolicy:
         prompt_tokens: int,
         output_reserve_tokens: int,
         modalities: set[str],
+        image_count: int = 0,
         has_tools: bool,
         required_capabilities: RequestCapabilities | None = None,
         conversation: ConversationState | None,
         excluded_endpoint_ids: set[str] | None = None,
         excluded_deployment_ids: set[str] | None = None,
+        routing_key: str = "",
     ) -> RouteDecision:
         excluded = excluded_endpoint_ids or set()
         excluded_deployments = excluded_deployment_ids or set()
@@ -145,6 +149,8 @@ class RoutingPolicy:
                     required_capabilities=required,
                     conversation=conversation,
                     auto=requested_model == "auto",
+                    excluded_deployment_ids=excluded_deployments,
+                    image_count=image_count,
                 )
             )
             if reason:
@@ -184,6 +190,9 @@ class RoutingPolicy:
                     conversation,
                     prompt_tokens + output_reserve_tokens,
                     excluded_deployments,
+                    modalities,
+                    image_count,
+                    routing_key,
                 )
                 return decision
 
@@ -231,6 +240,9 @@ class RoutingPolicy:
                 conversation,
                 prompt_tokens + output_reserve_tokens,
                 excluded_deployments,
+                modalities,
+                image_count,
+                routing_key,
             )
             return decision
 
@@ -276,6 +288,9 @@ class RoutingPolicy:
             conversation,
             prompt_tokens + output_reserve_tokens,
             excluded_deployments,
+            modalities,
+            image_count,
+            routing_key,
         )
         return decision
 
@@ -291,6 +306,8 @@ class RoutingPolicy:
         required_capabilities: RequestCapabilities,
         conversation: ConversationState | None,
         auto: bool,
+        excluded_deployment_ids: set[str],
+        image_count: int,
     ) -> str | None:
         if not endpoint.enabled:
             return "disabled"
@@ -301,7 +318,19 @@ class RoutingPolicy:
         stale_after = float(self.settings.section("health").get("stale_after_seconds", 15))
         if not status.is_fresh(time.time(), stale_after):
             return "unhealthy_or_stale"
-        if not modalities.issubset(set(endpoint.modalities)):
+        if endpoint.backend_type == "ai_pool":
+            deployments = await self._eligible_physical_deployments(
+                endpoint,
+                status,
+                required_context=prompt_tokens + output_reserve_tokens,
+                modalities=modalities,
+                image_count=image_count,
+                excluded_deployment_ids=excluded_deployment_ids,
+                require_available=False,
+            )
+            if not deployments:
+                return "physical_deployment"
+        elif not modalities.issubset(set(endpoint.modalities)):
             return "modality"
         if not endpoint.capabilities.supports(required_capabilities):
             return "capability"
@@ -425,6 +454,9 @@ class RoutingPolicy:
         conversation: ConversationState | None,
         required_context: int,
         excluded_deployment_ids: set[str],
+        modalities: set[str],
+        image_count: int,
+        routing_key: str,
     ) -> None:
         endpoint = decision.endpoint
         if endpoint.backend_type not in {"ai_pool", "codex_pool"}:
@@ -432,17 +464,71 @@ class RoutingPolicy:
             if not endpoint.cloud:
                 decision.upstream_api_base = endpoint.api_base
             return
-        workers = []
-        for item in status.detail.get("workers", []):
-            worker_id = str(item.get("worker_id", ""))
-            if (
-                worker_id
-                and worker_id not in excluded_deployment_ids
-                and item.get("ready")
-                and int(item.get("safe_context_tokens", 0)) >= required_context
-                and not await self.health.in_cooldown(worker_id)
-            ):
-                workers.append(item)
+        if endpoint.backend_type == "ai_pool":
+            workers = await self._eligible_physical_deployments(
+                endpoint,
+                status,
+                required_context=required_context,
+                modalities=modalities,
+                image_count=image_count,
+                excluded_deployment_ids=excluded_deployment_ids,
+                require_available=False,
+            )
+        else:
+            workers = [
+                PhysicalDeployment.from_dict(
+                    {
+                        "worker_id": str(item.get("worker_id", "")),
+                        "api_base": str(item.get("api_base", "")),
+                        "profile_id": str(
+                            item.get("account_alias", "codex")
+                        ),
+                        "tier": "codex_account",
+                        "priority": 0,
+                        "gpu_ids": (),
+                        "gpu_uuids": (),
+                        "names": (),
+                        "port": None,
+                        "context_size": int(
+                            item.get("safe_context_tokens", 0)
+                        ),
+                        "safe_context_tokens": int(
+                            item.get("safe_context_tokens", 0)
+                        ),
+                        "cache_type_k": "",
+                        "cache_type_v": "",
+                        "modalities": endpoint.modalities,
+                        "vision_status": str(
+                            endpoint.metadata.get(
+                                "vision_status",
+                                "unverified",
+                            )
+                        ),
+                        "max_images": endpoint.metadata.get(
+                            "max_images"
+                        ),
+                        "runtime_fingerprint": "",
+                        "ready": bool(item.get("ready")),
+                        "state": str(item.get("state", "unknown")),
+                        "config_drift": (),
+                        "short_request_rank": 0,
+                        "error_code": item.get("error_code"),
+                        "cooldown_until": item.get("cooldown_until"),
+                    }
+                )
+                for item in status.detail.get("workers", [])
+                if (
+                    item.get("worker_id")
+                    and str(item["worker_id"])
+                    not in excluded_deployment_ids
+                    and item.get("ready")
+                    and int(item.get("safe_context_tokens", 0))
+                    >= required_context
+                    and not await self.health.in_cooldown(
+                        str(item["worker_id"])
+                    )
+                )
+            ]
         if not workers:
             raise NoEligibleModelError(
                 "the local model pool has no physical worker with sufficient context"
@@ -453,14 +539,14 @@ class RoutingPolicy:
                 (
                     item
                     for item in workers
-                    if item.get("worker_id") == conversation.deployment_id
-                    and item.get("state") == "available"
+                    if item.worker_id == conversation.deployment_id
+                    and item.state == "available"
                 ),
                 None,
             )
         if selected is None:
             available = [
-                item for item in workers if item.get("state") == "available"
+                item for item in workers if item.state == "available"
             ]
             if not available:
                 raise NoEligibleModelError(
@@ -468,9 +554,9 @@ class RoutingPolicy:
                 )
             available.sort(
                 key=lambda item: (
-                    int(item.get("priority", 999)),
-                    -int(item.get("safe_context_tokens", 0)),
-                    str(item.get("worker_id", "")),
+                    item.short_request_rank,
+                    _deployment_hash(routing_key, item.worker_id),
+                    item.worker_id,
                 )
             )
             selected = available[0]
@@ -480,17 +566,68 @@ class RoutingPolicy:
         candidates = [selected] if decision.affinity == "hit" else available
         decision.deployment_candidates = tuple(
             (
-                str(item["worker_id"]),
-                (
-                    str(item["api_base"])
-                    if item.get("api_base")
-                    else f"http://127.0.0.1:{int(item['port'])}/v1"
-                ),
+                item.worker_id,
+                item.api_base,
             )
             for item in candidates
         )
-        decision.deployment_id = str(selected["worker_id"])
+        decision.deployment_details = {
+            item.worker_id: item.to_dict()
+            for item in candidates
+        }
+        decision.deployment_id = selected.worker_id
+        decision.deployment_profile_id = selected.profile_id
+        decision.deployment_modalities = selected.modalities
+        decision.deployment_vision_status = selected.vision_status
+        decision.deployment_safe_context_tokens = (
+            selected.safe_context_tokens
+        )
+        decision.deployment_max_images = selected.max_images
         decision.upstream_api_base = decision.deployment_candidates[0][1]
+
+    async def _eligible_physical_deployments(
+        self,
+        endpoint: Endpoint,
+        status: EndpointStatus,
+        *,
+        required_context: int,
+        modalities: set[str],
+        image_count: int,
+        excluded_deployment_ids: set[str],
+        require_available: bool,
+    ) -> list[PhysicalDeployment]:
+        result: list[PhysicalDeployment] = []
+        for value in status.detail.get("workers", []):
+            try:
+                item = _physical_deployment_from_status(
+                    endpoint,
+                    value,
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                not item.worker_id
+                or item.worker_id in excluded_deployment_ids
+                or not item.schedulable
+                or item.safe_context_tokens < required_context
+                or not item.supports_modalities(modalities)
+                or not item.supports_image_count(image_count)
+                or (
+                    require_available
+                    and item.state != "available"
+                )
+                or await self.health.in_cooldown(item.worker_id)
+                or (
+                    "image" in modalities
+                    and await self.health.in_capability_cooldown(
+                        item.worker_id,
+                        "image",
+                    )
+                )
+            ):
+                continue
+            result.append(item)
+        return result
 
     def _score(
         self,
@@ -528,6 +665,97 @@ class RoutingPolicy:
             endpoint.metadata.get("output_cost_per_million_usd", 0)
         )
         return 1.0 / (1.0 + max(0.0, input_cost + output_cost))
+
+
+def _deployment_hash(routing_key: str, deployment_id: str) -> str:
+    return hashlib.sha256(
+        f"{routing_key}\0{deployment_id}".encode("utf-8")
+    ).hexdigest()
+
+
+def _physical_deployment_from_status(
+    endpoint: Endpoint,
+    value: dict[str, Any],
+) -> PhysicalDeployment:
+    if "profile_id" in value and "modalities" in value:
+        return PhysicalDeployment.from_dict(value)
+    safe_context = int(value.get("safe_context_tokens", 0))
+    tier = str(value.get("tier", ""))
+    profile = next(
+        (
+            item
+            for item in endpoint.deployment_profiles
+            if (
+                item.matches(tier)
+                or (
+                    not tier
+                    and item.safe_context_tokens == safe_context
+                )
+            )
+        ),
+        None,
+    )
+    port_value = value.get("port")
+    port = int(port_value) if port_value is not None else None
+    api_base = str(value.get("api_base") or "").rstrip("/")
+    if not api_base and port is not None:
+        api_base = f"http://127.0.0.1:{port}/v1"
+    return PhysicalDeployment(
+        worker_id=str(value.get("worker_id", "")),
+        api_base=api_base,
+        profile_id=profile.id if profile else "legacy",
+        tier=tier,
+        priority=int(value.get("priority", 999)),
+        gpu_ids=tuple(str(item) for item in value.get("gpu_ids", [])),
+        gpu_uuids=tuple(
+            str(item) for item in value.get("gpu_uuids", [])
+        ),
+        names=tuple(str(item) for item in value.get("names", [])),
+        port=port,
+        context_size=int(
+            value.get("context_size")
+            or (profile.context_size if profile else safe_context)
+        ),
+        safe_context_tokens=safe_context,
+        cache_type_k=str(
+            value.get("cache_type_k")
+            or (profile.cache_type_k if profile else "")
+        ),
+        cache_type_v=str(
+            value.get("cache_type_v")
+            or (profile.cache_type_v if profile else "")
+        ),
+        modalities=(
+            profile.modalities if profile else endpoint.modalities
+        ),
+        vision_status=(
+            profile.vision_status if profile else "unverified"
+        ),
+        max_images=(
+            profile.max_images if profile else None
+        ),
+        runtime_fingerprint=str(
+            value.get("runtime_fingerprint", "")
+        ),
+        ready=bool(value.get("ready")),
+        state=str(value.get("state", "unknown")),
+        config_drift=tuple(value.get("config_drift", ())),
+        short_request_rank=(
+            profile.short_request_rank
+            if profile
+            else int(value.get("priority", 999))
+        ),
+        error_code=(
+            str(value["error_code"])
+            if value.get("error_code")
+            else None
+        ),
+        cooldown_until=(
+            float(value["cooldown_until"])
+            if value.get("cooldown_until") is not None
+            else None
+        ),
+    )
 
 
 def updated_conversation_state(

@@ -76,6 +76,84 @@ class EndpointCapabilities:
 
 
 @dataclass(frozen=True)
+class DeploymentProfile:
+    id: str
+    tiers: tuple[str, ...]
+    modalities: tuple[str, ...]
+    context_size: int
+    safe_context_tokens: int
+    cache_type_k: str
+    cache_type_v: str
+    short_request_rank: int
+    vision_status: str = "unverified"
+    max_images: int | None = None
+
+    def matches(self, tier: str) -> bool:
+        return tier in self.tiers
+
+
+@dataclass(frozen=True)
+class PhysicalDeployment:
+    worker_id: str
+    api_base: str
+    profile_id: str
+    tier: str
+    priority: int
+    gpu_ids: tuple[str, ...]
+    gpu_uuids: tuple[str, ...]
+    names: tuple[str, ...]
+    port: int | None
+    context_size: int
+    safe_context_tokens: int
+    cache_type_k: str
+    cache_type_v: str
+    modalities: tuple[str, ...]
+    vision_status: str
+    max_images: int | None
+    runtime_fingerprint: str
+    ready: bool
+    state: str
+    config_drift: tuple[str, ...] = ()
+    short_request_rank: int = 0
+    error_code: str | None = None
+    cooldown_until: float | None = None
+
+    @property
+    def schedulable(self) -> bool:
+        return self.ready and not self.config_drift
+
+    def supports_modalities(self, required: set[str]) -> bool:
+        return required.issubset(set(self.modalities))
+
+    def supports_image_count(self, image_count: int) -> bool:
+        return (
+            image_count <= 0
+            or self.max_images is None
+            or image_count <= self.max_images
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["schedulable"] = self.schedulable
+        return value
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "PhysicalDeployment":
+        fields = dict(value)
+        fields.pop("schedulable", None)
+        fields.setdefault("max_images", None)
+        for key in (
+            "gpu_ids",
+            "gpu_uuids",
+            "names",
+            "modalities",
+            "config_drift",
+        ):
+            fields[key] = tuple(fields.get(key, ()))
+        return cls(**fields)
+
+
+@dataclass(frozen=True)
 class Endpoint:
     id: str
     public_model: str
@@ -100,6 +178,7 @@ class Endpoint:
     capabilities: EndpointCapabilities = field(
         default_factory=EndpointCapabilities
     )
+    deployment_profiles: tuple[DeploymentProfile, ...] = ()
     quality: dict[str, float] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -169,8 +248,16 @@ class RouteDecision:
     migration: bool = False
     previous_endpoint_id: str | None = None
     deployment_id: str | None = None
+    deployment_profile_id: str | None = None
+    deployment_modalities: tuple[str, ...] = ()
+    deployment_vision_status: str | None = None
+    deployment_safe_context_tokens: int | None = None
+    deployment_max_images: int | None = None
     upstream_api_base: str | None = None
     deployment_candidates: tuple[tuple[str, str], ...] = ()
+    deployment_details: dict[str, dict[str, Any]] = field(
+        default_factory=dict
+    )
     attempts: int = 1
     capacity_attempts: int = 1
     queue_wait_ms: float = 0.0
@@ -179,6 +266,7 @@ class RouteDecision:
     required_capabilities: tuple[str, ...] = ()
     tool_history_repairs: int = 0
     candidate_rejections: tuple[str, ...] = ()
+    image_resizes: int = 0
 
     def response_headers(self, request_id: str) -> dict[str, str]:
         values = {
@@ -195,6 +283,16 @@ class RouteDecision:
             "X-1Panel-Protocol": self.protocol,
             "X-1Panel-Protocol-Mode": self.native_or_adapter,
         }
+        if self.deployment_profile_id:
+            values["X-1Panel-Route-Deployment-Profile"] = (
+                self.deployment_profile_id
+            )
+        if self.deployment_vision_status:
+            values["X-1Panel-Vision-Status"] = (
+                self.deployment_vision_status
+            )
+        if self.image_resizes:
+            values["X-1Panel-Image-Resized"] = str(self.image_resizes)
         if self.tool_history_repairs:
             values["X-1Panel-Tool-History-Repaired"] = str(
                 self.tool_history_repairs
@@ -219,3 +317,10 @@ class Evaluation:
     confidence: float
     reason: str
     preferred_tier: str | None = None
+
+
+@dataclass(frozen=True)
+class ModelCallTarget:
+    base_url: str
+    model: str
+    api_key: str = field(default="", repr=False)

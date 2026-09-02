@@ -611,9 +611,9 @@ function renderEndpointTable(endpoints) {
         <span class="table-secondary">${escapeHtml(endpoint.id)}</span>
       </td>
       <td>${escapeHtml(endpoint.tier)}</td>
-      <td>${formatTokens(endpoint.safe_context_tokens)}</td>
+      <td>${formatTokens(status.eligible_context_tokens || endpoint.safe_context_tokens)}</td>
       <td>${status.healthy ? `${Math.round(status.load_headroom * 100)}%` : "—"}</td>
-      <td>${capabilitySummary(endpoint.capabilities, endpoint.modalities)}</td>
+      <td>${capabilitySummary(endpoint.capabilities, status.detail?.effective_modalities || endpoint.modalities)}</td>
       <td>
         <strong class="table-primary">${escapeHtml(endpoint.capabilities?.validation_status || "unverified")}</strong>
         <span class="table-secondary">${escapeHtml(endpoint.capabilities?.validated_at || "—")}</span>
@@ -624,19 +624,31 @@ function renderEndpointTable(endpoints) {
 }
 
 function renderWorkerTable(workers) {
-  const ready = workers.filter((item) => item.ready && item.state === "available").length;
+  const ready = workers.filter((item) =>
+    item.ready && item.schedulable !== false && item.state === "available"
+  ).length;
   byId("worker-count").textContent = `${ready}/${workers.length} 可调度`;
   byId("worker-table").innerHTML = workers.length
     ? workers.map((item) => `
       <tr>
-        <td>${healthBadge(item.ready && item.state === "available")}</td>
+        <td>${workerStatusBadge(item)}</td>
         <td><code>${escapeHtml(item.account_alias || item.port || "—")}</code></td>
-        <td>${item.account_alias ? "Codex Pro" : workerTier(item.priority)}</td>
+        <td>
+          <strong class="table-primary">${escapeHtml(item.names?.join(" + ") || (item.account_alias ? "Codex Pro" : workerTier(item.priority)))}</strong>
+          <span class="table-secondary">${escapeHtml(item.tier || "—")}</span>
+        </td>
+        <td><code>${escapeHtml(item.profile_id || "—")}</code></td>
         <td>${formatTokens(item.safe_context_tokens)}</td>
+        <td>${escapeHtml(item.cache_type_k ? `${item.cache_type_k}/${item.cache_type_v}` : "—")}</td>
+        <td>${workerVisionSummary(item)}</td>
+        <td>
+          <strong class="table-primary">${item.config_drift?.length ? "不一致" : "一致"}</strong>
+          <span class="table-secondary">${escapeHtml(item.config_drift?.join(", ") || shortId(item.runtime_fingerprint || "—", 16))}</span>
+        </td>
         <td><code class="worker-id" title="${escapeHtml(item.worker_id)}">${escapeHtml(shortId(item.worker_id, 34))}</code></td>
       </tr>
     `).join("")
-    : emptyRow(5, "当前端点没有公开物理 Worker");
+    : emptyRow(9, "当前端点没有公开物理 Worker");
 }
 
 function renderRequestTable() {
@@ -666,7 +678,10 @@ function renderRequestTable() {
           <strong class="table-primary">${escapeHtml(shortModel(item.selected_model))}</strong>
           <span class="table-secondary">${escapeHtml(reasonLabel(item.reason))}</span>
         </td>
-        <td><code title="${escapeHtml(item.deployment_id || "")}">${escapeHtml(shortId(item.deployment_id || "—", 22))}</code></td>
+        <td>
+          <code title="${escapeHtml(item.deployment_id || "")}">${escapeHtml(shortId(item.deployment_id || "—", 22))}</code>
+          <span class="table-secondary">${escapeHtml(item.deployment_profile_id || "—")}${item.image_resizes ? ` · 缩图 ${item.image_resizes}` : ""}</span>
+        </td>
         <td>${escapeHtml(item.task || "—")}</td>
         <td>
           <strong class="table-primary">${escapeHtml(protocolLabel(item.protocol, item.native_or_adapter))}</strong>
@@ -883,6 +898,31 @@ function workerTier(priority) {
   if (priority === 0) return "V100 32GB";
   if (priority === 1) return "V100 + P40";
   return "P40";
+}
+
+function workerStatusBadge(item) {
+  if (!item.ready) return '<span class="badge danger"><i></i>不可用</span>';
+  if (item.config_drift?.length) {
+    return '<span class="badge warning"><i></i>配置漂移</span>';
+  }
+  if (item.state !== "available") {
+    return '<span class="badge running"><i></i>忙碌</span>';
+  }
+  return '<span class="badge success"><i></i>可调度</span>';
+}
+
+function workerVisionSummary(item) {
+  const modalities = item.modalities || [];
+  const values = [];
+  if (modalities.includes("text")) values.push("文本");
+  if (modalities.includes("image")) values.push("图像");
+  const imageLimit = item.max_images == null
+    ? item.vision_status || "unverified"
+    : `${item.vision_status || "unverified"} · 最多 ${item.max_images} 图`;
+  return `
+    <strong class="table-primary">${values.map((value) => escapeHtml(value)).join(" · ") || "—"}</strong>
+    <span class="table-secondary">${escapeHtml(imageLimit)}</span>
+  `;
 }
 
 function capabilitySummary(capabilities = {}, modalities = []) {

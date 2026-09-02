@@ -11,6 +11,7 @@ from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import CompactionUnavailableError, ConversationStateConflictError
 from .token_counter import TokenCounter
+from .types import ModelCallTarget
 
 
 HANDOFF_KEYS = (
@@ -74,6 +75,7 @@ class ContextCompactor:
         *,
         api_kind: str,
         target_context_tokens: int,
+        target: ModelCallTarget | None = None,
     ) -> Capsule:
         messages = extract_messages(body, api_kind)
         if not messages or not self.model_id:
@@ -95,7 +97,7 @@ class ContextCompactor:
             target_context_tokens,
             api_kind,
         )
-        summary = await self._summarize(older)
+        summary = await self._summarize(older, target=target)
         handoff_message = _handoff_message(summary, api_kind)
         compacted = [*system_messages, handoff_message, *recent]
         boundary = message_hash(recent[-1] if recent else handoff_message)
@@ -174,11 +176,16 @@ class ContextCompactor:
         ]
         return older, recent
 
-    async def _summarize(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    async def _summarize(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        target: ModelCallTarget | None = None,
+    ) -> dict[str, Any]:
         if not messages:
             return {key: [] for key in HANDOFF_KEYS}
         request = {
-            "model": self.model_id,
+            "model": target.model if target else self.model_id,
             "messages": [
                 {
                     "role": "system",
@@ -200,8 +207,23 @@ class ContextCompactor:
         }
         try:
             response = await self.client.post(
-                f"{self.internal_base_url}/v1/chat/completions",
-                headers={"Authorization": f"Bearer {self.internal_api_key}"},
+                (
+                    f"{target.base_url.rstrip('/')}/chat/completions"
+                    if target
+                    else (
+                        f"{self.internal_base_url}"
+                        "/v1/chat/completions"
+                    )
+                ),
+                headers=(
+                    {"Authorization": f"Bearer {target.api_key}"}
+                    if target and target.api_key
+                    else {
+                        "Authorization": (
+                            f"Bearer {self.internal_api_key}"
+                        )
+                    }
+                ),
                 json=request,
             )
             response.raise_for_status()

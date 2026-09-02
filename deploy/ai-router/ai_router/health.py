@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import re
 import time
@@ -10,7 +11,12 @@ from typing import Any
 import httpx
 
 from .store import StateStore
-from .types import Endpoint, EndpointStatus
+from .types import (
+    DeploymentProfile,
+    Endpoint,
+    EndpointStatus,
+    PhysicalDeployment,
+)
 
 
 _VLLM_METRIC_PATTERNS = {
@@ -79,6 +85,30 @@ class HealthMonitor:
         value = await self.store.get_json(f"router:cooldown:{endpoint_id}")
         return bool(value and float(value.get("until", 0)) > time.time())
 
+    async def mark_capability_failure(
+        self,
+        deployment_id: str,
+        capability: str,
+        cooldown_seconds: int = 20,
+    ) -> None:
+        await self.store.set_json(
+            f"router:cooldown:{deployment_id}:{capability}",
+            {"until": time.time() + cooldown_seconds},
+            ttl_seconds=cooldown_seconds,
+        )
+
+    async def in_capability_cooldown(
+        self,
+        deployment_id: str,
+        capability: str,
+    ) -> bool:
+        value = await self.store.get_json(
+            f"router:cooldown:{deployment_id}:{capability}"
+        )
+        return bool(
+            value and float(value.get("until", 0)) > time.time()
+        )
+
     async def prefix_cache_counters(
         self,
         endpoint: Endpoint,
@@ -134,49 +164,64 @@ class HealthMonitor:
         response = await self.client.get(endpoint.health_url)
         response.raise_for_status()
         payload = response.json()
-        workers = payload.get("workers", [])
+        pool_fingerprint = str(payload.get("runtime_fingerprint", ""))
+        workers = [
+            _physical_deployment(
+                endpoint,
+                worker,
+                pool_fingerprint=pool_fingerprint,
+            )
+            for worker in payload.get("workers", [])
+            if isinstance(worker, dict)
+        ]
         available = [
             worker
             for worker in workers
-            if worker.get("ready") and worker.get("state") == "available"
+            if (
+                worker.schedulable
+                and worker.state == "available"
+            )
         ]
-        ready = [worker for worker in workers if worker.get("ready")]
+        ready = [worker for worker in workers if worker.ready]
+        schedulable = [worker for worker in workers if worker.schedulable]
         eligible_context = max(
-            (int(worker.get("safe_context_tokens", 0)) for worker in available),
+            (worker.safe_context_tokens for worker in schedulable),
             default=0,
         )
         worker_fingerprint = "|".join(
-            f"{item.get('worker_id')}:{item.get('state')}:{item.get('safe_context_tokens')}"
+            (
+                f"{item.worker_id}:{item.state}:"
+                f"{item.safe_context_tokens}:{item.runtime_fingerprint}"
+            )
             for item in workers
+        )
+        effective_modalities = sorted(
+            {
+                modality
+                for item in schedulable
+                for modality in item.modalities
+            }
         )
         return EndpointStatus(
             endpoint_id=endpoint.id,
-            healthy=bool(payload.get("ok")) and bool(available),
+            healthy=bool(payload.get("ok")) and bool(schedulable),
             checked_at=checked_at,
-            load_headroom=len(available) / max(1, len(ready)),
+            load_headroom=len(available) / max(1, len(schedulable)),
             latency_score=0.5,
             cache_generation=_generation(
-                str(payload.get("runtime_fingerprint", "")),
+                pool_fingerprint,
                 worker_fingerprint,
             ),
             eligible_context_tokens=eligible_context,
             detail={
                 "ready_workers": len(ready),
+                "schedulable_workers": len(schedulable),
                 "available_workers": len(available),
-                "available_worker_ids": [item.get("worker_id") for item in available],
-                "workers": [
-                    {
-                        "worker_id": item.get("worker_id"),
-                        "port": item.get("port"),
-                        "priority": int(item.get("priority", 999)),
-                        "ready": bool(item.get("ready")),
-                        "state": item.get("state"),
-                        "safe_context_tokens": int(
-                            item.get("safe_context_tokens", 0)
-                        ),
-                    }
-                    for item in workers
+                "available_worker_ids": [
+                    item.worker_id for item in available
                 ],
+                "effective_modalities": effective_modalities,
+                "workers": [item.to_dict() for item in workers],
             },
         )
 
@@ -316,6 +361,190 @@ class HealthMonitor:
 def _metric(text: str, name: str) -> float:
     match = _VLLM_METRIC_PATTERNS[name].search(text)
     return float(match.group(1)) if match else 0.0
+
+
+def _physical_deployment(
+    endpoint: Endpoint,
+    worker: dict[str, Any],
+    *,
+    pool_fingerprint: str,
+) -> PhysicalDeployment:
+    tier = str(worker.get("tier", ""))
+    profile = _deployment_profile(endpoint, worker, tier)
+    profile_id = profile.id if profile else "unmatched"
+    expected_context = (
+        profile.context_size
+        if profile
+        else int(worker.get("context_size", 0))
+    )
+    expected_safe_context = (
+        profile.safe_context_tokens
+        if profile
+        else int(worker.get("safe_context_tokens", 0))
+    )
+    expected_cache_k = (
+        profile.cache_type_k
+        if profile
+        else str(worker.get("cache_type_k", ""))
+    )
+    expected_cache_v = (
+        profile.cache_type_v
+        if profile
+        else str(worker.get("cache_type_v", ""))
+    )
+    actual_context = int(
+        worker.get("context_size") or expected_context
+    )
+    actual_safe_context = int(
+        worker.get("safe_context_tokens") or expected_safe_context
+    )
+    actual_cache_k = str(
+        worker.get("cache_type_k") or expected_cache_k
+    )
+    actual_cache_v = str(
+        worker.get("cache_type_v") or expected_cache_v
+    )
+    drift: list[str] = []
+    if endpoint.deployment_profiles and profile is None:
+        drift.append("unmatched_profile")
+    if profile:
+        if actual_context != profile.context_size:
+            drift.append("context_size")
+        if actual_safe_context != profile.safe_context_tokens:
+            drift.append("safe_context_tokens")
+        if actual_cache_k != profile.cache_type_k:
+            drift.append("cache_type_k")
+        if actual_cache_v != profile.cache_type_v:
+            drift.append("cache_type_v")
+
+    worker_id = str(worker.get("worker_id", ""))
+    override = _deployment_override(endpoint, worker_id)
+    modalities = tuple(
+        str(item)
+        for item in override.get(
+            "modalities",
+            profile.modalities if profile else endpoint.modalities,
+        )
+    )
+    vision_status = str(
+        override.get(
+            "vision_status",
+            profile.vision_status if profile else "unverified",
+        )
+    )
+    max_images_value = override.get(
+        "max_images",
+        profile.max_images if profile else None,
+    )
+    max_images = (
+        int(max_images_value)
+        if max_images_value is not None
+        else None
+    )
+    port_value = worker.get("port")
+    port = int(port_value) if port_value is not None else None
+    api_base = str(worker.get("api_base") or "").rstrip("/")
+    if not api_base:
+        worker_url = str(worker.get("url") or "").rstrip("/")
+        if worker_url:
+            api_base = f"{worker_url}/v1"
+        elif port is not None:
+            api_base = f"http://127.0.0.1:{port}/v1"
+    fingerprint_payload = {
+        "pool": pool_fingerprint,
+        "worker_id": worker_id,
+        "profile_id": profile_id,
+        "tier": tier,
+        "context_size": actual_context,
+        "safe_context_tokens": actual_safe_context,
+        "cache_type_k": actual_cache_k,
+        "cache_type_v": actual_cache_v,
+        "gpu_uuids": worker.get("gpu_uuids", []),
+        "modalities": modalities,
+        "max_images": max_images,
+    }
+    deployment_fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+    return PhysicalDeployment(
+        worker_id=worker_id,
+        api_base=api_base,
+        profile_id=profile_id,
+        tier=tier,
+        priority=int(worker.get("priority", 999)),
+        gpu_ids=tuple(str(item) for item in worker.get("gpu_ids", [])),
+        gpu_uuids=tuple(
+            str(item) for item in worker.get("gpu_uuids", [])
+        ),
+        names=tuple(str(item) for item in worker.get("names", [])),
+        port=port,
+        context_size=actual_context,
+        safe_context_tokens=actual_safe_context,
+        cache_type_k=actual_cache_k,
+        cache_type_v=actual_cache_v,
+        modalities=modalities,
+        vision_status=vision_status,
+        max_images=max_images,
+        runtime_fingerprint=deployment_fingerprint,
+        ready=bool(worker.get("ready")),
+        state=str(worker.get("state", "unknown")),
+        config_drift=tuple(drift),
+        short_request_rank=(
+            profile.short_request_rank
+            if profile
+            else int(worker.get("priority", 999))
+        ),
+        error_code=(
+            str(worker["error_code"])
+            if worker.get("error_code")
+            else None
+        ),
+        cooldown_until=(
+            float(worker["cooldown_until"])
+            if worker.get("cooldown_until") is not None
+            else None
+        ),
+    )
+
+
+def _deployment_profile(
+    endpoint: Endpoint,
+    worker: dict[str, Any],
+    tier: str,
+) -> DeploymentProfile | None:
+    requested = str(worker.get("profile_id", ""))
+    if requested:
+        return next(
+            (
+                item
+                for item in endpoint.deployment_profiles
+                if item.id == requested
+            ),
+            None,
+        )
+    return next(
+        (
+            item
+            for item in endpoint.deployment_profiles
+            if item.matches(tier)
+        ),
+        None,
+    )
+
+
+def _deployment_override(
+    endpoint: Endpoint,
+    worker_id: str,
+) -> dict[str, Any]:
+    values = endpoint.metadata.get("deployment_overrides", {})
+    if not isinstance(values, dict):
+        return {}
+    value = values.get(worker_id, {})
+    return value if isinstance(value, dict) else {}
 
 
 def _generation(*values: str) -> str:

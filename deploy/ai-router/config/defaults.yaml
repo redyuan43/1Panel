@@ -5,6 +5,10 @@ limits:
   image_token_estimate: 1024
   audio_token_estimate: 4096
 
+vision:
+  ai_max_dimension: 1024
+  max_source_pixels: 40000000
+
 routing:
   default_output_reserve_tokens: 4096
   provider_priority: local_first

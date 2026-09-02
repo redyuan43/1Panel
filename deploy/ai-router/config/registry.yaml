@@ -18,13 +18,14 @@ endpoints:
     tier_rank: 20
     modalities:
       - text
+      - image
     tasks:
       - general
       - code
       - batch
       - long-context
-    safe_context_tokens: 262144
-    configured_context_tokens: 262144
+    safe_context_tokens: 196608
+    configured_context_tokens: 196608
     max_concurrency: 1
     backend_type: ai_pool
     health_url: http://127.0.0.1:18103/health
@@ -42,16 +43,43 @@ endpoints:
       streaming: true
       validation_status: live-validated-chat-responses-tools-structured
       validated_at: "2026-09-01"
+    deployment_profiles:
+      - id: p40-qwen38-64k
+        tiers:
+          - p40_single
+        modalities:
+          - text
+          - image
+        context_size: 65536
+        safe_context_tokens: 65536
+        cache_type_k: q8_0
+        cache_type_v: q8_0
+        short_request_rank: 0
+        vision_status: experimental
+        max_images: 1
+      - id: v10032-qwen38-196k
+        tiers:
+          - v100_32_single
+        modalities:
+          - text
+          - image
+        context_size: 196608
+        safe_context_tokens: 196608
+        cache_type_k: f16
+        cache_type_v: f16
+        short_request_rank: 10
+        vision_status: experimental
+        max_images: 1
     quality:
       general: 50
       code: 0
       batch: 0
     metadata:
-      context_status: health-reported
+      context_status: physical-deployment-reported
       quality_status: benchmarked-2026-09-01
       quality_report: /opt/1panel/ai-router/benchmarks/report-ai-20260901.json
-      topology: logical-pool
-      vision_status: small-image-direct-validated-auto-disabled
+      topology: model-family-with-physical-deployments
+      vision_status: per-deployment-experimental
       vision_projector: mmproj-model-bf16.gguf
       image_min_tokens: 1024
       vision_limitation: high-resolution mtmd chunks can exhaust decode workspace
