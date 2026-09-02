@@ -28,7 +28,7 @@
 | 配置/安全上下文 | 注册配置和健康池上限 262144；V100 32GB 为 196608，单 P40 为 65536 |
 | 路由并发 | 每个物理 worker 为 1；健康时池总并发上限为 6 |
 | API 兼容 | Chat Completions、Responses、流式、工具和结构化输出已验证 |
-| 模态 | 单 P40 和 V100 32GB 开放单图；V100 16GB + P40 混合 worker 暂只开放文本 |
+| 模态 | 所有 AI worker 开放单图；V100 16GB + P40 混合 worker 等待人工验收 |
 | Responses | Router 直接绑定物理 worker，不经过 LiteLLM 逻辑池 |
 | 服务管理方式 | `bonsai-local-pool-v2.service`，`active/enabled` |
 
@@ -64,9 +64,9 @@ initialization error。2026-09-02 物理移除该 V100 SXM2 16GB 后重新启动
 同日使用 271x210 PNG 直连 AI 池，模型正确返回“红色”；约 4 MiB Base64
 的 1024x1024 红色 BMP 也曾在 P40 worker 返回“红色”。但随后来自 nx4 的
 更高分辨率图片在 P40 和 V100 上均出现
-`failed to find a memory slot for batch of size 920`。Router 现将已验收的
-单图输入缩放到最长边 1024，并限制每次最多一图；新 V100 16GB + P40 混合
-worker 的视觉能力仍标记为未验证。
+`failed to find a memory slot for batch of size 920`。Router 现将单图输入缩放
+到最长边 1024，并限制每次最多一图；新 V100 16GB + P40 混合 worker 已加入
+图片候选，状态标记为等待人工验收。
 
 ## SSH Edge
 
