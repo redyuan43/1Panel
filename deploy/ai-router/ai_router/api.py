@@ -390,8 +390,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         request_tracked = True
         conversation = await current.conversations.get(conversation_id)
-        effective_body = apply_stored_history(
+        effective_body = await apply_stored_history(
             current.compactor,
+            current.conversations,
             body,
             api_kind=api_kind,
             conversation=conversation,

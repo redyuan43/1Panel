@@ -35,7 +35,10 @@ class ConversationBusyError(RouterError):
 class ConversationStateConflictError(RouterError):
     def __init__(self) -> None:
         super().__init__(
-            "the supplied conversation history does not match the stored migration boundary",
+            (
+                "the supplied conversation history does not match the stored "
+                "conversation history boundary"
+            ),
             status_code=409,
             code="conversation_state_conflict",
         )

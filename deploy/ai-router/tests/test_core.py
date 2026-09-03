@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import sqlite3
@@ -31,7 +32,11 @@ from ai_router.api import (
 from ai_router.budget import CloudBudget
 from ai_router.client_accounts import ClientAccountManager
 from ai_router.compaction import CapsuleCipher
-from ai_router.compaction import ContextCompactor, extract_messages
+from ai_router.compaction import (
+    ContextCompactor,
+    extract_messages,
+    message_hash,
+)
 from ai_router.config import Registry, Settings, client_policies
 from ai_router.control import create_app as create_control_app
 from ai_router.errors import (
@@ -39,6 +44,7 @@ from ai_router.errors import (
     AuthenticationError,
     CapacityBusyError,
     ConversationBusyError,
+    ConversationStateConflictError,
     InvalidToolHistoryError,
     NoEligibleModelError,
     QueueTimeoutError,
@@ -48,6 +54,7 @@ from ai_router.evaluator import TaskEvaluator
 from ai_router.health import HealthMonitor
 from ai_router.history import (
     SSEAccumulator,
+    apply_stored_history,
     assistant_items_from_response,
     history_identities,
 )
@@ -3586,6 +3593,239 @@ def test_history_identity_includes_tool_call_ids() -> None:
     second = json.loads(json.dumps(first))
     second[0]["tool_calls"][0]["id"] = "call-b"
     assert history_identities(first) != history_identities(second)
+
+
+def test_message_hash_canonicalizes_valid_tool_arguments_json() -> None:
+    stored = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-memory",
+                "type": "function",
+                "function": {
+                    "name": "memory",
+                    "arguments": (
+                        '{"target":"user","action":"add",'
+                        '"content":"模具设计"}'
+                    ),
+                },
+            }
+        ],
+    }
+    replayed = json.loads(json.dumps(stored))
+    replayed["tool_calls"][0]["function"]["arguments"] = json.dumps(
+        {
+            "action": "add",
+            "content": "模具设计",
+            "target": "user",
+        },
+        ensure_ascii=True,
+        indent=2,
+    )
+    assert message_hash(stored) == message_hash(replayed)
+
+    changed_id = json.loads(json.dumps(replayed))
+    changed_id["tool_calls"][0]["id"] = "call-other"
+    assert message_hash(stored) != message_hash(changed_id)
+
+    changed_name = json.loads(json.dumps(replayed))
+    changed_name["tool_calls"][0]["function"]["name"] = "image_generate"
+    assert message_hash(stored) != message_hash(changed_name)
+
+    changed_text = json.loads(json.dumps(replayed))
+    changed_text["content"] = "different"
+    assert message_hash(stored) != message_hash(changed_text)
+
+    invalid_first = json.loads(json.dumps(stored))
+    invalid_second = json.loads(json.dumps(stored))
+    invalid_first["tool_calls"][0]["function"]["arguments"] = '{"a":1'
+    invalid_second["tool_calls"][0]["function"]["arguments"] = '{"a":1 '
+    assert message_hash(invalid_first) != message_hash(invalid_second)
+
+
+def test_legacy_tool_boundary_is_accepted_and_upgraded() -> None:
+    class RecordingConversations:
+        def __init__(self) -> None:
+            self.saved: list[ConversationState] = []
+
+        async def save(self, state: ConversationState) -> None:
+            self.saved.append(ConversationState.from_dict(state.to_dict()))
+
+        async def map_history(
+            self,
+            _client_id: str,
+            _identities: tuple[str, ...],
+            _conversation_id: str,
+        ) -> None:
+            return None
+
+    compactor = ContextCompactor(
+        SimpleTokenCounter(),
+        CapsuleCipher(Fernet.generate_key().decode()),
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+        model_id="compactor",
+    )
+    stored_tool_call = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-memory",
+                "type": "function",
+                "function": {
+                    "name": "memory",
+                    "arguments": (
+                        '{"target":"user","action":"add",'
+                        '"content":"模具设计"}'
+                    ),
+                },
+            }
+        ],
+    }
+    base_messages = [
+        {"role": "user", "content": "生成一张图"},
+        stored_tool_call,
+    ]
+    legacy_payload = json.dumps(
+        stored_tool_call,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    legacy_boundary = hashlib.sha256(
+        legacy_payload.encode("utf-8")
+    ).hexdigest()
+    state = ConversationState(
+        conversation_id="conversation-tool-boundary",
+        public_model="model",
+        endpoint_id="endpoint",
+        tier_rank=1,
+        task="general",
+        last_seen=time.time(),
+        encrypted_capsule=compactor.cipher.encrypt(base_messages),
+        boundary_hash=legacy_boundary,
+    )
+    replayed_tool_call = json.loads(json.dumps(stored_tool_call))
+    replayed_tool_call["tool_calls"][0]["function"]["arguments"] = json.dumps(
+        {
+            "action": "add",
+            "content": "模具设计",
+            "target": "user",
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    tool_result = {
+        "role": "tool",
+        "tool_call_id": "call-memory",
+        "content": '{"success":false}',
+    }
+    incoming = {
+        "messages": [
+            base_messages[0],
+            replayed_tool_call,
+            tool_result,
+            {"role": "user", "content": "继续生成"},
+        ]
+    }
+    conversations = RecordingConversations()
+
+    applied = run(
+        apply_stored_history(
+            compactor,
+            conversations,
+            incoming,
+            api_kind="chat",
+            conversation=state,
+        )
+    )
+
+    assert applied["messages"] == [
+        *base_messages,
+        tool_result,
+        {"role": "user", "content": "继续生成"},
+    ]
+    assert state.boundary_hash == message_hash(stored_tool_call)
+    assert state.boundary_hash != legacy_boundary
+    assert conversations.saved[-1].boundary_hash == state.boundary_hash
+
+    changed_tool_call = json.loads(json.dumps(replayed_tool_call))
+    changed_tool_call["tool_calls"][0]["id"] = "call-other"
+    with pytest.raises(ConversationStateConflictError):
+        compactor.apply_existing(
+            {"messages": [base_messages[0], changed_tool_call, tool_result]},
+            api_kind="chat",
+            encrypted_messages=state.encrypted_capsule or "",
+            boundary_hash=state.boundary_hash or "",
+        )
+    run(compactor.client.aclose())
+
+
+def test_streamed_tool_arguments_match_reencoded_history_hash() -> None:
+    accumulator = SSEAccumulator("chat")
+    events = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call-memory",
+                                "type": "function",
+                                "function": {
+                                    "name": "memory",
+                                    "arguments": (
+                                        '{"target":"user","content":"模具'
+                                    ),
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {
+                                    "arguments": (
+                                        '设计","action":"add"}'
+                                    ),
+                                },
+                            }
+                        ]
+                    }
+                }
+            ]
+        },
+    ]
+    for event in events:
+        accumulator.feed(
+            (
+                "data: "
+                + json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+                + "\n\n"
+            ).encode("utf-8")
+        )
+    accumulator.finish()
+    streamed = accumulator.assistant_message()
+    assert streamed is not None
+    replayed = json.loads(json.dumps(streamed))
+    arguments = replayed["tool_calls"][0]["function"]["arguments"]
+    replayed["tool_calls"][0]["function"]["arguments"] = json.dumps(
+        json.loads(arguments),
+        ensure_ascii=True,
+        sort_keys=True,
+        indent=2,
+    )
+    assert message_hash(streamed) == message_hash(replayed)
 
 
 def test_compaction_recent_window_keeps_tool_transaction_atomic() -> None:

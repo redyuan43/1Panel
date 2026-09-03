@@ -32,6 +32,12 @@ class Capsule:
     after_tokens: int
 
 
+@dataclass(frozen=True)
+class HistoryApplication:
+    body: dict[str, Any]
+    upgraded_boundary_hash: str | None = None
+
+
 class CapsuleCipher:
     def __init__(self, key: str) -> None:
         try:
@@ -121,21 +127,41 @@ class ContextCompactor:
         api_kind: str,
         encrypted_messages: str,
         boundary_hash: str,
-    ) -> dict[str, Any]:
+    ) -> HistoryApplication:
         base_messages = self.cipher.decrypt(encrypted_messages)
         if not isinstance(base_messages, list):
             raise ConversationStateConflictError()
         incoming = extract_messages(body, api_kind)
-        boundary_index = -1
-        for index, message in enumerate(incoming):
-            if message_hash(message) == boundary_hash:
-                boundary_index = index
+        boundary_index = _last_message_index(incoming, boundary_hash)
+        upgraded_boundary_hash = None
         if boundary_index < 0:
-            if incoming == base_messages:
-                return body
-            raise ConversationStateConflictError()
+            legacy_boundary = next(
+                (
+                    message
+                    for message in reversed(base_messages)
+                    if _legacy_message_hash(message) == boundary_hash
+                ),
+                None,
+            )
+            if legacy_boundary is not None:
+                upgraded_boundary_hash = message_hash(legacy_boundary)
+                boundary_index = _last_message_index(
+                    incoming,
+                    upgraded_boundary_hash,
+                )
+            if boundary_index < 0:
+                if _value_hash(incoming) == _value_hash(base_messages):
+                    return HistoryApplication(body)
+                raise ConversationStateConflictError()
         next_messages = [*base_messages, *incoming[boundary_index + 1 :]]
-        return replace_messages(body, api_kind, next_messages)
+        return HistoryApplication(
+            replace_messages(body, api_kind, next_messages),
+            (
+                upgraded_boundary_hash
+                if upgraded_boundary_hash != boundary_hash
+                else None
+            ),
+        )
 
     def _partition_recent(
         self,
@@ -273,8 +299,65 @@ def replace_messages(
 
 
 def message_hash(message: dict[str, Any]) -> str:
-    payload = json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return _value_hash(_canonical_message_for_hash(message))
+
+
+def _legacy_message_hash(message: dict[str, Any]) -> str:
+    return _value_hash(message)
+
+
+def _value_hash(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _last_message_index(
+    messages: list[dict[str, Any]],
+    expected_hash: str,
+) -> int:
+    result = -1
+    for index, message in enumerate(messages):
+        if message_hash(message) == expected_hash:
+            result = index
+    return result
+
+
+def _canonical_message_for_hash(
+    message: dict[str, Any],
+) -> dict[str, Any]:
+    result = copy.deepcopy(message)
+    tool_calls = result.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return result
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            continue
+        function = tool_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        arguments = function.get("arguments")
+        if not isinstance(arguments, str):
+            continue
+        try:
+            parsed = json.loads(arguments, parse_constant=_reject_json_constant)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        function["arguments"] = json.dumps(
+            parsed,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"invalid JSON constant: {value}")
 
 
 def _item_role(item: dict[str, Any]) -> str:

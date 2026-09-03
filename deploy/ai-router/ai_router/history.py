@@ -58,8 +58,9 @@ def _messages_hash(messages: list[dict[str, Any]]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def apply_stored_history(
+async def apply_stored_history(
     compactor: ContextCompactor,
+    conversations: ConversationWriter,
     body: dict[str, Any],
     *,
     api_kind: str,
@@ -72,12 +73,16 @@ def apply_stored_history(
     ):
         return body
     try:
-        return compactor.apply_existing(
+        application = compactor.apply_existing(
             body,
             api_kind=api_kind,
             encrypted_messages=conversation.encrypted_capsule,
             boundary_hash=conversation.boundary_hash,
         )
+        if application.upgraded_boundary_hash:
+            conversation.boundary_hash = application.upgraded_boundary_hash
+            await conversations.save(conversation)
+        return application.body
     except ConversationStateConflictError:
         if api_kind != "responses":
             raise
