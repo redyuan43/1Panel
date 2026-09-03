@@ -57,6 +57,7 @@ from ai_router.history import (
     apply_stored_history,
     assistant_items_from_response,
     history_identities,
+    history_lookup_identities,
 )
 from ai_router.policy import (
     ConversationRepository,
@@ -435,7 +436,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert codex.auto_candidate is True
     assert codex.capabilities.output_token_limit is False
     assert codex.metadata["billing_mode"] == "subscription"
-    assert value.section("routing")["affinity_capacity_wait_seconds"] == 3
+    assert value.section("routing")["affinity_capacity_wait_seconds"] == 120
     assert value.section("routing")["new_request_capacity_wait_seconds"] == 0
     assert value.section("routing")["all_local_busy_policy"] == "cloud_or_429"
     assert value.section("routing")["provider_priority"] == "local_first"
@@ -904,6 +905,50 @@ def test_pool_candidates_use_distinct_single_capacity_workers() -> None:
     run(scenario())
 
 
+def test_affinity_waiter_does_not_block_other_worker_queue() -> None:
+    async def scenario() -> None:
+        store = InMemoryStateStore()
+        scheduler = Scheduler(store)
+        holder = await scheduler.begin_request(None)
+        waiter = await scheduler.begin_request("conversation-1")
+        other = await scheduler.begin_request(None)
+        await scheduler.acquire_deployment(
+            holder,
+            "worker-a",
+            "holder",
+            timeout_seconds=0.2,
+            affinity_priority=False,
+        )
+        waiting = asyncio.create_task(
+            scheduler.acquire_deployment_candidates(
+                waiter,
+                "local-pool",
+                ("worker-a",),
+                "affinity-waiter",
+                timeout_seconds=0.2,
+                affinity_priority=True,
+            )
+        )
+        await asyncio.sleep(0.02)
+        selected = await scheduler.acquire_deployment_candidates(
+            other,
+            "local-pool",
+            ("worker-b",),
+            "new-request",
+            timeout_seconds=0.1,
+            affinity_priority=False,
+        )
+        assert selected == "worker-b"
+        waiting.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+        await holder.release()
+        await waiter.release()
+        await other.release()
+
+    run(scenario())
+
+
 def test_nonblocking_capacity_skips_busy_deployments() -> None:
     async def scenario() -> None:
         store = InMemoryStateStore()
@@ -1054,6 +1099,104 @@ def test_runtime_start_cleans_previous_boot_and_marks_backend_draining(
         assert interrupted["request_id"] == "request-restart"
         assert interrupted["deployment_id"] == "ivan-qwen38-flash-128k"
         await second.close()
+
+    run(scenario())
+
+
+def test_runtime_start_rebuilds_semantic_history_indexes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario() -> None:
+        monkeypatch.setenv(
+            "AI_ROUTER_LITELLM_MASTER_KEY",
+            "internal-key",
+        )
+        monkeypatch.setenv(
+            "AI_ROUTER_STATE_KEY",
+            Fernet.generate_key().decode(),
+        )
+        monkeypatch.setenv(
+            "AI_ROUTER_AUDIT_PATH",
+            str(tmp_path / "audit.jsonl"),
+        )
+        store = InMemoryStateStore()
+        runtime = build_runtime(
+            settings=settings(tmp_path),
+            registry=Registry(ROOT / "config" / "registry.yaml"),
+            store=store,
+            token_counter=SimpleTokenCounter(),
+        )
+        stored_messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "messageId": "old-message",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": '{"city":"Paris","unit":"c"}',
+                        },
+                    }
+                ],
+            }
+        ]
+        state = ConversationState(
+            conversation_id="conversation-semantic-index",
+            public_model="model",
+            endpoint_id="endpoint",
+            tier_rank=1,
+            task="general",
+            last_seen=time.time(),
+            encrypted_capsule=runtime.compactor.cipher.encrypt(
+                stored_messages
+            ),
+        )
+        await store.set_json(
+            "router:conversation:conversation-semantic-index",
+            state.to_dict(),
+            ttl_seconds=86400,
+        )
+        legacy_identity = "full-legacy-semantic-index"
+        await store.set_json(
+            f"router:history-conversation:client-1:{legacy_identity}",
+            {"conversation_id": state.conversation_id},
+            ttl_seconds=86400,
+        )
+
+        await runtime.start()
+
+        replayed = [
+            {
+                "role": "assistant",
+                "traceId": "new-trace",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "arguments": '{"unit":"c","city":"Paris"}',
+                            "name": "lookup",
+                        },
+                    }
+                ],
+            }
+        ]
+        assert (
+            await runtime.conversations.conversation_for_history(
+                "client-1",
+                history_identities(replayed),
+            )
+            == state.conversation_id
+        )
+        assert any(
+            item["event"] == "conversation_history_indexes_rebuilt"
+            for item in runtime.audit.recent(20)
+        )
+        await runtime.close()
 
     run(scenario())
 
@@ -1328,6 +1471,56 @@ def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
     )
 
 
+def test_ai_pool_marks_restarted_worker_cache_generation(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    workers = ai_workers()
+    workers[1]["cache_generation"] = "worker-generation-2"
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth(
+            {
+                endpoint.id: healthy(
+                    endpoint.id,
+                    context=262144,
+                    workers=workers,
+                )
+            }
+        ),
+    )
+    parent = ConversationState(
+        conversation_id="lineage-1",
+        branch_id="branch-1",
+        parent_branch_id=None,
+        lineage_relation="new",
+        public_model=endpoint.public_model,
+        endpoint_id=endpoint.id,
+        tier_rank=endpoint.tier_rank,
+        task="general",
+        last_seen=time.time(),
+        cache_generation="worker-generation-1",
+        deployment_id="worker-priority-1",
+    )
+    decision = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=parent,
+        )
+    )
+    assert decision.deployment_id == "worker-priority-1"
+    assert decision.affinity == "cache-reset"
+    assert decision.reason == "cache_generation_changed"
+
+
 def test_short_requests_hash_across_p40s_and_reserve_v100(
     tmp_path: Path,
 ) -> None:
@@ -1381,7 +1574,7 @@ def test_short_requests_hash_across_p40s_and_reserve_v100(
     assert v100.deployment_id == "worker-5"
 
 
-def test_ai_pool_fails_over_when_affinity_worker_is_externally_leased(
+def test_ai_pool_keeps_affinity_worker_when_externally_leased(
     tmp_path: Path,
 ) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
@@ -1423,9 +1616,110 @@ def test_ai_pool_fails_over_when_affinity_worker_is_externally_leased(
             conversation=state,
         )
     )
-    assert changed.deployment_id == "worker-priority-0"
-    assert changed.affinity == "physical-failover"
-    assert changed.reason == "physical_worker_unavailable"
+    assert changed.deployment_id == "worker-priority-1"
+    assert changed.affinity == "hit"
+    assert changed.reason == "conversation_affinity"
+
+
+def test_ai_pool_waits_for_busy_affinity_worker(tmp_path: Path) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    workers = ai_workers()
+    status = healthy(endpoint.id, context=262144, workers=workers)
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth({endpoint.id: status}),
+    )
+    original = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    state = updated_conversation_state(
+        None,
+        conversation_id="conversation-busy",
+        decision=original,
+        cache_generation="generation-1",
+    )
+    for worker in workers:
+        if worker["worker_id"] == original.deployment_id:
+            worker["state"] = "busy"
+    pinned = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=state,
+        )
+    )
+    assert pinned.deployment_id == original.deployment_id
+    assert pinned.affinity == "hit"
+    assert pinned.deployment_candidates == (
+        (
+            original.deployment_id,
+            original.upstream_api_base,
+        ),
+    )
+
+
+def test_new_ai_session_avoids_recently_used_worker(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    store = InMemoryStateStore()
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth(
+            {
+                endpoint.id: healthy(
+                    endpoint.id,
+                    context=262144,
+                    workers=ai_workers(),
+                )
+            }
+        ),
+        store=store,
+    )
+    first = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+            routing_key="first",
+        )
+    )
+    run(policy.mark_deployment_recent(first, "conversation-first"))
+    second = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=None,
+            routing_key="second",
+        )
+    )
+    assert second.deployment_id != first.deployment_id
 
 
 def test_ai_pool_failure_excludes_only_the_failed_worker(tmp_path: Path) -> None:
@@ -1503,7 +1797,7 @@ def test_ai_pool_filters_workers_by_required_context(tmp_path: Path) -> None:
 def test_explicit_model_change_is_marked_for_compaction(tmp_path: Path) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     ai = registry.by_id("ai-qwen38-27b")
-    edge = registry.by_id("edge-qwen38-flash")
+    edge = registry.by_id("ivan-qwen38-flash-128k")
     assert ai is not None and edge is not None
     statuses = {
         ai.id: healthy(ai.id, context=262144, workers=ai_workers()),
@@ -1669,15 +1963,15 @@ def test_auto_prefers_local_unless_cloud_tier_is_required(
             conversation=None,
         )
     )
-    assert local.endpoint.id == "edge-qwen38-flash"
+    assert local.endpoint.id == "ivan-qwen38-flash-128k"
     assert cloud.endpoint.id == "cloud-deepseek-v4-flash"
 
 
 @pytest.mark.parametrize(
     ("provider_priority", "expected_node"),
     [
-        ("local_first", "edge"),
-        ("balanced", "edge"),
+        ("local_first", "ivan"),
+        ("balanced", "ivan"),
         ("cloud_first", "cloud"),
     ],
 )
@@ -2901,9 +3195,7 @@ def test_models_endpoint_reports_vision_capabilities(
     assert models[
         "huihui/Qwen3.8-27B-Q4-DFlash2"
     ]["supportsImages"] is True
-    assert models[
-        "RadixArk/Qwen3.8-Flash-Next-NVFP4"
-    ]["supportsImages"] is False
+    assert "RadixArk/Qwen3.8-Flash-Next-NVFP4" not in models
     assert models["zhipu/glm-5.3-flash"]["supportsImages"] is True
     assert models["zhipu/glm-5.3-flash"]["capabilities"][
         "tool_choice_modes"
@@ -3705,6 +3997,164 @@ def test_history_identity_includes_tool_call_ids() -> None:
     assert history_identities(first) != history_identities(second)
 
 
+def test_history_identity_ignores_client_metadata_and_empty_tool_content(
+    tmp_path: Path,
+) -> None:
+    stored = [
+        {
+            "role": "assistant",
+            "content": "",
+            "messageId": "message-old",
+            "model": "model-a",
+            "tool_calls": [
+                {
+                    "id": "call-memory",
+                    "type": "function",
+                    "function": {
+                        "name": "memory",
+                        "arguments": '{"action":"add","target":"user"}',
+                    },
+                }
+            ],
+        }
+    ]
+    replayed = [
+        {
+            "role": "assistant",
+            "traceId": "trace-new",
+            "model": "model-b",
+            "tool_calls": [
+                {
+                    "id": "call-memory",
+                    "type": "function",
+                    "function": {
+                        "arguments": '{"target":"user","action":"add"}',
+                        "name": "memory",
+                    },
+                }
+            ],
+        }
+    ]
+    repository = ConversationRepository(
+        InMemoryStateStore(),
+        settings(tmp_path),
+    )
+    run(
+        repository.map_history(
+            "client-1",
+            history_identities(stored),
+            "conversation-1",
+        )
+    )
+    assert (
+        run(
+            repository.conversation_for_history(
+                "client-1",
+                history_identities(replayed),
+            )
+        )
+        == "conversation-1"
+    )
+
+
+def test_history_lookup_uses_exact_full_prefix_without_tail_collision(
+    tmp_path: Path,
+) -> None:
+    repository = ConversationRepository(
+        InMemoryStateStore(),
+        settings(tmp_path),
+    )
+    stored = [
+        {"role": "system", "content": "project alpha"},
+        {"role": "user", "content": "shared question"},
+        {"role": "assistant", "content": "shared answer"},
+    ]
+    other = [
+        {"role": "system", "content": "project beta"},
+        {"role": "user", "content": "shared question"},
+        {"role": "assistant", "content": "shared answer"},
+        {"role": "user", "content": "continue"},
+    ]
+    run(
+        repository.map_history(
+            "client-1",
+            history_identities(stored),
+            "branch-alpha",
+        )
+    )
+    assert (
+        run(
+            repository.branch_for_history(
+                "client-1",
+                history_lookup_identities(other),
+            )
+        )
+        is None
+    )
+
+
+def test_same_parent_creates_independent_sibling_branches(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        repository = ConversationRepository(
+            InMemoryStateStore(),
+            settings(tmp_path),
+        )
+        parent_messages = [
+            {"role": "user", "content": "root"},
+            {"role": "assistant", "content": "anchor"},
+        ]
+        parent = ConversationState(
+            conversation_id="lineage-root",
+            branch_id="branch-root",
+            parent_branch_id=None,
+            lineage_relation="new",
+            public_model="model",
+            endpoint_id="endpoint",
+            tier_rank=1,
+            task="general",
+            last_seen=time.time(),
+        )
+        await repository.save(parent)
+        await repository.map_history(
+            "client-1",
+            history_identities(parent_messages),
+            parent.branch_id,
+        )
+        identities = history_lookup_identities(
+            [
+                *parent_messages,
+                {"role": "user", "content": "fork"},
+            ]
+        )
+        first, second = await asyncio.gather(
+            repository.lineage_context(
+                client_id="client-1",
+                identities=identities,
+                explicit_lineage_id=None,
+                previous_response_id=None,
+                force_new=False,
+            ),
+            repository.lineage_context(
+                client_id="client-1",
+                identities=identities,
+                explicit_lineage_id=None,
+                previous_response_id=None,
+                force_new=False,
+            ),
+        )
+        assert first.lineage_id == second.lineage_id == "lineage-root"
+        assert first.parent_branch_id == second.parent_branch_id == "branch-root"
+        assert first.branch_id != second.branch_id
+        assert first.parent is not None
+        assert second.parent is not None
+        assert first.parent.branch_id == parent.branch_id
+        assert second.parent.branch_id == parent.branch_id
+
+    run(scenario())
+
+
 def test_message_hash_canonicalizes_valid_tool_arguments_json() -> None:
     stored = {
         "role": "assistant",
@@ -3752,6 +4202,39 @@ def test_message_hash_canonicalizes_valid_tool_arguments_json() -> None:
     invalid_first["tool_calls"][0]["function"]["arguments"] = '{"a":1'
     invalid_second["tool_calls"][0]["function"]["arguments"] = '{"a":1 '
     assert message_hash(invalid_first) != message_hash(invalid_second)
+
+
+def test_message_hash_ignores_client_message_metadata() -> None:
+    stored = {
+        "role": "assistant",
+        "content": "ROUTER_DEPLOY_OK",
+    }
+    replayed = {
+        **stored,
+        "messageId": "client-message-2",
+        "traceId": "client-trace-2",
+        "model": "client-model-metadata",
+    }
+    assert message_hash(stored) == message_hash(replayed)
+
+
+def test_message_hash_equates_string_and_text_block_content() -> None:
+    stored = {
+        "role": "assistant",
+        "content": "same assistant response",
+    }
+    replayed = {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "text",
+                "text": "same assistant response",
+                "annotations": [],
+            }
+        ],
+        "messageId": "client-message",
+    }
+    assert message_hash(stored) == message_hash(replayed)
 
 
 def test_legacy_tool_boundary_is_accepted_and_upgraded() -> None:
@@ -4160,7 +4643,7 @@ def test_cloud_budget_reserves_commits_and_caps(tmp_path: Path) -> None:
 
 def test_public_api_explicit_model_proxy(tmp_path: Path, monkeypatch) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
-    endpoint = registry.by_id("edge-qwen38-flash")
+    endpoint = registry.by_id("ivan-qwen38-flash-128k")
     assert endpoint is not None
     monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
     monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
@@ -4229,10 +4712,10 @@ def test_public_api_explicit_model_proxy(tmp_path: Path, monkeypatch) -> None:
         )
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "ok"
-    assert response.headers["x-1panel-route-node"] == "edge"
+    assert response.headers["x-1panel-route-node"] == "ivan"
     assert response.headers["x-1panel-conversation-mode"] == "inferred"
     assert response.headers["x-1panel-conversation-id"].startswith(
-        "inferred-"
+        "lineage-"
     )
     assert runtime.training is not None
     training_status = run(runtime.training.status())
@@ -4264,7 +4747,7 @@ def test_streaming_response_is_written_to_training_archive(
     monkeypatch,
 ) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
-    endpoint = registry.by_id("edge-qwen38-flash")
+    endpoint = registry.by_id("ivan-qwen38-flash-128k")
     assert endpoint is not None
     monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
     monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
@@ -4394,7 +4877,7 @@ def test_workbuddy_missing_tool_call_id_is_repaired_and_stays_local(
     async def upstream(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert payload["model"] == (
-            "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+            "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
         )
         assert payload["messages"][2]["tool_call_id"] == "call-lookup"
         return httpx.Response(
@@ -4460,7 +4943,7 @@ def test_workbuddy_missing_tool_call_id_is_repaired_and_stays_local(
             },
         )
     assert response.status_code == 200
-    assert response.headers["x-1panel-route-node"] == "edge"
+    assert response.headers["x-1panel-route-node"] == "ivan"
     assert response.headers["x-1panel-tool-history-repaired"] == "1"
     assert response.headers["x-1panel-protocol"] == "chat"
     run(runtime.internal_client.aclose())
@@ -4538,7 +5021,7 @@ def test_workbuddy_ambiguous_tool_history_is_rejected_before_upstream(
     run(runtime.internal_client.aclose())
 
 
-def test_auto_spills_busy_edge_to_next_local_without_cooldown(
+def test_auto_spills_busy_local_to_next_local_without_cooldown(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -4574,7 +5057,7 @@ def test_auto_spills_busy_edge_to_next_local_without_cooldown(
     fake_health = FakeHealth(statuses)
     runtime.health = fake_health
     runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
-    edge = registry.by_id("edge-qwen38-flash")
+    edge = registry.by_id("ivan-qwen38-flash-128k")
     assert edge is not None
     holder = run(runtime.scheduler.begin_request(None))
     run(
@@ -4589,9 +5072,7 @@ def test_auto_spills_busy_edge_to_next_local_without_cooldown(
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        assert payload["model"] == (
-            "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
-        )
+        assert payload["model"] == "huihui/Qwen3.8-27B-Q4-DFlash2"
         return httpx.Response(
             200,
             headers={"content-type": "application/json"},
@@ -4626,7 +5107,7 @@ def test_auto_spills_busy_edge_to_next_local_without_cooldown(
             },
         )
     assert response.status_code == 200
-    assert response.headers["x-1panel-route-node"] == "ivan"
+    assert response.headers["x-1panel-route-node"] == "ai"
     assert response.headers["x-1panel-route-reason"] == "capacity_spillover"
     assert response.headers["x-1panel-capacity-attempts"] == "2"
     assert float(response.headers["x-1panel-queue-wait-ms"]) < 1000
@@ -4669,7 +5150,7 @@ def test_explicit_busy_model_returns_429_without_cooldown(
         store=InMemoryStateStore(),
         token_counter=SimpleTokenCounter(),
     )
-    edge = registry.by_id("edge-qwen38-flash")
+    edge = registry.by_id("ivan-qwen38-flash-128k")
     assert edge is not None
     fake_health = FakeHealth(
         {
@@ -4759,11 +5240,8 @@ def test_auto_uses_cloud_after_all_local_capacity_is_busy(
     fake_health = FakeHealth(statuses)
     runtime.health = fake_health
     runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
-    edge = registry.by_id("edge-qwen38-flash")
-    assert edge is not None
     holders = []
     for deployment_id in (
-        edge.id,
         "ivan-qwen38-flash-128k",
         "amd-qwen38-rocmfpx-128k",
         "worker-priority-0",
@@ -4823,7 +5301,7 @@ def test_auto_uses_cloud_after_all_local_capacity_is_busy(
         response.headers["x-1panel-route-reason"]
         == "cloud_capacity_fallback"
     )
-    assert response.headers["x-1panel-capacity-attempts"] == "5"
+    assert response.headers["x-1panel-capacity-attempts"] == "4"
     assert fake_health.failed == []
     for holder in holders:
         run(holder.release())
@@ -5022,7 +5500,7 @@ def test_eight_parallel_auto_capacity_selections_stay_local(
             result[0].endpoint.node
             for _lease, result in selections
         )
-        assert nodes == Counter({"ai": 6, "edge": 1, "ivan": 1})
+        assert nodes == Counter({"ai": 6, "ivan": 1, "amd": 1})
         ai_deployments = {
             result[0].deployment_id
             for _lease, result in selections
@@ -5210,16 +5688,20 @@ def test_chat_history_infers_same_conversation_and_worker(
         calls += 1
         payload = json.loads(request.content)
         assert payload["model"] == (
-            "RadixArk/Qwen3.8-Flash-Next-NVFP4"
+            "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
         )
         if calls == 1:
             assert len(payload["messages"]) == 1
             answer = "CACHE-ANCHOR"
             cached_tokens = 0
-        else:
+        elif calls == 2:
             assert len(payload["messages"]) == 3
             answer = "SECOND"
             cached_tokens = 60
+        else:
+            assert len(payload["messages"]) == 1
+            answer = "COMPACTED"
+            cached_tokens = 0
         return httpx.Response(
             200,
             headers={"content-type": "application/json"},
@@ -5263,6 +5745,7 @@ def test_chat_history_infers_same_conversation_and_worker(
         )
         assert first.status_code == 200
         conversation_id = first.headers["x-1panel-conversation-id"]
+        first_branch_id = first.headers["x-1panel-branch-id"]
         second = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer client-key"},
@@ -5272,9 +5755,52 @@ def test_chat_history_infers_same_conversation_and_worker(
                     {"role": "user", "content": "first"},
                     {
                         "role": "assistant",
-                        "content": "CACHE-ANCHOR",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "CACHE-ANCHOR",
+                                "annotations": [],
+                            }
+                        ],
+                        "messageId": "client-message",
+                        "traceId": "client-trace",
                     },
                     {"role": "user", "content": "second"},
+                ],
+                "max_tokens": 16,
+            },
+        )
+        compacted = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer client-key",
+                "X-1Panel-Conversation-ID": conversation_id,
+                "X-1Panel-Context-Compacted": "true",
+            },
+            json={
+                "model": "auto",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "compressed summary and next task",
+                    }
+                ],
+                "max_tokens": 16,
+            },
+        )
+        compacted_without_id = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": "Bearer client-key",
+                "X-1Panel-Context-Compacted": "true",
+            },
+            json={
+                "model": "auto",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "another compressed context",
+                    }
                 ],
                 "max_tokens": 16,
             },
@@ -5282,6 +5808,9 @@ def test_chat_history_infers_same_conversation_and_worker(
     assert second.status_code == 200
     assert second.headers["x-1panel-conversation-id"] == conversation_id
     assert second.headers["x-1panel-conversation-mode"] == "inferred"
+    assert second.headers["x-1panel-lineage-relation"] == "continuation"
+    assert second.headers["x-1panel-parent-branch-id"] == first_branch_id
+    assert second.headers["x-1panel-branch-id"] != first_branch_id
     assert second.headers["x-1panel-affinity"] == "hit"
     assert second.headers["x-1panel-route-deployment"] == (
         first.headers["x-1panel-route-deployment"]
@@ -5295,8 +5824,26 @@ def test_chat_history_infers_same_conversation_and_worker(
         for event in events
         if event["event"] == "request_completed"
     ]
-    assert completed[-1]["cached_prompt_tokens"] == 60
-    assert completed[-1]["cache_hit_ratio"] == 0.6
+    assert completed[1]["cached_prompt_tokens"] == 60
+    assert completed[1]["cache_hit_ratio"] == 0.6
+    assert compacted.status_code == 200
+    assert compacted.headers["x-1panel-conversation-id"] == conversation_id
+    assert compacted.headers["x-1panel-conversation-mode"] == "stateful"
+    assert compacted.headers["x-1panel-affinity"] == "new"
+    assert compacted.headers["x-1panel-lineage-relation"] == "compaction_reset"
+    assert compacted.headers["x-1panel-context-compacted"] == "true"
+    assert (
+        compacted.headers["x-1panel-context-compaction-source"]
+        == "client"
+    )
+    assert compacted_without_id.status_code == 200
+    assert (
+        compacted_without_id.headers["x-1panel-conversation-id"]
+        != conversation_id
+    )
+    assert compacted_without_id.headers["x-1panel-affinity"] == "new"
+    assert completed[-1]["context_compacted"] is True
+    assert completed[-1]["context_compaction_source"] == "client"
     run(runtime.internal_client.aclose())
 
 
@@ -5385,7 +5932,7 @@ def test_responses_previous_id_rebuilds_encrypted_history(
     monkeypatch,
 ) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
-    endpoint = registry.by_id("edge-qwen38-flash")
+    endpoint = registry.by_id("ivan-qwen38-flash-128k")
     assert endpoint is not None
     monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
     monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
@@ -5481,7 +6028,7 @@ def test_responses_previous_id_repairs_function_call_output(
     monkeypatch,
 ) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
-    endpoint = registry.by_id("edge-qwen38-flash")
+    endpoint = registry.by_id("ivan-qwen38-flash-128k")
     assert endpoint is not None
     monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
     monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")

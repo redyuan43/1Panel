@@ -61,6 +61,7 @@ from .types import (
     Endpoint,
     EndpointStatus,
     Evaluation,
+    LineageContext,
     ModelCallTarget,
     PhysicalDeployment,
     RequestCapabilities,
@@ -559,14 +560,30 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     )
     body = normalized.body
     tool_history_repairs = normalized.repairs
-    conversation_id, conversation_mode = await _conversation_id(
+    client_compacted = _truthy_header(
+        request.headers.get("x-1panel-context-compacted", "")
+    )
+    lineage = await _lineage_context(
         current,
         request,
         body,
         api_kind,
         authenticated.policy.id,
+        force_new_inferred=client_compacted,
     )
-    trace.set_request_context(conversation_id=conversation_id)
+    conversation_id = lineage.lineage_id
+    conversation_mode = lineage.mode
+    trace.set_request_context(
+        conversation_id=conversation_id,
+        conversation_mode=conversation_mode,
+        branch_id=lineage.branch_id,
+        parent_branch_id=lineage.parent_branch_id,
+        lineage_relation=lineage.relation,
+        context_compacted=client_compacted,
+        context_compaction_source=(
+            "client" if client_compacted else None
+        ),
+    )
     await _save_request_trace(current, trace)
     training_token = None
     try:
@@ -586,7 +603,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         await _finish_trace_exception(current, trace, exc)
         raise
     try:
-        lease = await current.scheduler.begin_request(conversation_id)
+        lease = await current.scheduler.begin_request(None)
     except BaseException as exc:
         await _fail_training_record(
             current,
@@ -606,14 +623,23 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             conversation_id,
         )
         request_tracked = True
-        conversation = await current.conversations.get(conversation_id)
-        effective_body = await apply_stored_history(
-            current.compactor,
-            current.conversations,
-            body,
-            api_kind=api_kind,
-            conversation=conversation,
+        stored_conversation = lineage.parent
+        routing_conversation = (
+            None if client_compacted else stored_conversation
         )
+        effective_body = json.loads(json.dumps(body))
+        if (
+            not client_compacted
+            and api_kind == "responses"
+            and bool(str(body.get("previous_response_id", "")).strip())
+        ):
+            effective_body = await apply_stored_history(
+                current.compactor,
+                current.conversations,
+                body,
+                api_kind=api_kind,
+                conversation=stored_conversation,
+            )
         normalized_effective = normalize_request(
             effective_body,
             api_kind,
@@ -679,15 +705,24 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             headers=header_values,
             api_kind=api_kind,
             prompt_tokens=prompt_tokens,
-            current_task=conversation.task if conversation else None,
+            current_task=(
+                routing_conversation.task
+                if routing_conversation
+                else None
+            ),
             current_route_profile=(
-                conversation.route_profile if conversation else None
+                routing_conversation.route_profile
+                if routing_conversation
+                else None
             ),
             current_complexity=(
-                conversation.complexity if conversation else None
+                routing_conversation.complexity
+                if routing_conversation
+                else None
             ),
             is_new_conversation=(
-                conversation is None and requested_model == "auto"
+                routing_conversation is None
+                and requested_model == "auto"
             ),
             before_model_call=acquire_evaluator,
             after_model_call=lease.release_deployment,
@@ -728,7 +763,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 image_count=image_inputs.total,
                 has_tools=has_tools,
                 required_capabilities=required_capabilities,
-                conversation=conversation,
+                conversation=routing_conversation,
                 excluded_endpoints=excluded,
                 identity=identity,
             )
@@ -740,6 +775,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         trace.set_evaluation(evaluation)
         if pre_route_capsule is not None:
+            routing_conversation = None
             trace.record(
                 1,
                 "context_compaction",
@@ -757,6 +793,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     ),
                 },
                 path=False,
+            )
+            trace.set_request_context(
+                context_compacted=True,
+                context_compaction_source="router",
             )
         await _save_request_trace(current, trace)
         excluded_deployments: set[str] = set()
@@ -808,7 +848,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     image_count=image_inputs.total,
                     has_tools=has_tools,
                     required_capabilities=required_capabilities,
-                    conversation=conversation,
+                    conversation=routing_conversation,
                     body=effective_body,
                     api_kind=api_kind,
                     lease=lease,
@@ -825,6 +865,21 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     ),
                 )
                 capsule = capsule or pre_route_capsule
+                compaction_source = (
+                    "client"
+                    if client_compacted
+                    else (
+                        "router"
+                        if capsule is not None
+                        else None
+                    )
+                )
+                decision.context_compacted = bool(compaction_source)
+                decision.context_compaction_source = compaction_source
+                decision.conversation_mode = conversation_mode
+                decision.branch_id = lineage.branch_id
+                decision.parent_branch_id = lineage.parent_branch_id
+                decision.lineage_relation = lineage.relation
                 decision.attempts = attempt
                 decision.tool_history_repairs = tool_history_repairs
                 decision.identity_revision = (
@@ -878,6 +933,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             "route_profile": decision.route_profile,
                             "complexity": decision.complexity,
                             "history_mode": decision.history_mode,
+                            "context_compacted": (
+                                decision.context_compacted
+                            ),
+                            "context_compaction_source": (
+                                decision.context_compaction_source
+                            ),
                             "remote_fallback_position": (
                                 decision.remote_fallback_position
                             ),
@@ -1079,8 +1140,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 budget_reservation = None
                 state = await _save_conversation(
                     current,
-                    conversation_id=conversation_id,
-                    previous=conversation,
+                    lineage=lineage,
+                    previous=(
+                        None
+                        if decision.context_compacted
+                        else stored_conversation
+                    ),
                     decision=decision,
                     capsule=capsule,
                 )
@@ -1301,6 +1366,7 @@ async def _acquire_route_capacity(
     capacity_busy_seen = False
     affinity_spilled = False
     history_incompatible_seen = False
+    carried_capsule = None
     routing = current.settings.section("routing")
 
     while True:
@@ -1610,6 +1676,22 @@ async def _acquire_route_capacity(
                 await _save_request_trace(current, trace)
             await lease.release_deployment()
             raise
+        if (
+            capsule is not None
+            and conversation is not None
+            and not history_precompacted
+        ):
+            carried_capsule = capsule
+            body = routed_body
+            prompt_tokens = decision.prompt_tokens
+            requested_context_tokens = (
+                decision.prompt_tokens + output_reserve_tokens
+            )
+            conversation = None
+            history_precompacted = True
+            await lease.release_deployment()
+            continue
+        capsule = capsule or carried_capsule
         if trace:
             trace.record(
                 route_attempt,
@@ -1751,7 +1833,8 @@ def _exclude_busy_decision(
 ) -> None:
     if (
         decision.endpoint.backend_type in {"ai_pool", "codex_pool"}
-        and decision.affinity in {"hit", "logical-hit"}
+        and decision.affinity
+        in {"hit", "logical-hit", "physical-failover"}
         and decision.deployment_id
     ):
         excluded_deployments.add(decision.deployment_id)
@@ -2371,11 +2454,11 @@ def _compaction_allowed(
         return False
     if compaction.get("mode", "explicit_only") == "automatic":
         return True
-    return client_allows or header_value.strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    return client_allows or _truthy_header(header_value)
+
+
+def _truthy_header(value: str) -> bool:
+    return value.strip().lower() in {"1", "true", "yes"}
 
 
 async def _acquire_internal_model(
@@ -2494,58 +2577,77 @@ async def _acquire_internal_model(
 async def _save_conversation(
     current: RouterRuntime,
     *,
-    conversation_id: str | None,
+    lineage: LineageContext,
     previous: ConversationState | None,
     decision: RouteDecision,
     capsule: Any | None,
 ) -> ConversationState | None:
-    if not conversation_id:
-        return None
     status = await current.health.status(decision.endpoint)
-    state = updated_conversation_state(
+    cache_generation = status.cache_generation
+    if decision.deployment_id:
+        details = decision.deployment_details.get(
+            decision.deployment_id,
+            {},
+        )
+        cache_generation = str(
+            details.get("cache_generation") or cache_generation
+        )
+    return updated_conversation_state(
         previous,
-        conversation_id=conversation_id,
+        conversation_id=lineage.lineage_id,
+        branch_id=lineage.branch_id,
+        parent_branch_id=lineage.parent_branch_id,
+        lineage_relation=lineage.relation,
         decision=decision,
-        cache_generation=status.cache_generation,
+        cache_generation=cache_generation,
         encrypted_capsule=capsule.encrypted_messages if capsule else None,
         boundary_hash=capsule.boundary_hash if capsule else None,
     )
-    await current.conversations.save(state)
-    return state
 
 
-async def _conversation_id(
+async def _lineage_context(
     current: RouterRuntime,
     request: Request,
     body: dict[str, Any],
     api_kind: str,
     client_id: str,
-) -> tuple[str, str]:
+    *,
+    force_new_inferred: bool = False,
+) -> LineageContext:
+    explicit_lineage_id = None
     for name in ("x-1panel-conversation-id", "x-litellm-session-id"):
         value = request.headers.get(name, "").strip()
         if value:
-            return value[:256], "stateful"
+            explicit_lineage_id = value[:256]
+            break
     if api_kind == "responses":
         conversation = body.get("conversation")
-        if isinstance(conversation, str) and conversation.strip():
-            return conversation.strip()[:256], "stateful"
-        if isinstance(conversation, dict) and conversation.get("id"):
-            return str(conversation["id"])[:256], "stateful"
-        mapped = await current.conversations.conversation_for_response(
-            str(body.get("previous_response_id", "")).strip() or None
+        if explicit_lineage_id is None:
+            if isinstance(conversation, str) and conversation.strip():
+                explicit_lineage_id = conversation.strip()[:256]
+            elif isinstance(conversation, dict) and conversation.get("id"):
+                explicit_lineage_id = str(conversation["id"])[:256]
+        return await current.conversations.lineage_context(
+            client_id=client_id,
+            identities=history_lookup_identities(
+                extract_messages(body, api_kind)
+            ),
+            explicit_lineage_id=explicit_lineage_id,
+            previous_response_id=(
+                str(body.get("previous_response_id", "")).strip()
+                or None
+            ),
+            force_new=force_new_inferred,
         )
-        if mapped and await current.conversations.get(mapped):
-            return mapped, "inferred"
-        return f"inferred-{uuid4().hex}", "inferred"
-
-    identities = history_lookup_identities(extract_messages(body, api_kind))
-    mapped = await current.conversations.conversation_for_history(
-        client_id,
-        identities,
+    return await current.conversations.lineage_context(
+        client_id=client_id,
+        identities=history_lookup_identities(
+            extract_messages(body, api_kind)
+        ),
+        explicit_lineage_id=explicit_lineage_id,
+        previous_response_id=None,
+        force_new=force_new_inferred,
     )
-    if mapped and await current.conversations.get(mapped):
-        return mapped, "inferred"
-    return f"inferred-{uuid4().hex}", "inferred"
 
 
 async def _map_response_id(
@@ -2562,7 +2664,7 @@ async def _map_response_id(
     if response_id:
         await current.conversations.map_response(
             response_id,
-            state.conversation_id,
+            state.branch_id or state.conversation_id,
         )
 
 
@@ -2624,11 +2726,6 @@ async def _stream_response(
         accumulator.finish()
         try:
             await upstream.aclose()
-            if accumulator.response_id and conversation_id:
-                await current.conversations.map_response(
-                    accumulator.response_id,
-                    conversation_id,
-                )
             if completed:
                 await persist_history(
                     current.compactor,
@@ -2639,6 +2736,11 @@ async def _stream_response(
                     api_kind=api_kind,
                     assistant_items=accumulator.assistant_items(),
                 )
+                if accumulator.response_id and state:
+                    await current.conversations.map_response(
+                        accumulator.response_id,
+                        state.branch_id or state.conversation_id,
+                    )
                 if current.training is not None:
                     await asyncio.shield(
                         current.training.complete(
@@ -2762,6 +2864,13 @@ def _response_headers(
                 ),
                 "X-1Panel-Conversation-ID": conversation_id,
                 "X-1Panel-Conversation-Mode": conversation_mode,
+                "X-1Panel-Branch-ID": decision.branch_id or "",
+                "X-1Panel-Parent-Branch-ID": (
+                    decision.parent_branch_id or ""
+                ),
+                "X-1Panel-Lineage-Relation": (
+                    decision.lineage_relation or ""
+                ),
                 "X-1Panel-Route-Strategy": (
                     decision.strategy_version
                 ),
@@ -2775,6 +2884,12 @@ def _response_headers(
                 "X-SIYUAN-Identity-Revision": identity.revision,
             }
         )
+        if decision.context_compacted:
+            headers["X-1Panel-Context-Compacted"] = "true"
+        if decision.context_compaction_source:
+            headers["X-1Panel-Context-Compaction-Source"] = (
+                decision.context_compaction_source
+            )
         if decision.tool_history_repairs:
             headers["X-1Panel-Tool-History-Repaired"] = str(
                 decision.tool_history_repairs
@@ -2865,6 +2980,12 @@ async def _audit(
         route_profile=decision.route_profile,
         complexity=decision.complexity,
         history_mode=decision.history_mode,
+        conversation_mode=decision.conversation_mode,
+        branch_id=decision.branch_id,
+        parent_branch_id=decision.parent_branch_id,
+        lineage_relation=decision.lineage_relation,
+        context_compacted=decision.context_compacted,
+        context_compaction_source=decision.context_compaction_source,
         remote_fallback_position=decision.remote_fallback_position,
         attempts=decision.attempts,
         capacity_attempts=decision.capacity_attempts,
@@ -2884,6 +3005,21 @@ async def _audit(
         instance_id=current.instance_id,
         boot_id=current.boot_id,
     )
+    if status_code < 400:
+        try:
+            await current.policy.mark_deployment_recent(
+                decision,
+                conversation_id,
+            )
+        except Exception as exc:
+            current.audit.write(
+                "deployment_recent_marker_failed",
+                request_id=request_id,
+                deployment_id=(
+                    decision.deployment_id or decision.endpoint.id
+                ),
+                error=type(exc).__name__,
+            )
     try:
         await current.clients.record_usage(
             client_id=client_id,
@@ -3057,6 +3193,12 @@ def _audit_started(
         route_profile=decision.route_profile,
         complexity=decision.complexity,
         history_mode=decision.history_mode,
+        conversation_mode=decision.conversation_mode,
+        branch_id=decision.branch_id,
+        parent_branch_id=decision.parent_branch_id,
+        lineage_relation=decision.lineage_relation,
+        context_compacted=decision.context_compacted,
+        context_compaction_source=decision.context_compaction_source,
         remote_fallback_position=decision.remote_fallback_position,
         attempts=decision.attempts,
         capacity_attempts=decision.capacity_attempts,

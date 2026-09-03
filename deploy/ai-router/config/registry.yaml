@@ -119,8 +119,8 @@ endpoints:
     health_url: http://edge.taild500c8.ts.net:18300/health
     load_url: http://edge.taild500c8.ts.net:18300/metrics
     backend_api_key_env: AI_ROUTER_EDGE_BACKEND_KEY
-    enabled: true
-    auto_candidate: true
+    enabled: false
+    auto_candidate: false
     capabilities:
       chat: true
       responses: native

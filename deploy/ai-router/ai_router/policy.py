@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import time
-from dataclasses import replace
 from typing import Any
+from uuid import uuid4
 
 from .config import Registry, Settings
 from .errors import (
@@ -19,6 +20,7 @@ from .types import (
     Endpoint,
     EndpointStatus,
     Evaluation,
+    LineageContext,
     PhysicalDeployment,
     RequestCapabilities,
     RouteDecision,
@@ -42,10 +44,16 @@ class ConversationRepository:
         self.store = store
         self.settings = settings
 
-    async def get(self, conversation_id: str | None) -> ConversationState | None:
-        if not conversation_id:
+    async def get(self, branch_id: str | None) -> ConversationState | None:
+        if not branch_id:
             return None
-        value = await self.store.get_json(f"router:conversation:{conversation_id}")
+        value = await self.store.get_json(
+            f"router:conversation-branch:{branch_id}"
+        )
+        if not value:
+            value = await self.store.get_json(
+                f"router:conversation:{branch_id}"
+            )
         if not value:
             return None
         state = ConversationState.from_dict(value)
@@ -58,16 +66,16 @@ class ConversationRepository:
         ttl = int(self.settings.section("affinity").get("ttl_seconds", 86400))
         state.last_seen = time.time()
         await self.store.set_json(
-            f"router:conversation:{state.conversation_id}",
+            f"router:conversation-branch:{state.branch_id or state.conversation_id}",
             state.to_dict(),
             ttl_seconds=ttl,
         )
 
-    async def map_response(self, response_id: str, conversation_id: str) -> None:
+    async def map_response(self, response_id: str, branch_id: str) -> None:
         ttl = int(self.settings.section("affinity").get("ttl_seconds", 86400))
         await self.store.set_json(
             f"router:response-conversation:{response_id}",
-            {"conversation_id": conversation_id},
+            {"branch_id": branch_id},
             ttl_seconds=ttl,
         )
 
@@ -75,17 +83,17 @@ class ConversationRepository:
         self,
         client_id: str,
         identities: tuple[str, ...],
-        conversation_id: str,
+        branch_id: str,
     ) -> None:
         ttl = int(self.settings.section("affinity").get("ttl_seconds", 86400))
         for identity in identities:
             await self.store.set_json(
                 f"router:history-conversation:{client_id}:{identity}",
-                {"conversation_id": conversation_id},
+                {"branch_id": branch_id},
                 ttl_seconds=ttl,
             )
 
-    async def conversation_for_history(
+    async def branch_for_history(
         self,
         client_id: str,
         identities: tuple[str, ...],
@@ -94,15 +102,70 @@ class ConversationRepository:
             value = await self.store.get_json(
                 f"router:history-conversation:{client_id}:{identity}"
             )
-            if value and value.get("conversation_id"):
-                return str(value["conversation_id"])
+            if value and (value.get("branch_id") or value.get("conversation_id")):
+                return str(value.get("branch_id") or value["conversation_id"])
         return None
 
-    async def conversation_for_response(self, response_id: str | None) -> str | None:
+    async def conversation_for_history(
+        self,
+        client_id: str,
+        identities: tuple[str, ...],
+    ) -> str | None:
+        return await self.branch_for_history(client_id, identities)
+
+    async def branch_for_response(self, response_id: str | None) -> str | None:
         if not response_id:
             return None
         value = await self.store.get_json(f"router:response-conversation:{response_id}")
-        return str(value["conversation_id"]) if value and value.get("conversation_id") else None
+        if not value:
+            return None
+        branch_id = value.get("branch_id") or value.get("conversation_id")
+        return str(branch_id) if branch_id else None
+
+    async def conversation_for_response(
+        self,
+        response_id: str | None,
+    ) -> str | None:
+        return await self.branch_for_response(response_id)
+
+    async def lineage_context(
+        self,
+        *,
+        client_id: str,
+        identities: tuple[str, ...],
+        explicit_lineage_id: str | None,
+        previous_response_id: str | None,
+        force_new: bool,
+    ) -> LineageContext:
+        branch_id = f"branch-{uuid4().hex}"
+        if force_new:
+            return LineageContext(
+                lineage_id=explicit_lineage_id or f"lineage-{uuid4().hex}",
+                branch_id=branch_id,
+                parent_branch_id=None,
+                mode="stateful" if explicit_lineage_id else "inferred",
+                relation="compaction_reset",
+            )
+        parent_id = await self.branch_for_response(previous_response_id)
+        if not parent_id:
+            parent_id = await self.branch_for_history(client_id, identities)
+        parent = await self.get(parent_id)
+        if parent:
+            return LineageContext(
+                lineage_id=explicit_lineage_id or parent.conversation_id,
+                branch_id=branch_id,
+                parent_branch_id=parent.branch_id or parent_id,
+                mode="stateful" if explicit_lineage_id else "inferred",
+                relation="continuation",
+                parent=parent,
+            )
+        return LineageContext(
+            lineage_id=explicit_lineage_id or f"lineage-{uuid4().hex}",
+            branch_id=branch_id,
+            parent_branch_id=None,
+            mode="stateful" if explicit_lineage_id else "inferred",
+            relation="new",
+        )
 
 
 class RoutingPolicy:
@@ -111,10 +174,12 @@ class RoutingPolicy:
         registry: Registry,
         settings: Settings,
         health: HealthMonitor,
+        store: StateStore | None = None,
     ) -> None:
         self.registry = registry
         self.settings = settings
         self.health = health
+        self.store = store
 
     async def choose(
         self,
@@ -186,6 +251,7 @@ class RoutingPolicy:
         candidates: list[Endpoint] = []
         rejections: list[str] = []
         rejection_reasons: list[str] = []
+        rejection_by_endpoint: dict[str, str] = {}
         trace_candidates: list[dict[str, Any]] = []
         for endpoint in endpoints:
             reason = (
@@ -208,6 +274,7 @@ class RoutingPolicy:
             if reason:
                 rejections.append(f"{endpoint.id}:{reason}")
                 rejection_reasons.append(reason)
+                rejection_by_endpoint[endpoint.id] = reason
             else:
                 candidates.append(endpoint)
             if trace:
@@ -232,16 +299,39 @@ class RoutingPolicy:
                     else "explicit"
                 ),
             )
+        if requested_model == "auto" and conversation:
+            bound_rejection = rejection_by_endpoint.get(
+                conversation.endpoint_id
+            )
+            if (
+                bound_rejection
+                and bound_rejection not in INCOMPATIBLE_REJECTION_REASONS
+            ):
+                raise NoEligibleModelError(
+                    "the bound conversation model is temporarily unavailable: "
+                    f"{conversation.endpoint_id}:{bound_rejection}"
+                )
         if not candidates:
             message = "no eligible model is available: " + ", ".join(
                 rejections
             )
+            inactive_rejections = {
+                "auto_disabled",
+                "cloud_auto_disabled",
+                "cloud_disabled",
+                "disabled",
+            }
             if (
                 requested_model == "auto"
                 and strategy == "intelligent_v2"
                 and rejection_reasons
+                and any(
+                    reason in INCOMPATIBLE_REJECTION_REASONS
+                    for reason in rejection_reasons
+                )
                 and all(
                     reason in INCOMPATIBLE_REJECTION_REASONS
+                    or reason in inactive_rejections
                     for reason in rejection_reasons
                 )
             ):
@@ -254,13 +344,24 @@ class RoutingPolicy:
                 None,
             )
             if pinned:
+                cache_reset = bool(
+                    conversation.cache_generation
+                    and pinned.backend_type != "ai_pool"
+                    and statuses[pinned.id].cache_generation
+                    and conversation.cache_generation
+                    != statuses[pinned.id].cache_generation
+                )
                 if trace:
                     trace.record(
                         trace_attempt,
                         "conversation_affinity",
                         "selected",
                         branch="hit",
-                        reason="conversation_affinity",
+                        reason=(
+                            "cache_generation_changed"
+                            if cache_reset
+                            else "conversation_affinity"
+                        ),
                         evidence={
                             "conversation_id": conversation.conversation_id,
                             "endpoint_id": pinned.id,
@@ -273,8 +374,12 @@ class RoutingPolicy:
                     task=evaluation.task,
                     prompt_tokens=prompt_tokens,
                     output_reserve_tokens=output_reserve_tokens,
-                    reason="conversation_affinity",
-                    affinity="hit",
+                    reason=(
+                        "cache_generation_changed"
+                        if cache_reset
+                        else "conversation_affinity"
+                    ),
+                    affinity="cache-reset" if cache_reset else "hit",
                     score=1.0,
                     protocol=required.protocol,
                     native_or_adapter=pinned.capabilities.protocol_mode(
@@ -330,7 +435,38 @@ class RoutingPolicy:
 
         remote_fallback_position = None
         selection_reason = ""
-        if requested_model == "auto" and strategy == "intelligent_v2":
+        if requested_model == "auto" and conversation:
+            before_priority = [item.id for item in candidates]
+            (
+                candidates,
+                selection_reason,
+                remote_fallback_position,
+            ) = self._conversation_fallback_candidates(
+                candidates,
+                conversation,
+                evaluation,
+            )
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "provider_priority",
+                    "passed",
+                    branch="conversation_fallback",
+                    reason=selection_reason,
+                    evidence={
+                        "before_endpoint_ids": before_priority,
+                        "after_endpoint_ids": [
+                            item.id for item in candidates
+                        ],
+                        "previous_endpoint_id": conversation.endpoint_id,
+                        "previous_tier_rank": conversation.tier_rank,
+                        "remote_fallback_position": (
+                            remote_fallback_position
+                        ),
+                    },
+                    path=False,
+                )
+        elif requested_model == "auto" and strategy == "intelligent_v2":
             before_priority = [item.id for item in candidates]
             (
                 candidates,
@@ -511,11 +647,11 @@ class RoutingPolicy:
             prompt_tokens=prompt_tokens,
             output_reserve_tokens=output_reserve_tokens,
             reason=(
-                "monotonic_upgrade"
-                if migration
-                else (
-                    selection_reason
-                    or self._priority_reason(endpoint, evaluation)
+                selection_reason
+                or (
+                    "monotonic_upgrade"
+                    if migration
+                    else self._priority_reason(endpoint, evaluation)
                 )
             ),
             affinity="migrated" if migration else ("miss" if conversation else "new"),
@@ -914,6 +1050,66 @@ class RoutingPolicy:
             f"{profile_key}"
         )
 
+    def _conversation_fallback_candidates(
+        self,
+        candidates: list[Endpoint],
+        conversation: ConversationState,
+        evaluation: Evaluation,
+    ) -> tuple[list[Endpoint], str, int | None]:
+        eligible = [
+            endpoint
+            for endpoint in candidates
+            if endpoint.tier_rank >= conversation.tier_rank
+        ]
+        if not eligible:
+            raise NoCompatibleModelError(
+                "no conversation fallback can preserve the current tier"
+            )
+        previous = self.registry.by_id(conversation.endpoint_id)
+        if previous and previous.cloud:
+            profile_key = self._remote_profile_key(evaluation)
+            order = [
+                str(item)
+                for item in self.settings.section("routing")
+                .get("remote_fallback_order", {})
+                .get(profile_key, [])
+            ]
+            for index, configured in enumerate(order, start=1):
+                matched = [
+                    endpoint
+                    for endpoint in eligible
+                    if endpoint.cloud
+                    and configured
+                    in {
+                        endpoint.id,
+                        endpoint.public_model,
+                        str(endpoint.metadata.get("provider", "")),
+                    }
+                ]
+                if matched:
+                    return matched, "remote_profile_fallback", index
+            raise NoCompatibleModelError(
+                "no configured remote fallback can preserve the current tier "
+                f"for profile {profile_key}"
+            )
+        same_tier = [
+            endpoint
+            for endpoint in eligible
+            if endpoint.tier_rank == conversation.tier_rank
+        ]
+        if same_tier:
+            return same_tier, "affinity_same_tier_fallback", None
+        next_rank = min(endpoint.tier_rank for endpoint in eligible)
+        return (
+            [
+                endpoint
+                for endpoint in eligible
+                if endpoint.tier_rank == next_rank
+            ],
+            "monotonic_upgrade",
+            None,
+        )
+
     def _remote_profile_key(
         self,
         evaluation: Evaluation,
@@ -1090,10 +1286,20 @@ class RoutingPolicy:
                     item
                     for item in workers
                     if item.worker_id == conversation.deployment_id
-                    and item.state == "available"
+                    and item.state in {"available", "busy", "leased"}
                 ),
                 None,
             )
+            if (
+                selected
+                and conversation.cache_generation
+                and selected.cache_generation
+                and conversation.cache_generation
+                != selected.cache_generation
+            ):
+                decision.affinity = "cache-reset"
+                decision.reason = "cache_generation_changed"
+        available: list[PhysicalDeployment] = []
         if selected is None:
             available = [
                 item for item in workers if item.state == "available"
@@ -1102,18 +1308,21 @@ class RoutingPolicy:
                 raise NoEligibleModelError(
                     "the local model pool has no available physical worker"
                 )
-            available.sort(
-                key=lambda item: (
-                    item.short_request_rank,
-                    _deployment_hash(routing_key, item.worker_id),
-                    item.worker_id,
-                )
+            available = await self._order_available_deployments(
+                endpoint,
+                available,
+                routing_key=routing_key,
+                protect_recent=conversation is None,
             )
             selected = available[0]
             if conversation and conversation.endpoint_id == endpoint.id:
                 decision.affinity = "physical-failover"
                 decision.reason = "physical_worker_unavailable"
-        candidates = [selected] if decision.affinity == "hit" else available
+        candidates = (
+            [selected]
+            if decision.affinity in {"hit", "cache-reset"}
+            else available or [selected]
+        )
         decision.deployment_candidates = tuple(
             (
                 item.worker_id,
@@ -1134,6 +1343,89 @@ class RoutingPolicy:
         )
         decision.deployment_max_images = selected.max_images
         decision.upstream_api_base = decision.deployment_candidates[0][1]
+
+    async def _order_available_deployments(
+        self,
+        endpoint: Endpoint,
+        deployments: list[PhysicalDeployment],
+        *,
+        routing_key: str,
+        protect_recent: bool,
+    ) -> list[PhysicalDeployment]:
+        def base_key(item: PhysicalDeployment) -> tuple[int, str, str]:
+            return (
+                item.short_request_rank,
+                _deployment_hash(routing_key, item.worker_id),
+                item.worker_id,
+            )
+
+        if (
+            not protect_recent
+            or endpoint.backend_type != "ai_pool"
+            or self.store is None
+        ):
+            return sorted(deployments, key=base_key)
+        recent = await self._recent_deployment_uses(
+            tuple(item.worker_id for item in deployments)
+        )
+        unprotected = [
+            item for item in deployments if item.worker_id not in recent
+        ]
+        if unprotected:
+            return sorted(unprotected, key=base_key)
+        return sorted(
+            deployments,
+            key=lambda item: (
+                recent.get(item.worker_id, 0.0),
+                *base_key(item),
+            ),
+        )
+
+    async def _recent_deployment_uses(
+        self,
+        deployment_ids: tuple[str, ...],
+    ) -> dict[str, float]:
+        if self.store is None:
+            return {}
+        result: dict[str, float] = {}
+        for deployment_id in deployment_ids:
+            value = await self.store.get_json(
+                f"router:deployment-recent:{deployment_id}"
+            )
+            if value and value.get("used_at") is not None:
+                result[deployment_id] = float(value["used_at"])
+        return result
+
+    async def mark_deployment_recent(
+        self,
+        decision: RouteDecision,
+        conversation_id: str | None,
+    ) -> None:
+        if (
+            self.store is None
+            or decision.endpoint.backend_type != "ai_pool"
+            or not decision.deployment_id
+        ):
+            return
+        ttl = max(
+            1,
+            math.ceil(
+                float(
+                    self.settings.section("routing").get(
+                        "affinity_capacity_wait_seconds",
+                        120,
+                    )
+                )
+            ),
+        )
+        await self.store.set_json(
+            f"router:deployment-recent:{decision.deployment_id}",
+            {
+                "used_at": time.time(),
+                "conversation_id": conversation_id,
+            },
+            ttl_seconds=ttl,
+        )
 
     async def _eligible_physical_deployments(
         self,
@@ -1323,6 +1615,7 @@ def _physical_deployment_from_status(
         ),
         ready=bool(value.get("ready")),
         state=str(value.get("state", "unknown")),
+        cache_generation=str(value.get("cache_generation", "")),
         config_drift=tuple(value.get("config_drift", ())),
         short_request_rank=(
             profile.short_request_rank
@@ -1348,44 +1641,31 @@ def updated_conversation_state(
     conversation_id: str,
     decision: RouteDecision,
     cache_generation: str,
+    branch_id: str | None = None,
+    parent_branch_id: str | None = None,
+    lineage_relation: str = "legacy",
     encrypted_capsule: str | None = None,
     boundary_hash: str | None = None,
 ) -> ConversationState:
-    if existing is None:
-        return ConversationState(
-            conversation_id=conversation_id,
-            public_model=decision.endpoint.public_model,
-            endpoint_id=decision.endpoint.id,
-            tier_rank=decision.endpoint.tier_rank,
-            task=decision.task,
-            last_seen=time.time(),
-            cache_generation=cache_generation,
-            deployment_id=decision.deployment_id or decision.endpoint.id,
-            upstream_api_base=decision.upstream_api_base,
-            encrypted_capsule=encrypted_capsule,
-            boundary_hash=boundary_hash,
-            migration_count=1 if decision.migration else 0,
-            route_profile=decision.route_profile,
-            complexity=decision.complexity,
-            provider_family=str(
-                decision.endpoint.metadata.get("provider", "")
-                or decision.endpoint.backend_type
-            ),
-            history_mode=decision.history_mode,
-        )
-    return replace(
-        existing,
+    return ConversationState(
+        conversation_id=conversation_id,
+        branch_id=branch_id or conversation_id,
+        parent_branch_id=parent_branch_id,
+        lineage_relation=lineage_relation,
         public_model=decision.endpoint.public_model,
         endpoint_id=decision.endpoint.id,
-        tier_rank=max(existing.tier_rank, decision.endpoint.tier_rank),
+        tier_rank=decision.endpoint.tier_rank,
         task=decision.task,
         last_seen=time.time(),
         cache_generation=cache_generation,
         deployment_id=decision.deployment_id or decision.endpoint.id,
         upstream_api_base=decision.upstream_api_base,
-        encrypted_capsule=encrypted_capsule or existing.encrypted_capsule,
-        boundary_hash=boundary_hash or existing.boundary_hash,
-        migration_count=existing.migration_count + (1 if decision.migration else 0),
+        encrypted_capsule=encrypted_capsule,
+        boundary_hash=boundary_hash,
+        migration_count=(
+            (existing.migration_count if existing else 0)
+            + (1 if decision.migration else 0)
+        ),
         route_profile=decision.route_profile,
         complexity=decision.complexity,
         provider_family=str(

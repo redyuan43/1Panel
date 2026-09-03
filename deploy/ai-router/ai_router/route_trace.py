@@ -398,6 +398,9 @@ class DecisionTrace:
             "key_id": key_id,
             "client_models": list(client_models or ()),
             "conversation_id": None,
+            "branch_id": None,
+            "parent_branch_id": None,
+            "lineage_relation": None,
             "protocol": protocol,
             "requested_model": requested_model,
             "selected_model": None,
@@ -447,6 +450,12 @@ class DecisionTrace:
         self,
         *,
         conversation_id: str | None = None,
+        conversation_mode: str | None = None,
+        branch_id: str | None = None,
+        parent_branch_id: str | None = None,
+        lineage_relation: str | None = None,
+        context_compacted: bool | None = None,
+        context_compaction_source: str | None = None,
         prompt_tokens: int | None = None,
         output_reserve_tokens: int | None = None,
         modalities: set[str] | None = None,
@@ -454,7 +463,21 @@ class DecisionTrace:
     ) -> None:
         if conversation_id is not None:
             self.payload["conversation_id"] = conversation_id
+        if branch_id is not None:
+            self.payload["branch_id"] = branch_id
+        if parent_branch_id is not None:
+            self.payload["parent_branch_id"] = parent_branch_id
+        if lineage_relation is not None:
+            self.payload["lineage_relation"] = lineage_relation
         request = self.payload["request"]
+        if conversation_mode is not None:
+            request["conversation_mode"] = conversation_mode
+        if context_compacted is not None:
+            request["context_compacted"] = context_compacted
+        if context_compaction_source is not None:
+            request["context_compaction_source"] = (
+                context_compaction_source
+            )
         if prompt_tokens is not None:
             request["prompt_tokens"] = int(prompt_tokens)
         if output_reserve_tokens is not None:
@@ -1200,6 +1223,9 @@ class RouteTraceStore:
             "completed_at": row["completed_at"],
             "client_id": row["client_id"],
             "conversation_id": row["conversation_id"],
+            "branch_id": payload.get("branch_id"),
+            "parent_branch_id": payload.get("parent_branch_id"),
+            "lineage_relation": payload.get("lineage_relation"),
             "protocol": row["protocol"],
             "requested_model": row["requested_model"],
             "selected_model": row["selected_model"],

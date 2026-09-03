@@ -53,6 +53,10 @@ v2 将 Router 分为两个连续阶段：
 DeepSeek 对图片请求始终不合格。长上下文不会覆盖语义画像，只参与完整上下文
 资格判断。
 
+云端端点支持自身配置的并发容量，不使用本地物理卡保护策略。同一会话一旦选择
+某个云端模型，只要该模型仍满足健康、模态、协议、工具和完整上下文约束，就持续
+使用该模型；确实不可用时才按上表顺序选择不低于当前层级的下一个专家。
+
 ## 上下文与压缩
 
 资格公式固定为：
@@ -86,6 +90,15 @@ compaction:
 允许压缩时只替换历史消息，不改变客户端输出上限；压缩后重新计数并重新运行
 完整候选资格检查。
 
+客户端已经自行压缩上下文时，应发送：
+
+```text
+X-1Panel-Context-Compacted: true
+```
+
+该标记表示压缩已经发生，不是压缩权限。Router 会跳过旧亲和和旧存储历史并开启
+新的缓存时期；显式会话 ID 保持不变，没有显式 ID 时生成新的推断 ID。
+
 跨 Provider 时会保留可见内容、工具调用和工具结果，同时删除 Provider 私有
 ID、加密推理项和隐藏推理字段。DeepSeek 工具历史缺少
 `reasoning_content` 时不会发送上游请求：Auto 会先跳过 DeepSeek，全部候选
@@ -104,6 +117,8 @@ X-1Panel-Route-Strategy
 X-1Panel-Route-Profile
 X-1Panel-Context-Required
 X-1Panel-History-Mode
+X-1Panel-Context-Compacted
+X-1Panel-Context-Compaction-Source
 ```
 
 `/v1/models` 的 `auto` 条目新增：
@@ -138,9 +153,11 @@ registry max_concurrency = 2
 AI_ROUTER_CODEX_ACCOUNT_MAX_CONCURRENCY = 2
 ```
 
-不同会话可以并行，同一会话继续由 Router 会话锁串行化。第三个显式 Sol 请求
-等待最多 3 秒后返回 `429 codex_account_busy`；Auto 请求在容量获取失败后继续
-下一云端候选。
+不同分支可以并行；同一个已完成父分支也可以同时产生多个兄弟分支。Router 不再
+用推断出的会话 ID 串行化完整请求，而是只由底层部署容量控制并发。第三个显式
+Sol 请求等待最多 3 秒后返回 `429 codex_account_busy`。已经绑定云端模型的续轮
+遇到 `429`、`5xx` 或网络故障时不会静默切换模型；只有能力或上下文硬约束不满足
+时才允许升级。
 
 ChatGPT Codex 订阅通道不接受公开 Responses API 的
 `max_output_tokens` 参数。Router 将该端点标记为

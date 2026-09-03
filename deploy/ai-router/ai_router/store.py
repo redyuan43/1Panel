@@ -19,6 +19,11 @@ class StateStore(Protocol):
 
     async def list_json(self, prefix: str) -> list[dict[str, Any]]: ...
 
+    async def list_json_items(
+        self,
+        prefix: str,
+    ) -> list[tuple[str, dict[str, Any]]]: ...
+
     async def increment_counters(
         self,
         key: str,
@@ -98,6 +103,19 @@ class InMemoryStateStore:
                 if not key.startswith(prefix) or not isinstance(item.value, dict):
                     continue
                 result.append(json.loads(json.dumps(item.value)))
+            return result
+
+    async def list_json_items(
+        self,
+        prefix: str,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        async with self._lock:
+            self._purge_locked()
+            result = []
+            for key, item in self._values.items():
+                if not key.startswith(prefix) or not isinstance(item.value, dict):
+                    continue
+                result.append((key, json.loads(json.dumps(item.value))))
             return result
 
     async def increment_counters(
@@ -302,6 +320,23 @@ class RedisStateStore:
                 continue
             if isinstance(parsed, dict):
                 result.append(parsed)
+        return result
+
+    async def list_json_items(
+        self,
+        prefix: str,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        result: list[tuple[str, dict[str, Any]]] = []
+        async for key in self._client.scan_iter(match=f"{prefix}*"):
+            value = await self._client.get(key)
+            if not value:
+                continue
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                result.append((str(key), parsed))
         return result
 
     async def increment_counters(

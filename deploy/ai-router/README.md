@@ -20,14 +20,14 @@ Agent 与第三方调用示例见
 - `GET/POST/PATCH /api/clients`：客户端账号、独立限额、模型权限和多 Key 管理
 - `model=auto` 的能力、上下文、健康、质量、负载和层级筛选
 - 显式模型严格匹配，不静默换成其他模型
-- 会话亲和、同会话并发 `409`、每个逻辑部署一路并发
-- 新请求容量满时立即尝试下一候选；会话亲和最多等待 3 秒
+- 不可变会话分支、同父分叉并发、每个逻辑部署一路并发
+- 新会话避开最近 120 秒使用过的本地 worker；旧会话亲和最多等待 120 秒
 - 本地容量全部占满时按预算策略进入云端，否则返回 `429`
 - 单次可控故障回退；流式请求和工具请求不自动重放
 - 同模型换 worker 可携带完整历史；跨模型迁移必须生成加密迁移胶囊
 - 独立设置页与 JSONL 审计日志
 - 自动刷新的运维控制台，展示运行中请求、路由结果、告警和最近流量
-- Redis 持久会话状态；LiteLLM 和 Redis 不暴露宿主端口
+- Redis 持久会话分支状态；LiteLLM 和 Redis 不暴露宿主端口
 - 独立 SQLite 训练归档；完整对话压缩并加密后永久保存
 - Codex Pro 订阅通过独立 OAuth 适配器接入，凭据不与桌面 Codex 共用
 - 图片和音频二进制数据不按 Base64 文本计入 TPM；媒体使用独立保守 Token
@@ -101,7 +101,7 @@ POST /api/route-traces/{request_id}/reviews
 2. `x-litellm-session-id`
 3. Responses API 的 `conversation`
 4. 已记录的 `previous_response_id`
-5. Chat 完整历史的稳定前缀哈希
+5. Chat 完整历史的语义规范化前缀哈希
 
 没有显式稳定 ID 的请求仍可执行。Router 会根据 Chat 历史或 Responses
 关联生成/恢复推断 ID，并返回
@@ -117,14 +117,14 @@ V100 16GB + P40 混合 worker。池最多可并行处理六个请求，同一 wo
 Responses API 暂时通过 LiteLLM 访问逻辑池，因为物理 worker 的 Responses
 POST 能力尚未完成真实请求验证，响应会标记为逻辑池亲和。
 
-Edge、Ivan 和 AMD 当前各视为一个物理部署。跨物理部署不等于独占 GPU，
-路由器只保存亲和关系和排队优先级。
+Ivan 和 AMD 当前各视为一个物理部署。Edge 端点整体禁用，不参与显式或
+Auto 路由。跨物理部署不等于独占 GPU，路由器只保存亲和关系和排队优先级。
 
-会话亲和是面向 KV/prompt cache 的硬件软锁：同一会话会在 5 分钟至 24 小时内
-固定到同一物理 deployment，生产默认 24 小时，每次成功续轮都会刷新租约。软锁
-不会让 GPU 在空闲时被某个会话独占，其他会话仍可使用该硬件。没有显式会话
-头的 Chat 客户端会通过完整历史前缀自动恢复会话 ID，因此 WorkBuddy 等只会
-重发 messages 的客户端也能回到原 worker。
+会话亲和以成功响应形成的不可变分支为单位：Router 只用完整规范化历史前缀
+匹配父分支，不使用尾部模糊匹配，也不把客户端完整 Chat 正文与服务端历史拼接。
+同一个父分支可以并行产生多个子分支，互不覆盖。续轮优先固定到父分支的模型和
+物理 deployment；新的链路优先选择最近 120 秒未使用的合格 worker。客户端声明
+上下文已压缩时会切断旧亲和。worker 进程代际变化时保留模型选择，但标记缓存重置。
 
 llama.cpp 后端使用按 MiB 限额的主机内存 prompt cache 保存被新任务换出的
 KV，容量满后按 LRU 淘汰，不按亲和 TTL 无限占用显存。控制台记录实际
@@ -137,8 +137,11 @@ KV，容量满后按 LRU 淘汰，不按亲和 TTL 无限占用显存。控制�
 
 - 新的 `auto` 请求不在首选模型前长期排队，容量锁不可用时立即尝试下一个
   合格端点。
-- 已绑定会话最多等待原 deployment 3 秒，以优先保留 KV cache；超时后先
-  尝试同模型其他 worker，再按模型候选顺序迁移。
+- 已绑定本地会话最多等待原 deployment 120 秒，以优先保留 KV cache；等待队列
+  按物理 worker 隔离，不阻塞同一池的其他 worker。超时后先尝试同模型其他
+  worker，再尝试同层级兼容端点，最后只向更高层级迁移。
+- 云端会话只要原模型仍完整合格就持续使用原模型；原模型失效后才按画像与复杂度
+  对应的固定云端专家顺序选择下一个不降级模型。
 - 显式模型只能在同模型 deployment 间分配，不能跨模型静默替换。
 - 容量繁忙不会写入健康 cooldown，也不消耗网络故障重试次数。
 - 所有本地候选均忙时，`cloud_or_429` 会在云端开关、自动升级和预算均允许
@@ -149,7 +152,7 @@ KV，容量满后按 LRU 淘汰，不按亲和 TTL 无限占用显存。控制�
 ```yaml
 routing:
   provider_priority: local_first
-  affinity_capacity_wait_seconds: 3
+  affinity_capacity_wait_seconds: 120
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
 ```
@@ -165,8 +168,7 @@ routing:
 ## Router 重启与租约
 
 两个 API 实例使用固定 ID `router-api-local` 和 `router-api-tail`，每次启动
-生成新的 boot ID。容量、会话锁、客户端并发和队列成员均带有实例与 boot
-归属。
+生成新的 boot ID。容量、客户端并发和队列成员均带有实例与 boot 归属。
 
 某个 API 实例重启时，只清理该实例上一次运行留下的租约，不会删除另一个
 实例仍在使用的容量。被中断的请求记录为

@@ -136,7 +136,12 @@ class Scheduler:
         if not deployment_ids:
             raise ValueError("at least one deployment candidate is required")
         await lease.release_deployment()
-        queue_key = f"router:queue:{endpoint_id}"
+        queue_scope = (
+            f"deployment:{deployment_ids[0]}"
+            if affinity_priority and len(deployment_ids) == 1
+            else f"endpoint:{endpoint_id}"
+        )
+        queue_key = f"router:queue:{queue_scope}"
         token = lease.owner_token
         queue_member = f"{token}:{request_id}"
         priority = False

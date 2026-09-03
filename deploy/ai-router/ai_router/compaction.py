@@ -299,7 +299,7 @@ def replace_messages(
 
 
 def message_hash(message: dict[str, Any]) -> str:
-    return _value_hash(_canonical_message_for_hash(message))
+    return _value_hash(canonical_message_for_hash(message))
 
 
 def _legacy_message_hash(message: dict[str, Any]) -> str:
@@ -327,10 +327,60 @@ def _last_message_index(
     return result
 
 
-def _canonical_message_for_hash(
+def canonical_message_for_hash(
     message: dict[str, Any],
 ) -> dict[str, Any]:
-    result = copy.deepcopy(message)
+    role = str(message.get("role", "")).lower()
+    item_type = str(message.get("type", ""))
+    if role in {"system", "developer", "user", "assistant", "tool"}:
+        allowed = {"role", "content", "name"}
+        if role == "assistant":
+            allowed.update({"tool_calls", "refusal", "audio"})
+        elif role == "tool":
+            allowed.add("tool_call_id")
+        result = {
+            key: copy.deepcopy(value)
+            for key, value in message.items()
+            if key in allowed
+        }
+    elif item_type == "function_call":
+        allowed = {
+            "type",
+            "call_id",
+            "name",
+            "arguments",
+            "status",
+        }
+        result = {
+            key: copy.deepcopy(value)
+            for key, value in message.items()
+            if key in allowed
+        }
+    elif item_type == "function_call_output":
+        allowed = {
+            "type",
+            "call_id",
+            "output",
+            "status",
+        }
+        result = {
+            key: copy.deepcopy(value)
+            for key, value in message.items()
+            if key in allowed
+        }
+    elif item_type == "message":
+        allowed = {"type", "role", "content", "status", "name"}
+        result = {
+            key: copy.deepcopy(value)
+            for key, value in message.items()
+            if key in allowed
+        }
+    else:
+        result = copy.deepcopy(message)
+    if "content" in result:
+        result["content"] = _canonical_content_for_hash(
+            result["content"]
+        )
     tool_calls = result.get("tool_calls")
     if not isinstance(tool_calls, list):
         return result
@@ -353,7 +403,32 @@ def _canonical_message_for_hash(
             sort_keys=True,
             separators=(",", ":"),
         )
+    content = result.get("content")
+    if role == "assistant" and tool_calls and (
+        content is None or content == ""
+    ):
+        result["content"] = None
     return result
+
+
+def _canonical_content_for_hash(value: Any) -> Any:
+    if not isinstance(value, list) or not value:
+        return copy.deepcopy(value)
+    text_parts: list[str] = []
+    for part in value:
+        if isinstance(part, str):
+            text_parts.append(part)
+            continue
+        if (
+            isinstance(part, dict)
+            and str(part.get("type", "")).lower()
+            in {"text", "input_text", "output_text"}
+            and isinstance(part.get("text"), str)
+        ):
+            text_parts.append(str(part["text"]))
+            continue
+        return copy.deepcopy(value)
+    return "".join(text_parts)
 
 
 def _reject_json_constant(value: str) -> None:

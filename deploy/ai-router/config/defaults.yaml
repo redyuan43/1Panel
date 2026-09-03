@@ -22,7 +22,7 @@ routing:
   strategy: intelligent_v2
   default_output_reserve_tokens: 4096
   provider_priority: local_first
-  affinity_capacity_wait_seconds: 3
+  affinity_capacity_wait_seconds: 120
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
   auto_max_input_tokens: 196608

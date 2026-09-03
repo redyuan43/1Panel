@@ -25,6 +25,7 @@ _VLLM_METRIC_PATTERNS = {
     "kv": re.compile(r"^vllm:kv_cache_usage_perc(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
     "prefix_queries": re.compile(r"^vllm:prefix_cache_queries_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
     "prefix_hits": re.compile(r"^vllm:prefix_cache_hits_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
+    "process_start": re.compile(r"^process_start_time_seconds\s+([0-9.eE+-]+)$", re.MULTILINE),
 }
 
 
@@ -317,7 +318,7 @@ class HealthMonitor:
             load_headroom=max(0.0, 1.0 - load),
             latency_score=max(0.0, 1.0 - min(1.0, waiting / capacity)),
             cache_generation=_generation(
-                health_response.headers.get("server", ""),
+                str(_metric(metrics, "process_start")),
                 str(endpoint.metadata.get("runtime_generation", "")),
             ),
             eligible_context_tokens=endpoint.safe_context_tokens,
@@ -340,6 +341,21 @@ class HealthMonitor:
         slots = slots_response.json()
         processing = sum(bool(item.get("is_processing")) for item in slots)
         slot_ids = [str(item.get("id")) for item in slots]
+        task_ids = [
+            int(item.get("id_task", 0))
+            for item in slots
+            if isinstance(item, dict)
+        ]
+        max_task_id = max(task_ids, default=0)
+        generation_key = f"router:cache-generation-state:{endpoint.id}"
+        previous = await self.store.get_json(generation_key) or {}
+        epoch = max(1, int(previous.get("epoch", 1)))
+        if max_task_id < int(previous.get("max_task_id", 0)):
+            epoch += 1
+        await self.store.set_json(
+            generation_key,
+            {"epoch": epoch, "max_task_id": max_task_id},
+        )
         return EndpointStatus(
             endpoint_id=endpoint.id,
             healthy=True,
@@ -349,12 +365,18 @@ class HealthMonitor:
             cache_generation=_generation(
                 health_response.headers.get("server", ""),
                 ",".join(slot_ids),
+                str(epoch),
             ),
             eligible_context_tokens=min(
                 endpoint.safe_context_tokens,
                 max((int(item.get("n_ctx", 0)) for item in slots), default=0),
             ),
-            detail={"processing": processing, "slots": len(slots)},
+            detail={
+                "processing": processing,
+                "slots": len(slots),
+                "max_task_id": max_task_id,
+                "cache_epoch": epoch,
+            },
         )
 
 
@@ -492,6 +514,7 @@ def _physical_deployment(
         runtime_fingerprint=deployment_fingerprint,
         ready=bool(worker.get("ready")),
         state=str(worker.get("state", "unknown")),
+        cache_generation=str(worker.get("cache_generation", "")),
         config_drift=tuple(drift),
         short_request_rank=(
             profile.short_request_rank

@@ -213,6 +213,9 @@ curl --fail-with-body \
 | Edge Flash Next | 未启用 | 当前 vLLM 图像请求会导致容器退出 |
 | DeepSeek | 未启用 | API 明确返回 `This model does not support image` |
 
+Edge 当前是 Router 端点整体禁用，不参与文本、图像、显式模型或 Auto 调度；
+模型服务本身保持运行，后续独立验收后再决定是否重新开放。
+
 Chat Completions 示例：
 
 ```json
@@ -376,7 +379,10 @@ X-1Panel-Conversation-ID: <application>:<tenant>:<opaque-conversation-id>
 
 - 同一会话优先回到原 deployment，以复用 prefix/KV cache。
 - 该 deployment 空闲时仍可服务其他会话，不会被一个会话独占。
-- 原 deployment 持续繁忙时，Router 最多等待 3 秒后迁移到兼容模型。
+- 原本地 deployment 持续繁忙时，Router 最多等待 120 秒；随后依次尝试同模型
+  其他 worker、同层级兼容端点和更高层级端点，不向更低层级迁移。
+- 云端会话优先持续使用原模型；原模型不再完整合格时，才按画像与复杂度对应的
+  固定专家顺序切换。
 - 迁移后可能需要重新 prefill；跨模型且不能直接携带完整历史时才使用压缩胶囊。
 - 后端 cache 容量有限并按自身淘汰策略回收，24 小时亲和不保证缓存永不淘汰。
 
@@ -387,6 +393,17 @@ Chat 客户端在每轮请求中应发送完整、合法的消息历史。不要
 中返回 `X-1Panel-Conversation-Mode: inferred`。当前没有用于强制无状态模式
 的请求头；独立批处理只需省略会话 ID，并且不要把响应中的推断 ID复用于其他
 业务任务。
+
+客户端主动压缩过上下文时发送：
+
+```text
+X-1Panel-Context-Compacted: true
+```
+
+带稳定会话 ID 时，Router 保留该 ID，但跳过旧亲和和旧存储历史并建立新的缓存
+时期；未带稳定 ID 时生成新的推断 ID。该标记与
+`X-1Panel-Allow-Compaction` 不同：前者表示客户端已经完成压缩，后者只授权
+Router 在必要时执行压缩。
 
 ## 11. 路由可观测性
 
@@ -407,6 +424,8 @@ Chat 客户端在每轮请求中应发送完整、合法的消息历史。不要
 | `X-1Panel-Tool-History-Repaired` | 本次安全修复的工具历史数量 |
 | `X-1Panel-Conversation-ID` | Router 最终使用的会话 ID |
 | `X-1Panel-Conversation-Mode` | `stateful` 或 `inferred` |
+| `X-1Panel-Context-Compacted` | 本次请求是否开启了新的压缩缓存时期 |
+| `X-1Panel-Context-Compaction-Source` | `client` 或 `router` |
 
 排障和反馈至少携带 `X-1Panel-Route-Request-ID`，不要附带 API Key 或完整敏感
 prompt。

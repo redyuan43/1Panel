@@ -8,6 +8,7 @@ from typing import Any, Protocol
 
 from .compaction import (
     ContextCompactor,
+    canonical_message_for_hash,
     extract_messages,
     message_hash,
     replace_messages,
@@ -143,7 +144,7 @@ def _normalize_chat_tool_call(
     function = value.get("function")
     if not isinstance(function, dict):
         return None
-    return {
+    result = {
         "id": str(value.get("id", "")),
         "type": "function",
         "function": {
@@ -152,6 +153,11 @@ def _normalize_chat_tool_call(
             if key in function
         },
     }
+    if "arguments" in result["function"]:
+        result["function"]["arguments"] = _canonical_tool_arguments(
+            result["function"]["arguments"]
+        )
+    return result
 
 
 def _normalize_responses_item(
@@ -185,11 +191,31 @@ def _normalize_responses_item(
         }
     else:
         return None
-    return {
+    result = {
         key: copy.deepcopy(value)
         for key, value in item.items()
         if key in allowed
     }
+    if item_type == "function_call" and "arguments" in result:
+        result["arguments"] = _canonical_tool_arguments(
+            result["arguments"]
+        )
+    return result
+
+
+def _canonical_tool_arguments(value: Any) -> Any:
+    if not isinstance(value, str):
+        return copy.deepcopy(value)
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+    return json.dumps(
+        parsed,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 def history_identities(
@@ -197,11 +223,10 @@ def history_identities(
 ) -> tuple[str, ...]:
     if not messages:
         return ()
-    values = [
-        f"full-{_messages_hash(messages)}",
-        f"tail-{_messages_hash(messages[-4:])}",
-    ]
-    return tuple(dict.fromkeys(values))
+    canonical = _canonical_history_items(messages)
+    if not canonical:
+        return ()
+    return (f"v3-full-{_messages_hash(canonical)}",)
 
 
 def history_lookup_identities(
@@ -221,6 +246,29 @@ def _messages_hash(messages: list[dict[str, Any]]) -> str:
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_history_items(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in messages:
+        if not isinstance(item, dict):
+            continue
+        if "role" in item:
+            normalized = _normalize_chat_item(item)
+        else:
+            normalized = _normalize_responses_item(item)
+        if normalized is None:
+            continue
+        normalized = canonical_message_for_hash(normalized)
+        role = str(normalized.get("role", "")).lower()
+        if role == "assistant" and normalized.get("tool_calls"):
+            content = normalized.get("content")
+            if content is None or content == "":
+                normalized["content"] = None
+        result.append(normalized)
+    return result
 
 
 async def apply_stored_history(
@@ -294,7 +342,7 @@ async def persist_history(
     await conversations.map_history(
         client_id,
         history_identities(messages),
-        state.conversation_id,
+        state.branch_id or state.conversation_id,
     )
 
 

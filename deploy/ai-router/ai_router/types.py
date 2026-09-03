@@ -122,6 +122,7 @@ class PhysicalDeployment:
     runtime_fingerprint: str
     ready: bool
     state: str
+    cache_generation: str = ""
     config_drift: tuple[str, ...] = ()
     short_request_rank: int = 0
     error_code: str | None = None
@@ -132,7 +133,15 @@ class PhysicalDeployment:
         return self.ready and not self.config_drift
 
     def supports_modalities(self, required: set[str]) -> bool:
-        return required.issubset(set(self.modalities))
+        if not required.issubset(set(self.modalities)):
+            return False
+        if "image" not in required:
+            return True
+        status = self.vision_status.lower()
+        return not any(
+            marker in status
+            for marker in ("disabled", "failed", "pending", "unverified")
+        )
 
     def supports_image_count(self, image_count: int) -> bool:
         return (
@@ -151,6 +160,7 @@ class PhysicalDeployment:
         fields = dict(value)
         fields.pop("schedulable", None)
         fields.setdefault("max_images", None)
+        fields.setdefault("cache_generation", "")
         for key in (
             "gpu_ids",
             "gpu_uuids",
@@ -229,6 +239,9 @@ class ConversationState:
     tier_rank: int
     task: str
     last_seen: float
+    branch_id: str | None = None
+    parent_branch_id: str | None = None
+    lineage_relation: str = "new"
     cache_generation: str = ""
     deployment_id: str | None = None
     upstream_api_base: str | None = None
@@ -245,7 +258,21 @@ class ConversationState:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ConversationState":
-        return cls(**value)
+        fields = dict(value)
+        fields.setdefault("branch_id", None)
+        fields.setdefault("parent_branch_id", None)
+        fields.setdefault("lineage_relation", "legacy")
+        return cls(**fields)
+
+
+@dataclass(frozen=True)
+class LineageContext:
+    lineage_id: str
+    branch_id: str
+    parent_branch_id: str | None
+    mode: str
+    relation: str
+    parent: ConversationState | None = None
 
 
 @dataclass
@@ -289,6 +316,12 @@ class RouteDecision:
     identity_revision: str | None = None
     legacy_model_alias_used: bool = False
     response_redactions: int = 0
+    conversation_mode: str | None = None
+    branch_id: str | None = None
+    parent_branch_id: str | None = None
+    lineage_relation: str | None = None
+    context_compacted: bool = False
+    context_compaction_source: str | None = None
     trace: Any | None = field(default=None, repr=False, compare=False)
 
     def response_headers(self, request_id: str) -> dict[str, str]:
@@ -313,6 +346,18 @@ class RouteDecision:
             ),
             "X-1Panel-History-Mode": self.history_mode,
         }
+        if self.context_compacted:
+            values["X-1Panel-Context-Compacted"] = "true"
+        if self.branch_id:
+            values["X-1Panel-Branch-ID"] = self.branch_id
+        if self.parent_branch_id:
+            values["X-1Panel-Parent-Branch-ID"] = self.parent_branch_id
+        if self.lineage_relation:
+            values["X-1Panel-Lineage-Relation"] = self.lineage_relation
+        if self.context_compaction_source:
+            values["X-1Panel-Context-Compaction-Source"] = (
+                self.context_compaction_source
+            )
         if self.deployment_profile_id:
             values["X-1Panel-Route-Deployment-Profile"] = (
                 self.deployment_profile_id

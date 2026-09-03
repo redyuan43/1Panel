@@ -731,6 +731,17 @@ def _request_rows(
                 "client_id": event.get("client_id"),
                 "key_id": event.get("key_id"),
                 "conversation_id": event.get("conversation_id"),
+                "conversation_mode": event.get("conversation_mode"),
+                "branch_id": event.get("branch_id"),
+                "parent_branch_id": event.get("parent_branch_id"),
+                "lineage_relation": event.get("lineage_relation"),
+                "context_compacted": event.get(
+                    "context_compacted",
+                    False,
+                ),
+                "context_compaction_source": event.get(
+                    "context_compaction_source"
+                ),
                 "requested_model": event.get("requested_model"),
                 "selected_model": event.get("selected_model"),
                 "endpoint_id": event.get("endpoint_id"),

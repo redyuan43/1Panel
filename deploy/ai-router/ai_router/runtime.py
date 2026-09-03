@@ -19,6 +19,7 @@ from .config import Registry, Settings
 from .evaluator import TaskEvaluator
 from .endpoint_config import EndpointConfigManager
 from .health import HealthMonitor
+from .history import history_identities
 from .policy import ConversationRepository, RoutingPolicy
 from .route_trace import RouteTraceStore
 from .scheduler import ClientLimiter, Scheduler
@@ -120,11 +121,66 @@ class RouterRuntime:
                 client_id=item["client_id"],
                 key_id=item["key_id"],
             )
+        history_indexes = await self.store.list_json_items(
+            "router:history-conversation:"
+        )
+        clients_by_conversation: dict[str, set[str]] = {}
+        history_prefix = "router:history-conversation:"
+        for key, value in history_indexes:
+            conversation_id = str(value.get("conversation_id", ""))
+            suffix = key.removeprefix(history_prefix)
+            if not conversation_id or ":" not in suffix:
+                continue
+            client_id, _identity = suffix.rsplit(":", 1)
+            clients_by_conversation.setdefault(
+                conversation_id,
+                set(),
+            ).add(client_id)
+        reindexed = 0
+        states = [
+            *await self.store.list_json("router:conversation:"),
+            *await self.store.list_json("router:conversation-branch:"),
+        ]
+        for value in states:
+            conversation_id = str(
+                value.get("branch_id")
+                or value.get("conversation_id", "")
+            )
+            encrypted_capsule = value.get("encrypted_capsule")
+            if not conversation_id or not encrypted_capsule:
+                continue
+            try:
+                messages = self.compactor.cipher.decrypt(
+                    str(encrypted_capsule)
+                )
+            except Exception:
+                continue
+            if not isinstance(messages, list):
+                continue
+            identities = tuple(
+                identity
+                for identity in history_identities(messages)
+                if identity.startswith("v3-")
+            )
+            for client_id in clients_by_conversation.get(
+                conversation_id,
+                set(),
+            ):
+                await self.conversations.map_history(
+                    client_id,
+                    identities,
+                    conversation_id,
+                )
+                reindexed += 1
+        if reindexed:
+            self.audit.write(
+                "conversation_history_indexes_rebuilt",
+                records=reindexed,
+            )
         if (
             self.training
             and await self.training.needs_legacy_backfill()
         ):
-            states = await self.store.list_json("router:conversation:")
             backfilled = await self.training.backfill_conversation_snapshots(
                 states,
                 self.state_encryption_key,
@@ -471,7 +527,7 @@ def build_runtime(
         auth=AuthManager(settings, clients),
         evaluator=evaluator,
         compactor=compactor,
-        policy=RoutingPolicy(registry, settings, health),
+        policy=RoutingPolicy(registry, settings, health, store=store),
         audit=AuditLog(audit_path),
         route_traces=RouteTraceStore(
             trace_database_path,

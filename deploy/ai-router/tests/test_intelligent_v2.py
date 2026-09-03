@@ -36,6 +36,7 @@ from ai_router.runtime import build_runtime
 from ai_router.store import InMemoryStateStore
 from ai_router.token_counter import SimpleTokenCounter
 from ai_router.types import (
+    ConversationState,
     Endpoint,
     EndpointStatus,
     Evaluation,
@@ -301,6 +302,90 @@ def test_v2_remote_order_is_profile_driven(
     )
     assert decision.endpoint.id == expected
     assert decision.remote_fallback_position == 1
+
+
+def test_v2_cloud_conversation_keeps_original_expert(
+    tmp_path: Path,
+) -> None:
+    policy, registry = policy_for(
+        tmp_path,
+        local_healthy=False,
+    )
+    endpoint = registry.by_id("cloud-deepseek-v4-flash")
+    assert endpoint is not None
+    conversation = ConversationState(
+        conversation_id="cloud-conversation",
+        public_model=endpoint.public_model,
+        endpoint_id=endpoint.id,
+        tier_rank=endpoint.tier_rank,
+        task="general",
+        last_seen=time.time(),
+        deployment_id=endpoint.id,
+        route_profile="general",
+        complexity="standard",
+    )
+    decision = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "general",
+                None,
+                1.0,
+                "test",
+                route_profile="general",
+                complexity="standard",
+            ),
+            prompt_tokens=1000,
+            output_reserve_tokens=4096,
+            modalities={"text"},
+            has_tools=False,
+            conversation=conversation,
+        )
+    )
+    assert decision.endpoint.id == endpoint.id
+    assert decision.affinity == "hit"
+
+
+def test_v2_cloud_conversation_does_not_switch_on_transient_failure(
+    tmp_path: Path,
+) -> None:
+    policy, registry = policy_for(
+        tmp_path,
+        local_healthy=False,
+    )
+    endpoint = registry.by_id("zhipu-glm-5.3-flash")
+    assert endpoint is not None
+    conversation = ConversationState(
+        conversation_id="cloud-conversation",
+        public_model=endpoint.public_model,
+        endpoint_id=endpoint.id,
+        tier_rank=endpoint.tier_rank,
+        task="general",
+        last_seen=time.time(),
+        deployment_id=endpoint.id,
+        route_profile="general",
+        complexity="standard",
+    )
+    with pytest.raises(NoEligibleModelError):
+        run(
+            policy.choose(
+                requested_model="auto",
+                evaluation=Evaluation(
+                    "general",
+                    None,
+                    1.0,
+                    "test",
+                    route_profile="general",
+                    complexity="standard",
+                ),
+                prompt_tokens=1000,
+                output_reserve_tokens=4096,
+                modalities={"text"},
+                has_tools=False,
+                conversation=conversation,
+                excluded_endpoint_ids={endpoint.id},
+            )
+        )
 
 
 def test_v2_output_limit_skips_codex_subscription(

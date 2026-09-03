@@ -52,15 +52,24 @@ const reasonLabels = {
   preferred_tier: "高难任务升级",
   logical_affinity: "逻辑亲和",
   tier_requirement: "层级要求",
+  affinity_same_tier_fallback: "同层级会话回退",
 };
 
 const affinityLabels = {
-  new: "新会话",
-  hit: "缓存命中",
+  new: "新链路",
+  hit: "亲和命中",
   "logical-hit": "逻辑命中",
   explicit: "显式",
   migrated: "已迁移",
   "physical-failover": "同模型迁移",
+  "cache-reset": "缓存代际重置",
+};
+
+const lineageRelationLabels = {
+  new: "新链路",
+  continuation: "父分支续接",
+  compaction_reset: "压缩重置",
+  legacy: "旧记录",
 };
 
 const statusLabels = {
@@ -1055,6 +1064,17 @@ function renderRequestTable() {
         )}</td>
         <td>${formatTime(item.timestamp)}</td>
         <td>
+          <code class="request-id-full">${escapeHtml(item.conversation_id || "—")}</code>
+          <span class="table-secondary request-id-full">分支 ${escapeHtml(item.branch_id || "—")}</span>
+          <span class="table-secondary request-id-full">父分支 ${escapeHtml(item.parent_branch_id || "—")}</span>
+          <span class="table-secondary">${
+            item.context_compacted
+              ? `${item.context_compaction_source === "client" ? "客户端" : "Router"}压缩`
+              : lineageRelationLabels[item.lineage_relation]
+                || (item.conversation_mode === "stateful" ? "显式链路" : "推断链路")
+          }</span>
+        </td>
+        <td>
           <strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong>
           <span class="table-secondary request-id-full">${escapeHtml(item.request_id || "—")}</span>
         </td>
@@ -1079,7 +1099,7 @@ function renderRequestTable() {
         <td>${item.latency_ms == null ? formatRelative(item.timestamp) : formatDuration(item.latency_ms)}</td>
       </tr>
     `).join("")
-    : emptyRow(13, "没有符合筛选条件的请求");
+    : emptyRow(14, "没有符合筛选条件的请求");
 }
 
 async function loadRouteAudit(silent = false) {
@@ -1326,6 +1346,8 @@ function renderTraceDetail() {
   byId("trace-detail-meta").innerHTML = [
     `请求 <code>${escapeHtml(shortId(trace.request_id, 20))}</code>`,
     `客户端 <strong>${escapeHtml(trace.client_id)}</strong>`,
+    `会话 <code title="${escapeHtml(trace.conversation_id || "")}">${escapeHtml(shortId(trace.conversation_id || "—", 24))}</code>`,
+    `上下文 <strong>${trace.request?.context_compacted ? `${trace.request?.context_compaction_source === "client" ? "客户端" : "Router"}压缩` : trace.request?.conversation_mode === "stateful" ? "显式 ID" : "推断 ID"}</strong>`,
     `画像 <strong>${escapeHtml(trace.task || "—")}</strong>`,
     `Token <strong>${formatTokens(trace.request?.prompt_tokens || 0)} + ${formatTokens(trace.request?.output_reserve_tokens || 0)}</strong>`,
     `策略 <code>${escapeHtml(trace.settings_fingerprint || "—")}</code>`,

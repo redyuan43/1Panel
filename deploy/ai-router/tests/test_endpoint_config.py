@@ -227,7 +227,7 @@ def test_reset_removes_active_and_draft_overrides() -> None:
     assert record["draft"] is None
     effective = run(manager.effective_registry()).by_id(endpoint_id)
     assert effective is not None
-    assert effective.enabled is True
+    assert effective.enabled is False
     assert effective.safe_context_tokens == 500000
 
 
