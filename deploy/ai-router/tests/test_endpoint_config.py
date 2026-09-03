@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 
 import pytest
+import yaml
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
@@ -157,8 +158,29 @@ def test_endpoint_actions_are_immediate_and_revision_guarded() -> None:
     assert restored is not None and restored.enabled is True
 
 
-def test_unverified_endpoint_cannot_join_auto_without_validation() -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+def test_unverified_endpoint_cannot_join_auto_without_validation(
+    tmp_path: Path,
+) -> None:
+    registry_value = yaml.safe_load(
+        (ROOT / "config" / "registry.yaml").read_text(encoding="utf-8")
+    )
+    for endpoint in registry_value["endpoints"]:
+        if endpoint["id"] == "zhipu-glm-5.3-flash":
+            endpoint["auto_candidate"] = False
+            endpoint["capabilities"]["validation_status"] = (
+                "official-documented-unverified"
+            )
+            endpoint["capabilities"]["validated_at"] = ""
+    registry_path = tmp_path / "unverified-registry.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(
+            registry_value,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    registry = Registry(registry_path)
     manager = EndpointConfigManager(InMemoryStateStore(), registry)
 
     with pytest.raises(RouterError) as exc:

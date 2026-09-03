@@ -156,20 +156,20 @@ AMD 已参与 `auto`；尚未完成的同口径质量基准只影响排序分。
 | API Key 环境变量 | `AI_ROUTER_GLM_API_KEY` |
 | 输入模态 | 文本、图像；官方另声明支持视频和文件 |
 | 输出模态 | 文本 |
-| 上下文 | 官方 1M，边界未实测 |
-| 最大输出 | 官方 128K，未实测 |
-| 路由定位 | `subscription-frontier`；`auto_candidate=false`，仅允许显式验收 |
+| 上下文 | 官方 1M；Auto 安全上下文实测 262144 |
+| 最大输出 | 官方 128K；Router Auto 当前声明 65536 |
+| 路由定位 | `subscription-frontier`；`auto_candidate=true` |
 | 工具选择 | 当前仅声明支持 `tool_choice=auto` |
-| 当前状态 | 注册模板已加入，尚未完成生产验收 |
+| 当前状态 | 文本、流式、工具、JSON、图片和 262K 边界已通过真实验收 |
 
 该端点使用 GLM Coding Plan 专属 OpenAI 兼容地址。Coding Plan Key 与普通
-开放平台 Key 不通用；正式启用前必须验证 `/models`、文本、图像、工具调用、
-流式输出、Responses 适配和长上下文边界。
+开放平台 Key 不通用。已验证 `/models`、文本、图像、工具调用、流式输出、
+JSON 和 262K 边界；Responses 适配在生产发布后继续端到端复验。
 
 ## 尚未验证
 
 - Edge/Ivan/AMD 的完整 GPU 拓扑和量化工件文件校验
-- 500K/262K 长上下文边界
+- 500K 长上下文边界
 - AI 多图片和长时间视觉稳定性；Edge 图像运行时修复
-- GLM-5.3-Flash 的真实 Coding Plan Key、协议能力和 1M 上下文边界
+- GLM-5.3-Flash 的 500K/1M 长上下文边界
 - 确定性质量基准分

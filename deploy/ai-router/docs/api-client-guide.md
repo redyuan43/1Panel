@@ -48,7 +48,8 @@ export AI_ROUTER_API_KEY="<client-api-key>"
 }
 ```
 
-生产默认策略为 `local_first`：
+生产默认使用 `intelligent_v2`，并保留 `legacy_v1` 热回滚。GLM 的 Auto
+安全上下文为已实测的 262144。v2 的固定原则是：
 
 1. 根据协议、工具能力、结构化输出、上下文长度和健康状态筛选兼容模型。
 2. 优先选择有可用容量的本地模型。
@@ -56,8 +57,11 @@ export AI_ROUTER_API_KEY="<client-api-key>"
 4. 本地容量全部繁忙时，仅在云端已启用、允许自动升级且预算充足时使用云端。
 5. 云端关闭时只使用本地；全部本地繁忙返回
    `429 all_local_capacity_busy`。
-6. 没有任何模型满足协议、能力或上下文要求时返回
-   `503 no_eligible_model`。
+6. 没有任何模型完整满足协议、能力或上下文要求时返回
+   `422 no_compatible_model`，不会降低客户端输出上限。
+
+ChatGPT Codex 订阅端点不能接收 `max_output_tokens`。客户端显式申请输出
+上限时，Auto 会跳过 Sol，避免静默删除参数。
 
 显式指定模型时，Router 不会跨模型静默替换。只有确实要求固定模型、量化或
 专项能力时才应显式指定模型 ID。
@@ -65,10 +69,10 @@ export AI_ROUTER_API_KEY="<client-api-key>"
 ### Codex Pro Sol
 
 复杂、多文件、架构、调试、安全和并发类编程任务使用 `model=auto` 即可。
-Router 会把这类请求标记为软性的 `subscription-frontier` 偏好，优先尝试
-`codex-pro/gpt-5.6-sol`；Sol 不可用时立即回退兼容本地模型，之后才考虑
-受预算保护的 DeepSeek。`zhipu/glm-5.3-flash` 当前仅供显式模型验收，
-尚未加入 `auto`。
+本地候选完整满足时仍优先本地；只有本地不足或容量全满后，云端才按
+Sol、GLM、DeepSeek 的固定顺序回退。普通编程的云端顺序为
+GLM、Sol、DeepSeek。`zhipu/glm-5.3-flash` 已加入生产 Auto，安全上下文为
+262144。
 
 只有必须固定使用 Sol、并且可以接受账号繁忙时直接返回 `429` 的调用方，才
 显式指定：
@@ -95,8 +99,12 @@ curl --fail-with-body \
 列表作为永久配置，端点健康状态与注册表可能变化。
 
 每个模型条目同时返回 `modalities`、`input_modalities`、
-`output_modalities`、`supportsImages` 和能力摘要。`auto` 的模态是当前所有
+`output_modalities`、`supportsImages`、`maxInputTokens`、
+`maxOutputTokens`、`contextWindow` 和能力摘要。`auto` 的模态是当前所有
 已启用自动候选的能力并集；实际请求仍会按健康状态、容量和请求模态筛选端点。
+当前生产 Auto 对外声明为 `maxInputTokens=196608`、
+`maxOutputTokens=65536`、`contextWindow=262144`，对应已完成验收的
+GLM 多模态安全边界。
 
 ## 4. Chat Completions
 
@@ -474,11 +482,27 @@ WorkBuddy 的自定义模型目录还包含客户端本地能力开关。该条�
 {
   "id": "auto",
   "supportsToolCall": true,
-  "supportsImages": true
+  "supportsImages": true,
+  "maxOutputTokens": 65536
 }
 ```
+
+GLM 只通过 262144 总上下文验收时，`maxInputTokens` 配置为 196608；通过
+500000 时配置为 434464。真实验收完成前不提前写入较大的声明值。
 
 如果 Router 已支持图像但 WorkBuddy 仍显示“不支持图片”，优先检查
 `~/.workbuddy/models.json` 中 `auto.supportsImages`，然后完全重启
 WorkBuddy 或重新进入模型选择页。Router 的 `/v1/models` 也会返回
 `supportsImages` 和 `input_modalities`，供支持动态能力发现的客户端使用。
+
+## 15. 思源公开模型身份
+
+管理员启用公开身份隐藏后，推荐客户端使用：
+
+```text
+Model: siyuan/auto
+```
+
+`auto`继续兼容。普通客户端的模型目录、JSON响应、SSE事件和响应头只显示
+`思源 / SIYUAN`公开身份，不显示实际模型、节点或GPU deployment。已有调用方
+暂时使用真实模型 ID时仍可继续工作，但应逐步迁移到`siyuan/auto`。

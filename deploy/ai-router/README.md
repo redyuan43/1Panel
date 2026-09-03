@@ -196,13 +196,12 @@ GET  /internal/status
 查询保持可用。Uvicorn 与 Compose 的优雅退出上限均配置为 900 秒，覆盖长
 上下文推理；重启操作仍需单独确认。
 
-复杂编程和安全分析可被评估器标记为软性的
-`subscription-frontier` 偏好。该偏好首先尝试
-`codex-pro/gpt-5.6-sol`。GLM 使用 Coding Plan 订阅端点，官方声明支持
-原生图像输入、1M 上下文和 128K 最大输出；当前注册能力尚未经过本路由真实
-请求验收，因此保持 `auto_candidate=false`，只允许显式模型请求用于验收。
-Sol 不可用时立即恢复 `local_first`，全部本地容量也不可用时才继续尝试受
-预算保护的 DeepSeek。
+Router 已实现可热切换的 `intelligent_v2`：复杂任务只改变云端专家顺序，
+不能绕过完整合格的本地池。普通文本云端顺序为 DeepSeek、GLM、Sol；普通
+编程为 GLM、Sol、DeepSeek；复杂编程、架构和安全为 Sol、GLM、DeepSeek。
+GLM 已完成文本、流式、工具、JSON、图片和 262K 边界实测，注册表使用
+`auto_candidate=true`，默认策略为 `intelligent_v2`。完整规则和验收记录见
+`docs/intelligent-routing-v2.md`。
 
 ## Codex Pro 订阅适配器
 
@@ -215,7 +214,9 @@ Sol 不可用时立即恢复 `local_first`，全部本地容量也不可用时�
 AI 主机访问 ChatGPT 使用本机 `127.0.0.1:10808` HTTP 代理，该代理只注入
 `codex-adapter` 容器，不影响 AI、Edge、Ivan、AMD 等本地/Tailscale 请求。
 
-每个账号使用独立目录、刷新锁和一路并发。首次登录使用独立
+每个账号使用独立目录、刷新锁和两路并发。Adapter 默认读取
+`AI_ROUTER_CODEX_ACCOUNT_MAX_CONCURRENCY=2`，并与注册表容量保持一致。
+首次登录使用独立
 `CODEX_HOME`，不要直接挂载正在被桌面 Codex、CLI 或 IDE 使用的
 `~/.codex/auth.json`：
 

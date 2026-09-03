@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
@@ -277,6 +278,9 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
             tool_choice_modes=tool_choice_modes,
             structured_output=structured_output,
             streaming=bool(capabilities_value.get("streaming", True)),
+            output_token_limit=bool(
+                capabilities_value.get("output_token_limit", True)
+            ),
             validation_status=str(
                 capabilities_value.get(
                     "validation_status",
@@ -367,6 +371,9 @@ def client_policies(settings: Settings) -> tuple[ClientPolicy, ...]:
                 rpm_limit=int(value["rpm_limit"]),
                 tpm_limit=int(value["tpm_limit"]),
                 max_parallel_requests=int(value["max_parallel_requests"]),
+                allow_compaction=bool(
+                    value.get("allow_compaction", False)
+                ),
             )
         )
     return tuple(result)
@@ -387,6 +394,47 @@ def validate_settings(value: dict[str, Any]) -> None:
     if int(vision.get("max_source_pixels", 0)) <= 0:
         raise ValueError("vision.max_source_pixels must be positive")
 
+    identity = value.get("identity", {})
+    identity_fields = (
+        "public_model_id",
+        "display_name_zh",
+        "display_name_en",
+        "provider_name",
+        "description",
+        "identity_response",
+    )
+    if bool(identity.get("enabled", False)) and any(
+        not str(identity.get(field, "")).strip()
+        for field in identity_fields
+    ):
+        raise ValueError(
+            "identity fields must be present before identity masking is enabled"
+        )
+    public_model_id = str(
+        identity.get("public_model_id", "")
+    ).strip()
+    if public_model_id and (
+        len(public_model_id) > 128
+        or public_model_id == "auto"
+        or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._/-]*",
+            public_model_id,
+        )
+    ):
+        raise ValueError(
+            "identity.public_model_id must be a valid non-auto model ID"
+        )
+    for field in (
+        "display_name_zh",
+        "display_name_en",
+        "provider_name",
+    ):
+        if len(str(identity.get(field, ""))) > 120:
+            raise ValueError(f"identity.{field} must not exceed 120 characters")
+    for field in ("description", "identity_response"):
+        if len(str(identity.get(field, ""))) > 2000:
+            raise ValueError(f"identity.{field} must not exceed 2000 characters")
+
     affinity = value.get("affinity", {})
     affinity_ttl = int(affinity.get("ttl_seconds", 0))
     if not 300 <= affinity_ttl <= 86400:
@@ -402,6 +450,11 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError("evaluator.confidence_threshold must be between 0 and 1")
 
     routing = value.get("routing", {})
+    strategy = str(routing.get("strategy", "legacy_v1"))
+    if strategy not in {"legacy_v1", "intelligent_v2"}:
+        raise ValueError(
+            "routing.strategy must be legacy_v1 or intelligent_v2"
+        )
     if routing.get("provider_priority") not in {
         "local_first",
         "balanced",
@@ -425,6 +478,47 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError(
             "routing.all_local_busy_policy must be cloud_or_429 or return_429"
         )
+    if int(routing.get("auto_max_input_tokens", 0)) <= 0:
+        raise ValueError(
+            "routing.auto_max_input_tokens must be positive"
+        )
+    if int(routing.get("auto_max_output_tokens", 0)) <= 0:
+        raise ValueError(
+            "routing.auto_max_output_tokens must be positive"
+        )
+    remote_orders = routing.get("remote_fallback_order", {})
+    expected_profiles = {
+        "general",
+        "agent_text",
+        "code",
+        "complex_code",
+        "multimodal",
+        "multimodal_complex_code",
+    }
+    if not isinstance(remote_orders, dict):
+        raise ValueError(
+            "routing.remote_fallback_order must be an object"
+        )
+    if strategy == "intelligent_v2" and set(remote_orders) != expected_profiles:
+        raise ValueError(
+            "routing.remote_fallback_order must define general, agent_text, "
+            "code, complex_code, multimodal, and multimodal_complex_code"
+        )
+    for profile, order in remote_orders.items():
+        if profile not in expected_profiles:
+            raise ValueError(
+                f"unsupported remote fallback profile: {profile}"
+            )
+        if (
+            not isinstance(order, list)
+            or not order
+            or any(not str(item).strip() for item in order)
+            or len(order) != len(set(str(item) for item in order))
+        ):
+            raise ValueError(
+                f"routing.remote_fallback_order.{profile} must be a "
+                "non-empty unique list"
+            )
 
     weights = routing.get("weights", {})
     expected_weights = {
@@ -458,6 +552,16 @@ def validate_settings(value: dict[str, Any]) -> None:
     cloud = value.get("cloud", {})
     if float(cloud.get("monthly_budget", 0)) < 0:
         raise ValueError("cloud.monthly_budget must not be negative")
+
+    compaction = value.get("compaction", {})
+    if compaction.get("mode", "explicit_only") not in {
+        "explicit_only",
+        "automatic",
+        "disabled",
+    }:
+        raise ValueError(
+            "compaction.mode must be explicit_only, automatic, or disabled"
+        )
 
     clients = value.get("clients", {}).get("policies", [])
     ids = [str(item.get("id", "")) for item in clients]

@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .errors import RouterError
+from .identity import IdentityProfile
 from .route_trace import graph_document, validate_review
 from .runtime import RouterRuntime, build_runtime
 
@@ -23,6 +24,7 @@ EDITABLE_SECTIONS = {
     "evaluator",
     "failover",
     "health",
+    "identity",
     "queue",
     "routing",
     "vision",
@@ -416,6 +418,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         client_id: str | None = None,
         conversation_id: str | None = None,
         task: str | None = None,
+        route_profile: str | None = None,
         selected_model: str | None = None,
         status: str | None = None,
         review_status: str | None = None,
@@ -435,6 +438,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             client_id=_query_text(client_id),
             conversation_id=_query_text(conversation_id),
             task=_query_text(task),
+            route_profile=_query_text(route_profile),
             selected_model=_query_text(selected_model),
             status=_query_text(status),
             review_status=_query_text(review_status),
@@ -610,11 +614,17 @@ async def _json_body(request: Request) -> dict[str, Any]:
 
 
 def _allowed_client_models(current: RouterRuntime) -> set[str]:
-    return {
+    values = {
         "*",
         "auto",
         *current.base_registry.public_models(),
     }
+    identity = IdentityProfile.from_settings(
+        current.settings.section("identity")
+    )
+    if identity.public_model_id:
+        values.add(identity.public_model_id)
+    return values
 
 
 def _query_text(value: str | None) -> str | None:
@@ -734,6 +744,14 @@ def _request_rows(
                 "image_resizes": event.get("image_resizes", 0),
                 "node": event.get("node"),
                 "task": event.get("task"),
+                "route_profile": event.get("route_profile"),
+                "complexity": event.get("complexity"),
+                "strategy_version": event.get("strategy_version"),
+                "history_mode": event.get("history_mode"),
+                "context_required": event.get("context_required"),
+                "remote_fallback_position": event.get(
+                    "remote_fallback_position"
+                ),
                 "reason": event.get("reason"),
                 "affinity": event.get("affinity"),
                 "prompt_tokens": event.get("prompt_tokens"),

@@ -229,6 +229,11 @@ main {
   padding: 24px 0 64px;
 }
 
+main.audit-main {
+  width: calc(100% - 48px);
+  max-width: none;
+}
+
 .command-bar {
   display: flex;
   align-items: center;
@@ -1134,7 +1139,7 @@ dialog::backdrop {
 .audit-layout {
   display: grid;
   min-height: 720px;
-  grid-template-columns: minmax(270px, 320px) minmax(0, 1fr);
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
 }
 
 .trace-list-pane {
@@ -1369,8 +1374,8 @@ button.icon-control {
 .trace-graph-viewport {
   width: 100%;
   min-width: 0;
-  min-height: 430px;
-  max-height: 620px;
+  height: clamp(620px, 72vh, 840px);
+  min-height: 620px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -1394,8 +1399,8 @@ button.icon-control {
   display: grid;
   width: max-content;
   min-width: 100%;
-  min-height: 428px;
-  place-items: center;
+  min-height: 618px;
+  place-items: start center;
   padding: 22px 28px;
 }
 
@@ -1413,7 +1418,7 @@ button.icon-control {
 
 .trace-graph svg {
   display: block;
-  min-width: 1800px;
+  min-width: 0;
   max-width: none !important;
   height: auto;
   transition: width 160ms ease;
@@ -1745,7 +1750,8 @@ button.icon-control {
   }
 
   .trace-graph-viewport {
-    min-height: 400px;
+    height: min(66vh, 580px);
+    min-height: 440px;
   }
 
   .trace-core-heading,

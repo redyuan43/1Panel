@@ -419,8 +419,9 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert glm is not None
     assert glm.public_model == "zhipu/glm-5.3-flash"
     assert glm.modalities == ("text", "image")
-    assert glm.safe_context_tokens == 1000000
-    assert glm.auto_candidate is False
+    assert glm.safe_context_tokens == 262144
+    assert glm.configured_context_tokens == 1000000
+    assert glm.auto_candidate is True
     assert glm.quality["code"] > registry.by_id(
         "cloud-deepseek-v4-flash"
     ).quality["code"]
@@ -432,11 +433,13 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert codex.safe_context_tokens == 272000
     assert codex.configured_context_tokens == 272000
     assert codex.auto_candidate is True
+    assert codex.capabilities.output_token_limit is False
     assert codex.metadata["billing_mode"] == "subscription"
     assert value.section("routing")["affinity_capacity_wait_seconds"] == 3
     assert value.section("routing")["new_request_capacity_wait_seconds"] == 0
     assert value.section("routing")["all_local_busy_policy"] == "cloud_or_429"
     assert value.section("routing")["provider_priority"] == "local_first"
+    assert value.section("routing")["strategy"] == "intelligent_v2"
     assert value.section("affinity")["ttl_seconds"] == 86400
     policies = {
         item.id: item
@@ -1694,7 +1697,10 @@ def test_provider_priority_modes_are_hot_configurable(
                 "allowed_providers": ["deepseek"],
                 "allowed_models": ["deepseek/deepseek-v4-flash"],
             },
-            "routing": {"provider_priority": provider_priority},
+            "routing": {
+                "strategy": "legacy_v1",
+                "provider_priority": provider_priority,
+            },
         }
     )
     statuses = {
@@ -1801,7 +1807,8 @@ def test_subscription_frontier_is_a_soft_auto_preference(
                     "codex-pro/gpt-5.6-sol",
                     "deepseek/deepseek-v4-flash",
                 ],
-            }
+            },
+            "routing": {"strategy": "legacy_v1"},
         }
     )
     statuses = {}
@@ -1892,7 +1899,26 @@ def test_subscription_frontier_is_a_soft_auto_preference(
 def test_unvalidated_glm_requires_an_explicit_model(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry_value = yaml.safe_load(
+        (ROOT / "config" / "registry.yaml").read_text(encoding="utf-8")
+    )
+    for endpoint in registry_value["endpoints"]:
+        if endpoint["id"] == "zhipu-glm-5.3-flash":
+            endpoint["auto_candidate"] = False
+            endpoint["capabilities"]["validation_status"] = (
+                "official-documented-unverified"
+            )
+            endpoint["capabilities"]["validated_at"] = ""
+    registry_path = tmp_path / "unverified-registry.yaml"
+    registry_path.write_text(
+        yaml.safe_dump(
+            registry_value,
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    registry = Registry(registry_path)
     value = settings(tmp_path)
     value.write_runtime(
         {
@@ -1905,7 +1931,8 @@ def test_unvalidated_glm_requires_an_explicit_model(
                     "zhipu/glm-5.3-flash",
                     "deepseek/deepseek-v4-flash",
                 ],
-            }
+            },
+            "routing": {"strategy": "legacy_v1"},
         }
     )
     statuses = {
@@ -2057,7 +2084,8 @@ def test_auto_tool_request_falls_back_local_when_sol_is_rate_limited(
                     "codex-pro/gpt-5.6-sol",
                     "deepseek/deepseek-v4-flash",
                 ],
-            }
+            },
+            "routing": {"strategy": "legacy_v1"},
         }
     )
     monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
@@ -2410,6 +2438,86 @@ def test_explicit_route_tier_is_validated() -> None:
     run(evaluator.client.aclose())
 
 
+@pytest.mark.parametrize(
+    ("explicit_task", "expected_task", "expected_profile"),
+    [
+        ("long-context", "long-context", "general"),
+        ("home-automation", "home-automation", "general"),
+        ("agent-text", "general", "agent_text"),
+    ],
+)
+def test_explicit_route_task_preserves_legacy_hyphenated_names(
+    explicit_task: str,
+    expected_task: str,
+    expected_profile: str,
+) -> None:
+    evaluator = TaskEvaluator(
+        {"enabled": False},
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+    )
+    result = run(
+        evaluator.evaluate(
+            {"messages": [{"role": "user", "content": "hello"}]},
+            headers={"x-1panel-route-task": explicit_task},
+            api_kind="chat",
+            prompt_tokens=10,
+            current_task=None,
+            is_new_conversation=True,
+        )
+    )
+    assert result.task == expected_task
+    assert result.route_profile == expected_profile
+    assert result.reason == "explicit_task"
+    run(evaluator.client.aclose())
+
+
+def test_repo_marker_uses_word_boundaries() -> None:
+    evaluator = TaskEvaluator(
+        {"enabled": False},
+        internal_base_url="http://litellm",
+        internal_api_key="internal",
+    )
+    report = run(
+        evaluator.evaluate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Prepare a report on quarterly sales.",
+                    }
+                ]
+            },
+            headers={},
+            api_kind="chat",
+            prompt_tokens=10,
+            current_task=None,
+            is_new_conversation=True,
+        )
+    )
+    repository = run(
+        evaluator.evaluate(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Inspect this repo for a bug.",
+                    }
+                ]
+            },
+            headers={},
+            api_kind="chat",
+            prompt_tokens=10,
+            current_task=None,
+            is_new_conversation=True,
+        )
+    )
+    assert report.task == "general"
+    assert repository.task == "code"
+    assert repository.reason == "code_heuristic"
+    run(evaluator.client.aclose())
+
+
 def test_request_modalities_detects_chat_and_responses_images() -> None:
     chat = request_modalities(
         {
@@ -2650,11 +2758,10 @@ def test_evaluator_does_not_forward_base64_media() -> None:
             is_new_conversation=True,
         )
     )
-    evaluator_prompt = captured["messages"][1]["content"]
-    assert encoded not in evaluator_prompt
-    assert "<image>" in evaluator_prompt
-    assert len(evaluator_prompt) < 2000
+    assert captured == {}
     assert result.task == "general"
+    assert result.route_profile == "multimodal"
+    assert result.reason == "multimodal_input"
     run(client.aclose())
 
 
@@ -2785,6 +2892,9 @@ def test_models_endpoint_reports_vision_capabilities(
     }
     assert models["auto"]["supportsImages"] is True
     assert "image" in models["auto"]["input_modalities"]
+    assert models["auto"]["maxInputTokens"] == 196608
+    assert models["auto"]["maxOutputTokens"] == 65536
+    assert models["auto"]["contextWindow"] == 262144
     assert models[
         "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
     ]["supportsImages"] is True
@@ -3914,6 +4024,14 @@ def test_endpoint_capability_matrix_is_protocol_aware() -> None:
         chat=True,
         responses="none",
     ).supports(RequestCapabilities(protocol="responses"))
+    assert not EndpointCapabilities(
+        output_token_limit=False,
+    ).supports(
+        RequestCapabilities(
+            protocol="chat",
+            output_token_limit=True,
+        )
+    )
 
 
 def test_request_capabilities_preserve_tool_choice_mode() -> None:
@@ -6321,9 +6439,11 @@ def test_control_route_trace_api_and_review_validation(
     assert mermaid_asset.status_code == 200
     assert "mermaid" in mermaid_asset.text[:1000].lower()
     assert graph.status_code == 200
-    assert graph.json()["graph_version"] == 2
+    assert graph.json()["graph_version"] == 3
     assert "flowchart LR" in graph.json()["mermaid"]
-    assert len(graph.json()["nodes"]) == 12
+    assert "direction LR" in graph.json()["mermaid"]
+    assert "flowchart TD" not in graph.json()["mermaid"]
+    assert len(graph.json()["nodes"]) == 17
     assert "智能路由核心" in graph.json()["mermaid"]
     assert "upstream_request" not in {
         item["id"] for item in graph.json()["nodes"]

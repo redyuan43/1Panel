@@ -266,7 +266,7 @@ endpoints:
       - long-context
     safe_context_tokens: 272000
     configured_context_tokens: 272000
-    max_concurrency: 1
+    max_concurrency: 2
     backend_type: codex_pool
     health_url: http://127.0.0.1:14010/health
     backend_api_key_env: AI_ROUTER_LITELLM_MASTER_KEY
@@ -282,6 +282,7 @@ endpoints:
         - json_object
         - json_schema
       streaming: true
+      output_token_limit: false
       validation_status: live-validated-chat-responses-tools-streaming
       validated_at: "2026-09-02"
     quality:
@@ -295,6 +296,7 @@ endpoints:
       context_status: catalog-272k
       quality_status: configured-frontier-priority-unbenchmarked
       reasoning_effort_default: medium
+      output_limit_status: unsupported-chatgpt-subscription
       model_catalog_required: true
       catalog_context_tokens: 272000
       catalog_max_context_tokens: 872000
@@ -316,14 +318,14 @@ endpoints:
       - code
       - batch
       - long-context
-    safe_context_tokens: 1000000
+    safe_context_tokens: 262144
     configured_context_tokens: 1000000
     max_concurrency: 1
     backend_type: openai
     health_url: https://open.bigmodel.cn/api/coding/paas/v4/models
     backend_api_key_env: AI_ROUTER_GLM_API_KEY
     enabled: true
-    auto_candidate: false
+    auto_candidate: true
     cloud: true
     capabilities:
       chat: true
@@ -335,8 +337,8 @@ endpoints:
       structured_output:
         - json_object
       streaming: true
-      validation_status: official-documented-unverified
-      validated_at: ""
+      validation_status: live-validated-chat-stream-tools-json-image-262k
+      validated_at: "2026-09-02"
     quality:
       general: 100
       code: 105
@@ -345,12 +347,12 @@ endpoints:
     metadata:
       provider: zhipu-coding
       billing_mode: subscription
-      context_status: official-1m-unverified-boundary
+      context_status: live-validated-262k-official-1m
       quality_status: user-directed-code-priority-unbenchmarked
       max_output_tokens: 128000
       thinking_via_extra_body: true
       reasoning_effort_default: max
-      vision_status: official-documented-unverified
+      vision_status: live-validated-2026-09-02
       image_min_tokens: 1024
       documentation_url: https://docs.bigmodel.cn/cn/guide/models/vlm/glm-5.3-flash
 

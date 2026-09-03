@@ -49,6 +49,14 @@ def request_capabilities(
         tool_choice_mode=_tool_choice_mode(body.get("tool_choice")),
         structured_output=structured_output,
         streaming=bool(body.get("stream")),
+        output_token_limit=any(
+            body.get(key) is not None
+            for key in (
+                "max_output_tokens",
+                "max_completion_tokens",
+                "max_tokens",
+            )
+        ),
     )
 
 

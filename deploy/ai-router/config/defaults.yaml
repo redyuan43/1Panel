@@ -9,12 +9,47 @@ vision:
   ai_max_dimension: 1024
   max_source_pixels: 40000000
 
+identity:
+  enabled: false
+  public_model_id: siyuan/auto
+  display_name_zh: 思源
+  display_name_en: SIYUAN
+  provider_name: SIYUAN
+  description: 由思源智能路由服务提供的统一 AI 助手。
+  identity_response: 我是思源（SIYUAN），由思源智能路由服务提供的统一 AI 助手。
+
 routing:
+  strategy: intelligent_v2
   default_output_reserve_tokens: 4096
   provider_priority: local_first
   affinity_capacity_wait_seconds: 3
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
+  auto_max_input_tokens: 196608
+  auto_max_output_tokens: 65536
+  remote_fallback_order:
+    general:
+      - cloud-deepseek-v4-flash
+      - zhipu-glm-5.3-flash
+      - codex-pro-gpt-5.6-sol
+    agent_text:
+      - cloud-deepseek-v4-flash
+      - zhipu-glm-5.3-flash
+      - codex-pro-gpt-5.6-sol
+    code:
+      - zhipu-glm-5.3-flash
+      - codex-pro-gpt-5.6-sol
+      - cloud-deepseek-v4-flash
+    complex_code:
+      - codex-pro-gpt-5.6-sol
+      - zhipu-glm-5.3-flash
+      - cloud-deepseek-v4-flash
+    multimodal:
+      - zhipu-glm-5.3-flash
+      - codex-pro-gpt-5.6-sol
+    multimodal_complex_code:
+      - codex-pro-gpt-5.6-sol
+      - zhipu-glm-5.3-flash
   weights:
     quality: 0.50
     load: 0.20
@@ -59,6 +94,7 @@ evaluator:
 
 compaction:
   enabled: true
+  mode: explicit_only
   model_id: ai-qwen38-27b
 
 cloud:
@@ -77,6 +113,7 @@ clients:
       rpm_limit: 120
       tpm_limit: 1000000
       max_parallel_requests: 8
+      allow_compaction: false
     - id: check-boards
       key_env: AI_ROUTER_CHECK_BOARDS_API_KEY
       models:
@@ -84,3 +121,4 @@ clients:
       rpm_limit: 240
       tpm_limit: 2000000
       max_parallel_requests: 4
+      allow_compaction: false

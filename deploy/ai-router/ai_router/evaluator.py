@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 import httpx
 
 from .errors import RouterError
-from .token_counter import redact_media_payloads
+from .token_counter import redact_media_payloads, request_modalities
 from .types import Evaluation, ModelCallTarget
 
 
 ALLOWED_TASKS = {"general", "code", "batch", "long-context", "home-automation", "asr"}
+ALLOWED_ROUTE_PROFILES = {
+    "general",
+    "agent_text",
+    "code",
+    "multimodal",
+}
+ALLOWED_COMPLEXITIES = {"standard", "complex"}
+ROUTE_TASK_ALIASES = {"agent-text": "agent_text"}
 ALLOWED_TIERS = {
     "edge-small",
     "local-general",
@@ -43,12 +52,15 @@ class TaskEvaluator:
         api_kind: str,
         prompt_tokens: int,
         current_task: str | None,
+        current_route_profile: str | None = None,
+        current_complexity: str | None = None,
         is_new_conversation: bool,
         before_model_call: (
             Callable[[], Awaitable[ModelCallTarget | None]] | None
         ) = None,
         after_model_call: Callable[[], Awaitable[None]] | None = None,
     ) -> Evaluation:
+        modalities = request_modalities(body, api_kind)
         required_tier = headers.get("x-1panel-route-tier", "").strip().lower()
         if required_tier and required_tier not in ALLOWED_TIERS:
             raise RouterError(
@@ -59,54 +71,116 @@ class TaskEvaluator:
         required_tier = required_tier or None
         explicit = headers.get("x-1panel-route-task", "").strip().lower()
         if explicit:
-            if explicit not in ALLOWED_TASKS:
+            explicit = ROUTE_TASK_ALIASES.get(explicit, explicit)
+            if explicit not in {
+                *ALLOWED_TASKS,
+                "agent_text",
+                "multimodal",
+            }:
                 raise RouterError(
                     f"unsupported routing task: {explicit}",
                     status_code=400,
                     code="invalid_route_task",
                 )
-            return Evaluation(
-                explicit,
+            task = (
+                "general"
+                if explicit in {"agent_text", "multimodal"}
+                else explicit
+            )
+            profile = (
+                explicit
+                if explicit in ALLOWED_ROUTE_PROFILES
+                else _profile_for_task(task, modalities)
+            )
+            return _evaluation(
+                task,
                 required_tier,
                 1.0,
                 "explicit_task",
+                profile,
+                "standard",
+                {"explicit": explicit, "modalities": sorted(modalities)},
             )
 
         if api_kind == "audio":
-            return Evaluation("asr", required_tier, 1.0, "audio_endpoint")
+            return _evaluation(
+                "asr",
+                required_tier,
+                1.0,
+                "audio_endpoint",
+                "general",
+                "standard",
+                {"protocol": api_kind},
+            )
+        complex_code = self._complex_code_preference(
+            body,
+            required_tier,
+            modalities,
+        )
+        if complex_code:
+            return complex_code
         tool_task = self._task_from_tools(body)
         if tool_task:
-            preferred_tier = (
-                "subscription-frontier"
-                if tool_task == "code"
+            result = _evaluation(
+                tool_task,
+                required_tier,
+                1.0,
+                "tool_mapping",
+                _profile_for_task(tool_task, modalities),
+                "standard",
+                {
+                    "tool_task": tool_task,
+                    "modalities": sorted(modalities),
+                },
+            )
+            if (
+                tool_task == "code"
                 and bool(
                     self.settings.get(
                         "prefer_frontier_for_code_tools",
                         True,
                     )
                 )
-                else None
-            )
-            return Evaluation(
-                tool_task,
-                required_tier,
-                1.0,
-                "tool_mapping",
-                preferred_tier,
-            )
+            ):
+                result.preferred_tier = "subscription-frontier"
+            return result
+        deterministic = self._deterministic_profile(
+            body,
+            required_tier,
+            modalities,
+        )
+        if deterministic:
+            if prompt_tokens > int(
+                self.settings.get(
+                    "long_context_threshold_tokens",
+                    65536,
+                )
+            ):
+                deterministic.task = "long-context"
+                deterministic.reason = (
+                    f"{deterministic.reason}+context_threshold"
+                )
+                deterministic.evidence["prompt_tokens"] = prompt_tokens
+            return deterministic
         if prompt_tokens > int(self.settings.get("long_context_threshold_tokens", 65536)):
-            return Evaluation(
+            return _evaluation(
                 "long-context",
                 required_tier,
                 1.0,
                 "context_threshold",
+                current_route_profile or "general",
+                current_complexity or "standard",
+                {"prompt_tokens": prompt_tokens},
             )
         if _has_structured_output(body):
-            return Evaluation(
+            return _evaluation(
                 "batch",
                 required_tier,
                 0.95,
                 "structured_output",
+                "general",
+                "standard",
+                {"structured_output": True},
             )
 
         enabled = bool(self.settings.get("enabled", False))
@@ -120,22 +194,25 @@ class TaskEvaluator:
             )
         )
         if not should_call:
-            return Evaluation(
+            return _evaluation(
                 current_task or "general",
                 required_tier,
                 1.0,
                 "conversation_task",
+                current_route_profile or "general",
+                current_complexity or "standard",
+                {"conversation_profile_preserved": True},
             )
         if not str(self.settings.get("model_id", "")).strip():
-            return Evaluation(
+            return _evaluation(
                 current_task or "general",
                 required_tier,
                 0.0,
                 "evaluator_not_configured",
+                current_route_profile or "general",
+                current_complexity or "standard",
+                {"fallback": "conversation_or_general"},
             )
-        complex_code = self._complex_code_preference(body, required_tier)
-        if complex_code:
-            return complex_code
         acquired = False
         target = None
         try:
@@ -145,26 +222,113 @@ class TaskEvaluator:
                     acquired = True
                 result = await self._call_model(body, target=target)
             except Exception:
-                return Evaluation(
+                return _evaluation(
                     current_task or tool_task or "general",
                     required_tier,
                     0.0,
                     "evaluator_unavailable",
+                    current_route_profile or "general",
+                    current_complexity or "standard",
+                    {"fallback": "conversation_or_general"},
                 )
         finally:
             if acquired and after_model_call:
                 await after_model_call()
         threshold = float(self.settings.get("confidence_threshold", 0.85))
         if result.confidence < threshold:
-            return Evaluation(
+            return _evaluation(
                 current_task or "general",
                 required_tier,
                 result.confidence,
                 "evaluator_low_confidence",
+                current_route_profile or "general",
+                current_complexity or "standard",
+                {
+                    "reported_profile": result.route_profile,
+                    "reported_complexity": result.complexity,
+                    "confidence_threshold": threshold,
+                },
             )
         if required_tier:
             result.required_tier = required_tier
         return result
+
+    def _deterministic_profile(
+        self,
+        body: dict[str, Any],
+        required_tier: str | None,
+        modalities: set[str],
+    ) -> Evaluation | None:
+        text = _request_text(body).lower()
+        if not text:
+            return None
+        code_markers = (
+            "code",
+            "coding",
+            "repository",
+            "repo",
+            "implementation",
+            "patch",
+            "bug",
+            "programming",
+            "代码",
+            "编程",
+            "仓库",
+            "实现",
+            "修复",
+            "调试",
+        )
+        agent_markers = (
+            "research",
+            "investigate",
+            "multi-step",
+            "multiple steps",
+            "compare sources",
+            "deep dive",
+            "研究",
+            "调查",
+            "多步骤",
+            "多轮执行",
+            "对比资料",
+        )
+        if _matches_any_marker(text, code_markers):
+            return _evaluation(
+                "code",
+                required_tier,
+                1.0,
+                "code_heuristic",
+                _profile_for_task("code", modalities),
+                "standard",
+                {"matched": "code", "modalities": sorted(modalities)},
+            )
+        if _matches_any_marker(text, agent_markers):
+            return _evaluation(
+                "general",
+                required_tier,
+                0.95,
+                "agent_text_heuristic",
+                (
+                    "multimodal"
+                    if "image" in modalities
+                    else "agent_text"
+                ),
+                "standard",
+                {
+                    "matched": "agent_text",
+                    "modalities": sorted(modalities),
+                },
+            )
+        if "image" in modalities:
+            return _evaluation(
+                "general",
+                required_tier,
+                1.0,
+                "multimodal_input",
+                "multimodal",
+                "standard",
+                {"modalities": sorted(modalities)},
+            )
+        return None
 
     def _task_from_tools(self, body: dict[str, Any]) -> str | None:
         mappings = self.settings.get("tool_task_mappings", {})
@@ -189,6 +353,7 @@ class TaskEvaluator:
         self,
         body: dict[str, Any],
         required_tier: str | None,
+        modalities: set[str],
     ) -> Evaluation | None:
         if not bool(self.settings.get("prefer_frontier_for_complex_code", True)):
             return None
@@ -236,22 +401,30 @@ class TaskEvaluator:
             "实现",
             "修复",
         )
-        strong = any(marker in text for marker in strong_markers)
+        strong = _matches_any_marker(text, strong_markers)
         signals = sum(
             1
             for group in signal_groups
-            if any(marker in text for marker in group)
+            if _matches_any_marker(text, group)
         )
-        has_code_marker = any(marker in text for marker in code_markers)
+        has_code_marker = _matches_any_marker(text, code_markers)
         if not strong and not (signals >= 3 and has_code_marker):
             return None
-        return Evaluation(
-            task="code",
-            required_tier=required_tier,
-            confidence=1.0,
-            reason="complex_code_heuristic",
-            preferred_tier="subscription-frontier",
+        result = _evaluation(
+            "code",
+            required_tier,
+            1.0,
+            "complex_code_heuristic",
+            _profile_for_task("code", modalities),
+            "complex",
+            {
+                "strong_marker": strong,
+                "signal_groups": signals,
+                "modalities": sorted(modalities),
+            },
         )
+        result.preferred_tier = "subscription-frontier"
+        return result
 
     async def _call_model(
         self,
@@ -265,26 +438,24 @@ class TaskEvaluator:
             else str(self.settings.get("model_id", "")).strip()
         )
         if not model:
-            return Evaluation("general", None, 0.0, "evaluator_not_configured")
+            return _evaluation(
+                "general",
+                None,
+                0.0,
+                "evaluator_not_configured",
+                "general",
+                "standard",
+            )
         prompt = {
             "task": "Classify the routing requirements for this request.",
             "allowed_tasks": sorted(ALLOWED_TASKS - {"asr"}),
-            "allowed_tiers": [
-                "edge-small",
-                "local-general",
-                "local-large",
-                "cloud-frontier",
-                "subscription-frontier",
-            ],
+            "allowed_route_profiles": sorted(ALLOWED_ROUTE_PROFILES),
+            "allowed_complexities": sorted(ALLOWED_COMPLEXITIES),
             "request": _request_excerpt(body),
             "output_schema": {
                 "task": "string",
-                "required_tier": "string|null",
-                "preferred_tier": (
-                    "subscription-frontier|null; use only for complex, "
-                    "ambiguous, multi-file, architecture, debugging, or "
-                    "cybersecurity work"
-                ),
+                "route_profile": "general|agent_text|code|multimodal",
+                "complexity": "standard|complex",
                 "confidence": "number 0..1",
                 "reason": "short string",
             },
@@ -319,20 +490,67 @@ class TaskEvaluator:
         task = str(value.get("task", "general"))
         if task not in ALLOWED_TASKS:
             task = "general"
-        preferred_tier = value.get("preferred_tier")
-        if preferred_tier not in ALLOWED_TIERS:
-            preferred_tier = None
-        return Evaluation(
-            task=task,
-            required_tier=None,
-            confidence=max(0.0, min(1.0, float(value.get("confidence", 0)))),
-            reason=str(value.get("reason", "evaluator")),
-            preferred_tier=(
-                str(preferred_tier)
-                if preferred_tier
-                else None
-            ),
+        route_profile = str(value.get("route_profile", "general"))
+        if route_profile not in ALLOWED_ROUTE_PROFILES:
+            route_profile = "general"
+        complexity = str(value.get("complexity", "standard"))
+        if complexity not in ALLOWED_COMPLEXITIES:
+            complexity = "standard"
+        return _evaluation(
+            task,
+            None,
+            max(0.0, min(1.0, float(value.get("confidence", 0)))),
+            str(value.get("reason", "evaluator")),
+            route_profile,
+            complexity,
+            {
+                "source": "local_evaluator",
+                "reported_task": value.get("task"),
+            },
         )
+
+
+def _profile_for_task(task: str, modalities: set[str]) -> str:
+    if "image" in modalities:
+        return "multimodal"
+    if task == "code":
+        return "code"
+    return "general"
+
+
+def _matches_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(_matches_marker(text, marker) for marker in markers)
+
+
+def _matches_marker(text: str, marker: str) -> bool:
+    if not marker.isascii():
+        return marker in text
+    return bool(
+        re.search(
+            rf"(?<![a-z0-9_]){re.escape(marker)}(?![a-z0-9_])",
+            text,
+        )
+    )
+
+
+def _evaluation(
+    task: str,
+    required_tier: str | None,
+    confidence: float,
+    reason: str,
+    route_profile: str,
+    complexity: str,
+    evidence: dict[str, Any] | None = None,
+) -> Evaluation:
+    return Evaluation(
+        task=task,
+        required_tier=required_tier,
+        confidence=confidence,
+        reason=reason,
+        route_profile=route_profile,
+        complexity=complexity,
+        evidence=evidence or {},
+    )
 
 
 def _has_structured_output(body: dict[str, Any]) -> bool:

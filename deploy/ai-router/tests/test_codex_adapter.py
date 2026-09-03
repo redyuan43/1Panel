@@ -359,3 +359,110 @@ def test_codex_responses_string_input_is_normalized_to_a_list(
     assert response.json()["output"][0]["content"][0]["text"] == "ok"
     assert "max_output_tokens" not in captured
     assert "temperature" not in captured
+
+
+def test_codex_adapter_allows_two_requests_and_rejects_third_after_wait(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _write_auth(
+        tmp_path,
+        access_token=_jwt(expires_at=int(time.time()) + 3600),
+    )
+    entered = 0
+    both_entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal entered
+        entered += 1
+        if entered == 2:
+            both_entered.set()
+        await release.wait()
+        completed = {
+            "id": f"response-{entered}",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {"type": "output_text", "text": "ok"}
+                    ],
+                }
+            ],
+        }
+        return httpx.Response(
+            200,
+            content=(
+                "event: response.completed\n"
+                "data: "
+                + json.dumps(
+                    {
+                        "type": "response.completed",
+                        "response": completed,
+                    },
+                    separators=(",", ":"),
+                )
+                + "\n\n"
+            ).encode(),
+        )
+
+    async def scenario() -> tuple[int, float, list[int]]:
+        monkeypatch.setenv(
+            "AI_ROUTER_CODEX_ADAPTER_KEY",
+            "adapter-key",
+        )
+        upstream_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(upstream)
+        )
+        gateway = CodexGateway(
+            accounts=CodexAccountStore(tmp_path / "accounts"),
+            client=upstream_client,
+            account_max_concurrency=2,
+        )
+        app = create_app(gateway)
+        app.state.gateway = gateway
+        app_client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://adapter",
+        )
+        request = {
+            "model": "gpt-5.6-sol",
+            "input": "hello",
+            "max_output_tokens": 65536,
+        }
+        headers = {"Authorization": "Bearer adapter-key"}
+        first = asyncio.create_task(
+            app_client.post(
+                "/v1/accounts/primary/responses",
+                headers=headers,
+                json=request,
+            )
+        )
+        second = asyncio.create_task(
+            app_client.post(
+                "/v1/accounts/primary/responses",
+                headers=headers,
+                json=request,
+            )
+        )
+        await asyncio.wait_for(both_entered.wait(), timeout=1)
+        started = time.monotonic()
+        third = await app_client.post(
+            "/v1/accounts/primary/responses",
+            headers=headers,
+            json=request,
+        )
+        waited = time.monotonic() - started
+        release.set()
+        completed = await asyncio.gather(first, second)
+        await app_client.aclose()
+        await upstream_client.aclose()
+        return third.status_code, waited, [
+            item.status_code for item in completed
+        ]
+
+    third_status, waited, completed_statuses = asyncio.run(scenario())
+    assert third_status == 429
+    assert waited >= 2.8
+    assert completed_statuses == [200, 200]

@@ -352,7 +352,7 @@
 
                 <div id="trace-core-heading" class="trace-core-heading">
                   <strong>智能路由核心</strong>
-                  <span>候选资格 → 会话亲和 / Provider 优先级 → 综合评分 → 容量 → 最终模型</span>
+                  <span>完整上下文 → 会话亲和 → 本地充分性 / 云端专家 → 容量 → 历史预检</span>
                 </div>
                 <div id="trace-attempts" class="trace-attempts" aria-label="路由尝试"></div>
                 <div id="trace-graph-viewport" class="trace-graph-viewport" tabindex="0">
@@ -463,6 +463,43 @@
         <form id="settings-form">
           <section class="settings-band">
             <div class="settings-title">
+              <h3>公开模型身份</h3>
+              <span>Public identity</span>
+            </div>
+            <div class="control-grid">
+              <label class="toggle-row">
+                <span>启用身份隐藏</span>
+                <input id="identity-enabled" type="checkbox">
+              </label>
+              <label>
+                公开模型 ID
+                <input id="identity-model-id" type="text" maxlength="128">
+              </label>
+              <label>
+                中文名称
+                <input id="identity-name-zh" type="text" maxlength="120">
+              </label>
+              <label>
+                英文名称
+                <input id="identity-name-en" type="text" maxlength="120">
+              </label>
+              <label>
+                公开提供方
+                <input id="identity-provider" type="text" maxlength="120">
+              </label>
+              <label class="wide">
+                公开说明
+                <textarea id="identity-description" maxlength="2000" rows="3"></textarea>
+              </label>
+              <label class="wide">
+                固定身份回答
+                <textarea id="identity-response" maxlength="2000" rows="3"></textarea>
+              </label>
+            </div>
+          </section>
+
+          <section class="settings-band">
+            <div class="settings-title">
               <h3>云端升级</h3>
               <span>Cloud escalation</span>
             </div>
@@ -503,6 +540,14 @@
               <label class="toggle-row">
                 <span>启用升级压缩</span>
                 <input id="compaction-enabled" type="checkbox">
+              </label>
+              <label>
+                压缩许可模式
+                <select id="compaction-mode">
+                  <option value="explicit_only">仅客户端显式允许</option>
+                  <option value="automatic">自动压缩</option>
+                  <option value="disabled">禁用压缩</option>
+                </select>
               </label>
               <label>
                 评估器模型 ID
@@ -548,6 +593,13 @@
               <label>
                 新请求容量等待（秒）
                 <input id="new-request-capacity-wait" type="number" min="0" step="0.1">
+              </label>
+              <label>
+                路由策略
+                <select id="routing-strategy">
+                  <option value="legacy_v1">legacy_v1（热回滚）</option>
+                  <option value="intelligent_v2">intelligent_v2</option>
+                </select>
               </label>
               <label>
                 Provider 优先级
@@ -617,6 +669,10 @@
             <label class="toggle-row">
               <span>启用账号</span>
               <input id="client-enabled" type="checkbox" checked>
+            </label>
+            <label class="toggle-row">
+              <span>允许显式上下文压缩</span>
+              <input id="client-allow-compaction" type="checkbox">
             </label>
           </div>
           <fieldset class="model-permissions">

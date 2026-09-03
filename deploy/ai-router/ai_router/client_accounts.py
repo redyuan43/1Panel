@@ -73,6 +73,7 @@ class ClientAccountManager:
                         "max_parallel_requests": (
                             policy.max_parallel_requests
                         ),
+                        "allow_compaction": policy.allow_compaction,
                         "source": "legacy_env",
                         "created_at": now,
                         "updated_at": now,
@@ -508,6 +509,14 @@ def _validated_account(
         "rpm_limit": rpm_limit,
         "tpm_limit": tpm_limit,
         "max_parallel_requests": max_parallel,
+        "allow_compaction": bool(
+            value.get(
+                "allow_compaction",
+                existing.get("allow_compaction", False)
+                if existing
+                else False,
+            )
+        ),
         "source": (
             str(existing.get("source", "managed"))
             if existing
@@ -530,6 +539,9 @@ def _policy_from_account(value: dict[str, Any]) -> ClientPolicy:
         rpm_limit=int(value["rpm_limit"]),
         tpm_limit=int(value["tpm_limit"]),
         max_parallel_requests=int(value["max_parallel_requests"]),
+        allow_compaction=bool(
+            value.get("allow_compaction", False)
+        ),
     )
 
 
@@ -547,6 +559,9 @@ def _public_account(
         "tpm_limit": int(account.get("tpm_limit", 0)),
         "max_parallel_requests": int(
             account.get("max_parallel_requests", 0)
+        ),
+        "allow_compaction": bool(
+            account.get("allow_compaction", False)
         ),
         "source": str(account.get("source", "managed")),
         "created_at": float(account.get("created_at", 0)),

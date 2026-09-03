@@ -13,6 +13,7 @@ class RequestCapabilities:
     tool_choice_mode: str | None = None
     structured_output: str | None = None
     streaming: bool = False
+    output_token_limit: bool = False
 
     def labels(self) -> tuple[str, ...]:
         values = [self.protocol]
@@ -28,6 +29,8 @@ class RequestCapabilities:
             values.append(self.structured_output)
         if self.streaming:
             values.append("streaming")
+        if self.output_token_limit:
+            values.append("output_token_limit")
         return tuple(values)
 
 
@@ -40,6 +43,7 @@ class EndpointCapabilities:
     tool_choice_modes: tuple[str, ...] = ()
     structured_output: tuple[str, ...] = ()
     streaming: bool = True
+    output_token_limit: bool = True
     validation_status: str = "unverified"
     validated_at: str = ""
 
@@ -66,6 +70,11 @@ class EndpointCapabilities:
         ):
             return False
         if required.streaming and not self.streaming:
+            return False
+        if (
+            required.output_token_limit
+            and not self.output_token_limit
+        ):
             return False
         return True
 
@@ -226,6 +235,10 @@ class ConversationState:
     encrypted_capsule: str | None = None
     boundary_hash: str | None = None
     migration_count: int = 0
+    route_profile: str = "general"
+    complexity: str = "standard"
+    provider_family: str = ""
+    history_mode: str = "native"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -267,6 +280,15 @@ class RouteDecision:
     tool_history_repairs: int = 0
     candidate_rejections: tuple[str, ...] = ()
     image_resizes: int = 0
+    strategy_version: str = "legacy_v1"
+    route_profile: str = "general"
+    complexity: str = "standard"
+    context_required: int = 0
+    history_mode: str = "native"
+    remote_fallback_position: int | None = None
+    identity_revision: str | None = None
+    legacy_model_alias_used: bool = False
+    response_redactions: int = 0
     trace: Any | None = field(default=None, repr=False, compare=False)
 
     def response_headers(self, request_id: str) -> dict[str, str]:
@@ -283,6 +305,13 @@ class RouteDecision:
             "X-1Panel-Queue-Wait-Ms": str(round(self.queue_wait_ms, 2)),
             "X-1Panel-Protocol": self.protocol,
             "X-1Panel-Protocol-Mode": self.native_or_adapter,
+            "X-1Panel-Route-Strategy": self.strategy_version,
+            "X-1Panel-Route-Profile": self.route_profile,
+            "X-1Panel-Context-Required": str(
+                self.context_required
+                or self.prompt_tokens + self.output_reserve_tokens
+            ),
+            "X-1Panel-History-Mode": self.history_mode,
         }
         if self.deployment_profile_id:
             values["X-1Panel-Route-Deployment-Profile"] = (
@@ -309,6 +338,7 @@ class ClientPolicy:
     rpm_limit: int
     tpm_limit: int
     max_parallel_requests: int
+    allow_compaction: bool = False
 
 
 @dataclass
@@ -318,6 +348,9 @@ class Evaluation:
     confidence: float
     reason: str
     preferred_tier: str | None = None
+    route_profile: str = "general"
+    complexity: str = "standard"
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

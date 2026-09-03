@@ -73,17 +73,18 @@ Router 必须在不混淆模型能力与物理容量的前提下实现：
 ```text
 会话原绑定节点
   → 兼容的本地 GPU
+  → DeepSeek V4 Flash
   → GLM-5.3-Flash
   → Codex Pro GPT-5.6 Sol
-  → DeepSeek V4 Flash
-  → 429/503
+  → 422/429/503
 ```
 
 - 健康的会话优先回到原 deployment 或订阅账号。
 - 新请求优先使用本地模型。
-- 本地合格容量全部繁忙后，GLM 是第一远程 fallback。
-- GLM 不可用、限流或能力不匹配时尝试 Codex Pro。
-- Codex Pro 不可用时，最后使用受预算保护的 DeepSeek。
+- 普通文本和研究任务的云端顺序是 DeepSeek、GLM、Sol。
+- 普通编程任务的云端顺序是 GLM、Sol、DeepSeek。
+- 复杂编程、架构、安全和调试任务的云端顺序是 Sol、GLM、DeepSeek。
+- 普通多模态的云端顺序是 GLM、Sol；复杂多模态编程为 Sol、GLM。
 
 ### 3.2 复杂编程主动升级
 
@@ -92,10 +93,11 @@ Router 必须在不混淆模型能力与物理容量的前提下实现：
 目标策略：
 
 ```text
-专项评估器判定需要 frontier
-  → 根据任务能力在 GLM 与 Codex Sol 中选择
-  → 首选节点不可用时尝试另一个订阅节点
-  → 回退兼容本地模型
+确定性规则或本地评估器判定复杂编程
+  → 会话原节点
+  → 完整合格的本地池
+  → Codex Sol
+  → GLM
   → DeepSeek
 ```
 
@@ -105,9 +107,10 @@ Router 必须在不混淆模型能力与物理容量的前提下实现：
 ```yaml
 routing:
   remote_fallback_order:
-    - zhipu-glm-5.3-flash
-    - codex-pro-gpt-5.6-sol
-    - cloud-deepseek-v4-flash
+    complex_code:
+      - codex-pro-gpt-5.6-sol
+      - zhipu-glm-5.3-flash
+      - cloud-deepseek-v4-flash
 ```
 
 质量分继续只表示模型在具体任务上的评测结果。
@@ -136,7 +139,7 @@ codex_accounts:
 也可以通过环境变量提供默认值：
 
 ```text
-CODEX_ACCOUNT_MAX_CONCURRENCY=2
+AI_ROUTER_CODEX_ACCOUNT_MAX_CONCURRENCY=2
 ```
 
 首轮从 2 路开始实测。确认没有持续账号级 `429`、响应串线或刷新冲突后，再考虑
@@ -303,30 +306,28 @@ Codex 是远程服务，Router 清理租约后无法直接确认旧请求是否�
 
 截至 2026-09-02：
 
-- 全局路由模式为 `local_first`。
-- Codex 注册表 `max_concurrency=1`。
-- Codex Adapter 使用硬编码 `asyncio.Semaphore(1)`。
+- `intelligent_v2` 已实现并作为默认策略，保留 `legacy_v1` 热回滚。
+- Codex 注册表 `max_concurrency=2`。
+- ChatGPT Codex 订阅协议不支持硬输出上限参数；此类请求不会选择 Sol。
+- Codex Adapter 使用可配置的两路 semaphore。
 - Router 的 Redis deployment 租约已经支持 `capacity > 1`。
 - OAuth 凭据刷新已经具有独立文件锁。
-- GLM-5.3-Flash 当前为 `auto_candidate=false`，不会参与自动 fallback。
+- GLM-5.3-Flash 当前为 `auto_candidate=true`，使用实测 262144 安全上下文参与
+  自动 fallback。
 - Codex Pro 与 DeepSeek 当前可以参与 `auto`。
-- 管理页面将 GPU worker 和 Codex 账号槽位显示在同一张表中。
+- 审计图已升级到 `graph_version=3`。
 
-因此目标实现需要：
-
-1. 为订阅账号增加可配置并发容量。
-2. 同步 Router 容量和 Adapter semaphore。
-3. 增加明确的 `remote_fallback_order`。
-4. GLM 完成真实协议验收后启用 `auto_candidate`。
-5. 拆分管理页面的 GPU 与订阅资源视图。
-6. 增加账号活动数、容量和限流状态观测。
+上线后继续复验 Responses 适配、真实 Auto 分流和审计轨迹。
+2. 把 GLM 安全上下文更新为最高实测通过值并启用 `auto_candidate`。
+3. 更新 Ivan WorkBuddy 上下文声明。
+4. 经确认后排空并重建 Router 与 Codex Adapter。
 
 ## 10. 验收计划
 
 ### 10.1 Codex 并发
 
 - 两个不同会话同时调用同一账号，均得到正确且不串线的响应。
-- 容量为 2 时，第 3 个 `auto` 请求立即转向 GLM。
+- 容量为 2 时，第 3 个 `auto` 请求立即转向当前画像的下一云端候选。
 - 第 3 个显式 Codex 请求等待最多 3 秒后返回 `429`。
 - A 完成后只释放 A 的租约，B 仍保持占用。
 - 流式断开、上游错误和客户端取消均不会遗留租约。
@@ -341,9 +342,10 @@ Codex 是远程服务，Router 清理租约后无法直接确认旧请求是否�
 ### 10.3 Fallback
 
 - 普通请求在本地有容量时不调用远程。
-- 本地全部繁忙时首先调用 GLM。
-- GLM 返回限流或故障后调用 Codex。
-- Codex 不可用后才调用 DeepSeek。
+- 本地全部繁忙后按请求画像使用固定云端顺序。
+- 普通文本首先调用 DeepSeek。
+- 普通编程首先调用 GLM。
+- 复杂编程首先调用 Codex Sol。
 - 云端关闭时只使用本地，全部繁忙返回
   `429 all_local_capacity_busy`。
 - 显式模型请求不发生静默替换。
@@ -358,13 +360,11 @@ Codex 是远程服务，Router 清理租约后无法直接确认旧请求是否�
 ## 11. 上线顺序
 
 1. 完成 GLM 文本、流式、工具、Responses 和图像最小真实验收。
-2. 实现可配置 Codex 账号容量，默认保持 1。
-3. 使用隔离环境验证 2 路并发和独立租约。
-4. 将生产 Codex 容量提升到 2。
-5. 启用 GLM `auto_candidate`。
-6. 启用明确的远程 fallback 顺序。
-7. 更新管理页面。
-8. 滚动重启 Router 和 Codex Adapter，不重启任何 GPU 模型服务。
-9. 观察账号级 `429`、错误率和响应串线至少一个稳定窗口，再决定是否提升到
+2. 使用隔离环境验证 2 路并发和独立租约。
+3. 将生产 Codex 容量提升到 2。
+4. 启用 GLM `auto_candidate` 并记录最高实测安全上下文。
+5. 将生产策略一次性切换为 `intelligent_v2`。
+6. 更新 Ivan WorkBuddy 的输入和输出上限。
+7. 滚动重启 Router 和 Codex Adapter，不重启任何 GPU 模型服务。
+8. 观察账号级 `429`、错误率和响应串线至少 60 分钟，再决定是否提升到
    4 路。
-

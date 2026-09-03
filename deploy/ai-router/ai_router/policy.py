@@ -6,7 +6,11 @@ from dataclasses import replace
 from typing import Any
 
 from .config import Registry, Settings
-from .errors import NoEligibleModelError, RouterError
+from .errors import (
+    NoCompatibleModelError,
+    NoEligibleModelError,
+    RouterError,
+)
 from .health import HealthMonitor
 from .route_trace import DecisionTrace
 from .store import StateStore
@@ -18,6 +22,18 @@ from .types import (
     PhysicalDeployment,
     RequestCapabilities,
     RouteDecision,
+)
+
+
+INCOMPATIBLE_REJECTION_REASONS = frozenset(
+    {
+        "capability",
+        "context",
+        "deepseek_multimodal_unsupported",
+        "modality",
+        "task",
+        "tier",
+    }
 )
 
 
@@ -107,6 +123,7 @@ class RoutingPolicy:
         evaluation: Evaluation,
         prompt_tokens: int,
         output_reserve_tokens: int,
+        requested_context_tokens: int | None = None,
         modalities: set[str],
         image_count: int = 0,
         has_tools: bool,
@@ -118,11 +135,22 @@ class RoutingPolicy:
         trace: DecisionTrace | None = None,
         trace_attempt: int = 1,
     ) -> RouteDecision:
+        strategy = str(
+            self.settings.section("routing").get(
+                "strategy",
+                "legacy_v1",
+            )
+        )
         excluded = excluded_endpoint_ids or set()
         excluded_deployments = excluded_deployment_ids or set()
         required = required_capabilities or RequestCapabilities(
             protocol="chat",
             tools=has_tools,
+        )
+        context_required = (
+            int(requested_context_tokens)
+            if requested_context_tokens is not None
+            else prompt_tokens + output_reserve_tokens
         )
         endpoints = (
             list(self.registry.responders())
@@ -157,6 +185,7 @@ class RoutingPolicy:
         statuses = await self.health.statuses(endpoints)
         candidates: list[Endpoint] = []
         rejections: list[str] = []
+        rejection_reasons: list[str] = []
         trace_candidates: list[dict[str, Any]] = []
         for endpoint in endpoints:
             reason = (
@@ -178,6 +207,7 @@ class RoutingPolicy:
             )
             if reason:
                 rejections.append(f"{endpoint.id}:{reason}")
+                rejection_reasons.append(reason)
             else:
                 candidates.append(endpoint)
             if trace:
@@ -203,9 +233,20 @@ class RoutingPolicy:
                 ),
             )
         if not candidates:
-            raise NoEligibleModelError(
-                "no eligible model is available: " + ", ".join(rejections)
+            message = "no eligible model is available: " + ", ".join(
+                rejections
             )
+            if (
+                requested_model == "auto"
+                and strategy == "intelligent_v2"
+                and rejection_reasons
+                and all(
+                    reason in INCOMPATIBLE_REJECTION_REASONS
+                    for reason in rejection_reasons
+                )
+            ):
+                raise NoCompatibleModelError(message)
+            raise NoEligibleModelError(message)
 
         if conversation:
             pinned = next(
@@ -241,6 +282,12 @@ class RoutingPolicy:
                     ),
                     required_capabilities=required.labels(),
                     candidate_rejections=tuple(rejections),
+                    strategy_version=strategy,
+                    route_profile=evaluation.route_profile,
+                    complexity=evaluation.complexity,
+                    context_required=(
+                        context_required
+                    ),
                     trace=trace,
                 )
                 await self._bind_traced_deployment(
@@ -281,7 +328,43 @@ class RoutingPolicy:
                 },
             )
 
-        if requested_model == "auto":
+        remote_fallback_position = None
+        selection_reason = ""
+        if requested_model == "auto" and strategy == "intelligent_v2":
+            before_priority = [item.id for item in candidates]
+            (
+                candidates,
+                selection_reason,
+                remote_fallback_position,
+            ) = self._apply_intelligent_v2_stage(
+                candidates,
+                evaluation,
+                context_required=context_required,
+                trace=trace,
+                trace_attempt=trace_attempt,
+            )
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "provider_priority",
+                    "passed",
+                    branch="auto",
+                    reason=selection_reason,
+                    evidence={
+                        "strategy": strategy,
+                        "before_endpoint_ids": before_priority,
+                        "after_endpoint_ids": [
+                            item.id for item in candidates
+                        ],
+                        "route_profile": evaluation.route_profile,
+                        "complexity": evaluation.complexity,
+                        "remote_fallback_position": (
+                            remote_fallback_position
+                        ),
+                    },
+                    path=False,
+                )
+        elif requested_model == "auto":
             before_priority = [item.id for item in candidates]
             candidates = self._apply_provider_priority(
                 candidates,
@@ -351,9 +434,15 @@ class RoutingPolicy:
                     required.protocol
                 ),
                 required_capabilities=required.labels(),
-                candidate_rejections=tuple(rejections),
-                trace=trace,
-            )
+                    candidate_rejections=tuple(rejections),
+                    strategy_version=strategy,
+                    route_profile=evaluation.route_profile,
+                    complexity=evaluation.complexity,
+                    context_required=(
+                        context_required
+                    ),
+                    trace=trace,
+                )
             await self._bind_traced_deployment(
                 decision,
                 statuses[endpoint.id],
@@ -424,7 +513,10 @@ class RoutingPolicy:
             reason=(
                 "monotonic_upgrade"
                 if migration
-                else self._priority_reason(endpoint, evaluation)
+                else (
+                    selection_reason
+                    or self._priority_reason(endpoint, evaluation)
+                )
             ),
             affinity="migrated" if migration else ("miss" if conversation else "new"),
             score=score,
@@ -436,6 +528,11 @@ class RoutingPolicy:
             ),
             required_capabilities=required.labels(),
             candidate_rejections=tuple(rejections),
+            strategy_version=strategy,
+            route_profile=evaluation.route_profile,
+            complexity=evaluation.complexity,
+            context_required=context_required,
+            remote_fallback_position=remote_fallback_position,
             trace=trace,
         )
         await self._bind_traced_deployment(
@@ -506,6 +603,8 @@ class RoutingPolicy:
                 "quality_status",
                 "unverified",
             ),
+            "route_profile": evaluation.route_profile,
+            "complexity": evaluation.complexity,
             "physical_deployments": {
                 "total": len(workers),
                 "ready": sum(
@@ -611,6 +710,14 @@ class RoutingPolicy:
                 task=decision.task,
                 reason=decision.reason,
                 affinity=decision.affinity,
+                strategy_version=decision.strategy_version,
+                route_profile=decision.route_profile,
+                complexity=decision.complexity,
+                context_required=decision.context_required,
+                history_mode=decision.history_mode,
+                remote_fallback_position=(
+                    decision.remote_fallback_position
+                ),
             )
 
     async def _ineligible_reason(
@@ -648,8 +755,27 @@ class RoutingPolicy:
                 require_available=False,
             )
             if not deployments:
-                return "physical_deployment"
-        elif not modalities.issubset(set(endpoint.modalities)):
+                return (
+                    self._physical_incompatibility_reason(
+                        endpoint,
+                        status,
+                        required_context=(
+                            prompt_tokens + output_reserve_tokens
+                        ),
+                        modalities=modalities,
+                        image_count=image_count,
+                    )
+                    or "physical_deployment"
+                )
+        if (
+            "image" in modalities
+            and str(endpoint.metadata.get("provider", "")) == "deepseek"
+        ):
+            return "deepseek_multimodal_unsupported"
+        if (
+            endpoint.backend_type != "ai_pool"
+            and not modalities.issubset(set(endpoint.modalities))
+        ):
             return "modality"
         if not endpoint.capabilities.supports(required_capabilities):
             return "capability"
@@ -692,6 +818,13 @@ class RoutingPolicy:
             and conversation
             and endpoint.tier_rank < conversation.tier_rank
             and not self._cloud_to_local_migration(conversation, endpoint)
+            and str(
+                self.settings.section("routing").get(
+                    "strategy",
+                    "legacy_v1",
+                )
+            )
+            == "legacy_v1"
         ):
             return "tier_downgrade"
         if evaluation.required_tier:
@@ -699,6 +832,104 @@ class RoutingPolicy:
             if required_rank is not None and endpoint.tier_rank < required_rank:
                 return "tier"
         return None
+
+    def _apply_intelligent_v2_stage(
+        self,
+        candidates: list[Endpoint],
+        evaluation: Evaluation,
+        *,
+        context_required: int,
+        trace: DecisionTrace | None,
+        trace_attempt: int,
+    ) -> tuple[list[Endpoint], str, int | None]:
+        local = [item for item in candidates if not item.cloud]
+        if local:
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "local_sufficiency",
+                    "selected",
+                    branch="sufficient",
+                    reason="local_constraints_satisfied",
+                    evidence={
+                        "endpoint_ids": [item.id for item in local],
+                        "required_context_tokens": context_required,
+                    },
+                )
+            return local, "local_sufficient", None
+
+        profile_key = self._remote_profile_key(evaluation)
+        order = [
+            str(item)
+            for item in self.settings.section("routing")
+            .get("remote_fallback_order", {})
+            .get(profile_key, [])
+        ]
+        if trace:
+            trace.record(
+                trace_attempt,
+                "local_sufficiency",
+                "evaluated",
+                branch="insufficient",
+                reason="no_eligible_local_candidate",
+                evidence={
+                    "route_profile": evaluation.route_profile,
+                    "complexity": evaluation.complexity,
+                    "required_context_tokens": context_required,
+                },
+            )
+        for index, configured in enumerate(order, start=1):
+            matched = [
+                endpoint
+                for endpoint in candidates
+                if endpoint.cloud
+                and configured
+                in {
+                    endpoint.id,
+                    endpoint.public_model,
+                    str(endpoint.metadata.get("provider", "")),
+                }
+            ]
+            if not matched:
+                continue
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "remote_expert_dispatch",
+                    "selected",
+                    branch=profile_key,
+                    reason="configured_remote_order",
+                    evidence={
+                        "profile_key": profile_key,
+                        "configured_order": order,
+                        "position": index,
+                        "endpoint_ids": [
+                            endpoint.id for endpoint in matched
+                        ],
+                    },
+                )
+            return matched, "remote_profile_fallback", index
+        raise NoCompatibleModelError(
+            "no configured remote fallback can satisfy profile "
+            f"{profile_key}"
+        )
+
+    def _remote_profile_key(
+        self,
+        evaluation: Evaluation,
+    ) -> str:
+        if evaluation.route_profile == "multimodal":
+            return (
+                "multimodal_complex_code"
+                if evaluation.complexity == "complex"
+                else "multimodal"
+            )
+        if (
+            evaluation.route_profile == "code"
+            and evaluation.complexity == "complex"
+        ):
+            return "complex_code"
+        return evaluation.route_profile
 
     def _apply_provider_priority(
         self,
@@ -948,6 +1179,40 @@ class RoutingPolicy:
             result.append(item)
         return result
 
+    def _physical_incompatibility_reason(
+        self,
+        endpoint: Endpoint,
+        status: EndpointStatus,
+        *,
+        required_context: int,
+        modalities: set[str],
+        image_count: int,
+    ) -> str | None:
+        reasons: set[str] = set()
+        found = False
+        for value in status.detail.get("workers", []):
+            try:
+                item = _physical_deployment_from_status(
+                    endpoint,
+                    value,
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            found = True
+            item_reasons: set[str] = set()
+            if item.safe_context_tokens < required_context:
+                item_reasons.add("context")
+            if not item.supports_modalities(modalities):
+                item_reasons.add("modality")
+            if not item.supports_image_count(image_count):
+                item_reasons.add("capability")
+            if not item_reasons:
+                return None
+            reasons.update(item_reasons)
+        if not found:
+            return None
+        return next(iter(reasons)) if len(reasons) == 1 else "capability"
+
     def _score(
         self,
         endpoint: Endpoint,
@@ -1100,6 +1365,13 @@ def updated_conversation_state(
             encrypted_capsule=encrypted_capsule,
             boundary_hash=boundary_hash,
             migration_count=1 if decision.migration else 0,
+            route_profile=decision.route_profile,
+            complexity=decision.complexity,
+            provider_family=str(
+                decision.endpoint.metadata.get("provider", "")
+                or decision.endpoint.backend_type
+            ),
+            history_mode=decision.history_mode,
         )
     return replace(
         existing,
@@ -1114,4 +1386,11 @@ def updated_conversation_state(
         encrypted_capsule=encrypted_capsule or existing.encrypted_capsule,
         boundary_hash=boundary_hash or existing.boundary_hash,
         migration_count=existing.migration_count + (1 if decision.migration else 0),
+        route_profile=decision.route_profile,
+        complexity=decision.complexity,
+        provider_family=str(
+            decision.endpoint.metadata.get("provider", "")
+            or decision.endpoint.backend_type
+        ),
+        history_mode=decision.history_mode,
     )

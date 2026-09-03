@@ -15,8 +15,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from .compaction import extract_messages, replace_messages
 from .errors import (
     AllLocalCapacityBusyError,
+    AuthenticationError,
     CapacityBusyError,
     CompactionUnavailableError,
+    HistoryMigrationRequiredError,
+    NoCompatibleModelError,
     NoEligibleModelError,
     QueueTimeoutError,
     RouterError,
@@ -24,12 +27,27 @@ from .errors import (
 from .history import (
     SSEAccumulator,
     apply_stored_history,
+    deepseek_history_requires_migration,
     history_lookup_identities,
+    normalize_history_for_provider,
     persist_history,
+    provider_family,
+)
+from .identity import (
+    IdentityProfile,
+    IdentityStreamSanitizer,
+    internal_identifiers,
+    sanitize_payload,
+    sanitize_value,
 )
 from .media import inspect_image_inputs, normalize_ai_images
 from .policy import updated_conversation_state
 from .protocol import normalize_request
+from .responses_adapter import (
+    chat_response_to_responses,
+    chat_stream_to_responses,
+    responses_request_to_chat,
+)
 from .route_trace import (
     DecisionTrace,
     registry_fingerprint,
@@ -87,7 +105,19 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         exc: RouterError,
     ) -> JSONResponse:
         await _finish_request_trace_error(request, exc)
-        return _error_response(exc)
+        current = _runtime(request)
+        profile = getattr(
+            request.state,
+            "identity_profile",
+            IdentityProfile.from_settings(
+                current.settings.section("identity")
+            ),
+        )
+        return _error_response(
+            exc,
+            profile=profile,
+            identifiers=internal_identifiers(current.registry),
+        )
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
@@ -149,14 +179,27 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         client = await current.auth.authenticate(
             request.headers.get("authorization")
         )
-        values = []
-        for model in (
-            "auto",
-            *current.registry.enabled_public_models(),
-        ):
-            if "*" not in client.policy.models and model not in client.policy.models:
-                continue
-            values.append(await _model_descriptor(current, model))
+        profile = IdentityProfile.from_settings(
+            current.settings.section("identity")
+        )
+        if profile.enabled:
+            values = await _identity_model_descriptors(
+                current,
+                client.policy.models,
+                profile,
+            )
+        else:
+            values = []
+            for model in (
+                "auto",
+                *current.registry.enabled_public_models(),
+            ):
+                if (
+                    "*" not in client.policy.models
+                    and model not in client.policy.models
+                ):
+                    continue
+                values.append(await _model_descriptor(current, model))
         return JSONResponse({"object": "list", "data": values})
 
     @app.post("/v1/chat/completions")
@@ -173,18 +216,28 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
 async def _model_descriptor(
     current: RouterRuntime,
     model: str,
+    *,
+    endpoints_override: tuple[Endpoint, ...] | None = None,
+    owned_by: str = "1panel-ai-router",
+    use_auto_limits: bool | None = None,
 ) -> dict[str, Any]:
+    if use_auto_limits is None:
+        use_auto_limits = model == "auto"
     endpoints = (
-        tuple(
-            endpoint
-            for endpoint in current.registry.responders()
-            if endpoint.enabled and endpoint.auto_candidate
-        )
-        if model == "auto"
-        else tuple(
-            endpoint
-            for endpoint in current.registry.by_public_model(model)
-            if endpoint.enabled
+        endpoints_override
+        if endpoints_override is not None
+        else (
+            tuple(
+                endpoint
+                for endpoint in current.registry.responders()
+                if endpoint.enabled and endpoint.auto_candidate
+            )
+            if model == "auto"
+            else tuple(
+                endpoint
+                for endpoint in current.registry.by_public_model(model)
+                if endpoint.enabled
+            )
         )
     )
     statuses = await current.health.statuses(endpoints)
@@ -225,7 +278,7 @@ async def _model_descriptor(
         "id": model,
         "object": "model",
         "created": 0,
-        "owned_by": "1panel-ai-router",
+        "owned_by": owned_by,
         "modalities": modalities,
         "input_modalities": modalities,
         "output_modalities": ["text"],
@@ -249,8 +302,60 @@ async def _model_descriptor(
                     for mode in endpoint.capabilities.tool_choice_modes
                 }
             ),
+            "output_token_limit": any(
+                endpoint.capabilities.output_token_limit
+                for endpoint in endpoints
+            ),
         },
     }
+    max_context_tokens = max(
+        (
+            min(
+                endpoint.safe_context_tokens,
+                statuses[endpoint.id].eligible_context_tokens
+                or endpoint.safe_context_tokens,
+            )
+            for endpoint in endpoints
+        ),
+        default=0,
+    )
+    configured_output_limits = [
+        int(endpoint.metadata["max_output_tokens"])
+        for endpoint in endpoints
+        if endpoint.metadata.get("max_output_tokens") is not None
+    ]
+    if use_auto_limits:
+        max_output_tokens = int(
+            current.settings.section("routing").get(
+                "auto_max_output_tokens",
+                65536,
+            )
+        )
+        declared_input_tokens = int(
+            current.settings.section("routing").get(
+                "auto_max_input_tokens",
+                max_context_tokens,
+            )
+        )
+        max_context_tokens = min(
+            max_context_tokens,
+            declared_input_tokens + max_output_tokens,
+        )
+    else:
+        max_output_tokens = max(
+            configured_output_limits,
+            default=min(65536, max_context_tokens),
+        )
+    max_output_tokens = min(
+        max_output_tokens,
+        max_context_tokens,
+    )
+    descriptor["maxInputTokens"] = max(
+        0,
+        max_context_tokens - max_output_tokens,
+    )
+    descriptor["maxOutputTokens"] = max_output_tokens
+    descriptor["contextWindow"] = max_context_tokens
     if supports_images:
         descriptor["maxInputImages"] = (
             None
@@ -260,10 +365,109 @@ async def _model_descriptor(
     return descriptor
 
 
+async def _identity_model_descriptors(
+    current: RouterRuntime,
+    allowed_models: tuple[str, ...],
+    profile: IdentityProfile,
+) -> list[dict[str, Any]]:
+    allowed = set(allowed_models)
+    alias_target = _identity_alias_target(
+        current,
+        allowed_models,
+        profile,
+    )
+    if alias_target is None:
+        return []
+    if alias_target == "auto":
+        endpoints = tuple(
+            endpoint
+            for endpoint in current.registry.responders()
+            if endpoint.enabled and endpoint.auto_candidate
+        )
+    else:
+        endpoints = tuple(
+            endpoint
+            for endpoint in current.registry.by_public_model(alias_target)
+            if endpoint.enabled
+        )
+    if not endpoints:
+        return []
+
+    values = []
+    if "*" in allowed or "auto" in allowed:
+        values.append(
+            await _model_descriptor(
+                current,
+                "auto",
+                endpoints_override=endpoints,
+                owned_by=profile.provider_name,
+            )
+        )
+    values.append(
+        await _model_descriptor(
+            current,
+            profile.public_model_id,
+            endpoints_override=endpoints,
+            owned_by=profile.provider_name,
+            use_auto_limits=alias_target == "auto",
+        )
+    )
+    return values
+
+
+def _identity_alias_target(
+    current: RouterRuntime,
+    allowed_models: tuple[str, ...],
+    profile: IdentityProfile,
+) -> str | None:
+    allowed = set(allowed_models)
+    if (
+        "*"
+        in allowed
+        or "auto"
+        in allowed
+        or profile.public_model_id in allowed
+    ):
+        return "auto"
+    explicit = sorted(
+        model
+        for model in allowed
+        if current.registry.by_public_model(model)
+    )
+    return explicit[0] if len(explicit) == 1 else None
+
+
+def _resolve_requested_model(
+    current: RouterRuntime,
+    allowed_models: tuple[str, ...],
+    requested_model: str,
+    profile: IdentityProfile,
+) -> str:
+    if (
+        not profile.enabled
+        or requested_model != profile.public_model_id
+    ):
+        return requested_model
+    alias_target = _identity_alias_target(
+        current,
+        allowed_models,
+        profile,
+    )
+    if alias_target is not None:
+        return alias_target
+    raise AuthenticationError(
+        "API key does not permit this public model alias"
+    )
+
+
 async def _proxy(request: Request, api_kind: str) -> Response:
     current = _runtime(request)
     current.reload_settings()
     await current.reload_endpoint_config()
+    identity = IdentityProfile.from_settings(
+        current.settings.section("identity")
+    )
+    request.state.identity_profile = identity
     request_id = request.headers.get("x-request-id") or uuid4().hex
     max_request_bytes = int(
         current.settings.section("limits").get(
@@ -299,8 +503,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
     received_body = json.loads(json.dumps(body))
 
-    requested_model = str(body.get("model", "")).strip()
-    if not requested_model:
+    client_requested_model = str(body.get("model", "")).strip()
+    if not client_requested_model:
         raise RouterError(
             "model is required",
             status_code=400,
@@ -309,12 +513,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     authenticated = await current.auth.authenticate(
         request.headers.get("authorization")
     )
+    requested_model = _resolve_requested_model(
+        current,
+        authenticated.policy.models,
+        client_requested_model,
+        identity,
+    )
     trace = DecisionTrace(
         request_id=request_id,
         client_id=authenticated.policy.id,
         key_id=authenticated.key_id,
         protocol=api_kind,
-        requested_model=requested_model,
+        requested_model=client_requested_model,
         excerpt=request_excerpt(received_body, api_kind),
         instance_id=current.instance_id,
         boot_id=current.boot_id,
@@ -324,7 +534,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     )
     request.state.route_trace = trace
     await _save_request_trace(current, trace)
-    current.auth.ensure_model_access(authenticated, requested_model)
+    if not (
+        identity.enabled
+        and client_requested_model == identity.public_model_id
+    ):
+        current.auth.ensure_model_access(
+            authenticated,
+            client_requested_model,
+        )
     if current.draining:
         raise RouterError(
             "router instance is draining",
@@ -410,9 +627,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 effective_body=effective_body,
             )
         prompt_tokens = current.token_counter.count_request(
-            effective_body,
+            identity.inject(effective_body, api_kind),
             api_kind,
         )
+        requested_prompt_tokens = prompt_tokens
         reserve_tokens = output_reserve_tokens(
             effective_body,
             api_kind,
@@ -462,6 +680,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             api_kind=api_kind,
             prompt_tokens=prompt_tokens,
             current_task=conversation.task if conversation else None,
+            current_route_profile=(
+                conversation.route_profile if conversation else None
+            ),
+            current_complexity=(
+                conversation.complexity if conversation else None
+            ),
             is_new_conversation=(
                 conversation is None and requested_model == "auto"
             ),
@@ -471,14 +695,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         modalities = request_modalities(effective_body, api_kind)
         image_inputs = inspect_image_inputs(effective_body)
         has_tools = required_capabilities.tools
-        trace.set_request_context(
-            prompt_tokens=prompt_tokens,
-            output_reserve_tokens=reserve_tokens,
-            modalities=modalities,
-            required_capabilities=list(required_capabilities.labels()),
+        allow_compaction = _compaction_allowed(
+            current,
+            authenticated.policy.allow_compaction,
+            request.headers.get("x-1panel-allow-compaction", ""),
         )
-        trace.set_evaluation(evaluation)
-        await _save_request_trace(current, trace)
         excluded: set[str] = {
             endpoint.id
             for endpoint in current.registry.responders()
@@ -488,12 +709,73 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 and endpoint.backend_type == "ai_pool"
             )
         }
+        pre_route_capsule = None
+        if allow_compaction:
+            (
+                effective_body,
+                prompt_tokens,
+                pre_route_capsule,
+            ) = await _maybe_compact_for_route(
+                current,
+                effective_body,
+                api_kind=api_kind,
+                request_id=request_id,
+                requested_model=requested_model,
+                evaluation=evaluation,
+                prompt_tokens=prompt_tokens,
+                output_reserve_tokens=reserve_tokens,
+                modalities=modalities,
+                image_count=image_inputs.total,
+                has_tools=has_tools,
+                required_capabilities=required_capabilities,
+                conversation=conversation,
+                excluded_endpoints=excluded,
+                identity=identity,
+            )
+        trace.set_request_context(
+            prompt_tokens=requested_prompt_tokens,
+            output_reserve_tokens=reserve_tokens,
+            modalities=modalities,
+            required_capabilities=list(required_capabilities.labels()),
+        )
+        trace.set_evaluation(evaluation)
+        if pre_route_capsule is not None:
+            trace.record(
+                1,
+                "context_compaction",
+                "passed",
+                reason="explicit_compaction",
+                evidence={
+                    "before_prompt_tokens": requested_prompt_tokens,
+                    "after_prompt_tokens": prompt_tokens,
+                    "requested_output_tokens": reserve_tokens,
+                    "requested_context_tokens": (
+                        requested_prompt_tokens + reserve_tokens
+                    ),
+                    "routed_context_tokens": (
+                        prompt_tokens + reserve_tokens
+                    ),
+                },
+                path=False,
+            )
+        await _save_request_trace(current, trace)
         excluded_deployments: set[str] = set()
         max_attempts = int(current.settings.section("failover").get("max_attempts", 2))
-        allow_retry = not bool(effective_body.get("stream")) and not has_tools
+        # At this point no response bytes or tool calls reached the client.
+        allow_retry = True
         attempts = (
             max(max_attempts, 3)
-            if "image" in modalities and requested_model == "auto"
+            if requested_model == "auto"
+            and (
+                "image" in modalities
+                or str(
+                    current.settings.section("routing").get(
+                        "strategy",
+                        "legacy_v1",
+                    )
+                )
+                == "intelligent_v2"
+            )
             else max_attempts
         )
         last_error: RouterError | None = None
@@ -519,6 +801,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     evaluation=evaluation,
                     prompt_tokens=prompt_tokens,
                     output_reserve_tokens=reserve_tokens,
+                    requested_context_tokens=(
+                        requested_prompt_tokens + reserve_tokens
+                    ),
                     modalities=modalities,
                     image_count=image_inputs.total,
                     has_tools=has_tools,
@@ -533,9 +818,23 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     queue_wait_ms=total_queue_wait_ms,
                     trace=trace,
                     route_attempt=attempt,
+                    identity=identity,
+                    allow_compaction=allow_compaction,
+                    history_precompacted=(
+                        pre_route_capsule is not None
+                    ),
                 )
+                capsule = capsule or pre_route_capsule
                 decision.attempts = attempt
                 decision.tool_history_repairs = tool_history_repairs
+                decision.identity_revision = (
+                    identity.revision if identity.enabled else None
+                )
+                decision.legacy_model_alias_used = bool(
+                    identity.enabled
+                    and client_requested_model
+                    not in {"auto", identity.public_model_id}
+                )
                 if current.training is not None:
                     await current.training.mark_routed(
                         training_token,
@@ -567,8 +866,28 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             "output_reserve_tokens": (
                                 decision.output_reserve_tokens
                             ),
+                            "requested_output_tokens": (
+                                decision.output_reserve_tokens
+                            ),
+                            "context_required": (
+                                decision.context_required
+                            ),
+                            "strategy_version": (
+                                decision.strategy_version
+                            ),
+                            "route_profile": decision.route_profile,
+                            "complexity": decision.complexity,
+                            "history_mode": decision.history_mode,
+                            "remote_fallback_position": (
+                                decision.remote_fallback_position
+                            ),
                             "required_capabilities": list(
                                 decision.required_capabilities
+                            ),
+                            "identity_revision": (
+                                identity.revision
+                                if identity.enabled
+                                else None
                             ),
                         },
                     )
@@ -622,6 +941,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     routed_body,
                     api_kind=api_kind,
                     decision=decision,
+                    identity=identity,
                 )
                 if (
                     attempt < attempts
@@ -655,8 +975,15 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         await _save_request_trace(current, trace)
                         await lease.release_deployment()
                         continue
-                subscription_fallback = bool(
-                    requested_model == "auto"
+                legacy_subscription_fallback = bool(
+                    str(
+                        current.settings.section("routing").get(
+                            "strategy",
+                            "legacy_v1",
+                        )
+                    )
+                    == "legacy_v1"
+                    and requested_model == "auto"
                     and decision.endpoint.metadata.get("billing_mode")
                     == "subscription"
                     and upstream.status_code
@@ -670,7 +997,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             in RETRYABLE_STATUS_CODES
                             and allow_retry
                         )
-                        or subscription_fallback
+                        or legacy_subscription_fallback
                     )
                 ):
                     await upstream.aclose()
@@ -687,8 +1014,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         attempt=attempt,
                         status_code=upstream.status_code,
                         reason=(
-                            "subscription_fallback"
-                            if subscription_fallback
+                            "legacy_subscription_fallback"
+                            if legacy_subscription_fallback
                             else "retryable_upstream_status"
                         ),
                         allowed=True,
@@ -697,18 +1024,29 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     await lease.release_deployment()
                     continue
 
+                identifiers = internal_identifiers(
+                    current.registry,
+                    decision,
+                )
                 headers = _response_headers(
                     upstream,
                     decision,
                     request_id,
                     conversation_id=conversation_id,
                     conversation_mode=conversation_mode,
+                    identity=identity,
                 )
                 if upstream.status_code >= 400:
                     payload = await upstream.aread()
                     await upstream.aclose()
                     await current.budget.release(budget_reservation)
                     budget_reservation = None
+                    public_payload, redactions = sanitize_payload(
+                        payload,
+                        identity,
+                        identifiers,
+                    )
+                    decision.response_redactions = redactions
                     await _audit(
                         current,
                         request_id=request_id,
@@ -731,7 +1069,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             response_payload=payload,
                         )
                     return Response(
-                        content=payload,
+                        content=public_payload,
                         status_code=upstream.status_code,
                         headers=headers,
                         media_type=upstream.headers.get("content-type"),
@@ -764,6 +1102,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             training_token=training_token,
                             started_at=request.state.started_at,
                             cache_snapshot=cache_snapshot,
+                            identity=identity,
+                            identifiers=identifiers,
                         ),
                         status_code=upstream.status_code,
                         headers=headers,
@@ -772,7 +1112,21 @@ async def _proxy(request: Request, api_kind: str) -> Response:
 
                 payload = await upstream.aread()
                 await upstream.aclose()
+                if (
+                    api_kind == "responses"
+                    and decision.native_or_adapter == "adapter"
+                ):
+                    payload = chat_response_to_responses(
+                        payload,
+                        model=decision.endpoint.public_model,
+                    )
                 await _map_response_id(current, payload, state)
+                public_payload, redactions = sanitize_payload(
+                    payload,
+                    identity,
+                    identifiers,
+                )
+                decision.response_redactions = redactions
                 await persist_history(
                     current.compactor,
                     current.conversations,
@@ -780,7 +1134,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     client_id=authenticated.policy.id,
                     body=routed_body,
                     api_kind=api_kind,
-                    response_payload=payload,
+                    response_payload=public_payload,
                 )
                 if current.training is not None:
                     await current.training.complete(
@@ -801,12 +1155,17 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     cache_snapshot=cache_snapshot,
                 )
                 return Response(
-                    content=payload,
+                    content=public_payload,
                     status_code=upstream.status_code,
                     headers=headers,
                     media_type=upstream.headers.get("content-type"),
                 )
-            except (httpx.RequestError, NoEligibleModelError) as exc:
+            except (
+                httpx.RequestError,
+                HistoryMigrationRequiredError,
+                NoCompatibleModelError,
+                NoEligibleModelError,
+            ) as exc:
                 await current.budget.release(budget_reservation)
                 budget_reservation = None
                 last_error = (
@@ -826,14 +1185,33 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         excluded_deployments,
                     )
                 await lease.release_deployment()
-                subscription_fallback = bool(
-                    requested_model == "auto"
+                legacy_subscription_fallback = bool(
+                    str(
+                        current.settings.section("routing").get(
+                            "strategy",
+                            "legacy_v1",
+                        )
+                    )
+                    == "legacy_v1"
+                    and requested_model == "auto"
                     and decision is not None
                     and decision.endpoint.metadata.get("billing_mode")
                     == "subscription"
                 )
-                if attempt >= attempts or not (
-                    allow_retry or subscription_fallback
+                non_retryable_route_error = isinstance(
+                    exc,
+                    (
+                        HistoryMigrationRequiredError,
+                        NoCompatibleModelError,
+                    ),
+                )
+                if (
+                    attempt >= attempts
+                    or non_retryable_route_error
+                    or not (
+                        allow_retry
+                        or legacy_subscription_fallback
+                    )
                 ):
                     _record_trace_retry(
                         trace,
@@ -898,6 +1276,7 @@ async def _acquire_route_capacity(
     evaluation: Any,
     prompt_tokens: int,
     output_reserve_tokens: int,
+    requested_context_tokens: int | None = None,
     modalities: set[str],
     image_count: int = 0,
     has_tools: bool,
@@ -912,9 +1291,16 @@ async def _acquire_route_capacity(
     queue_wait_ms: float,
     trace: DecisionTrace | None = None,
     route_attempt: int = 1,
+    identity: IdentityProfile | None = None,
+    allow_compaction: bool = False,
+    history_precompacted: bool = False,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
+    identity = identity or IdentityProfile.from_settings(
+        current.settings.section("identity")
+    )
     capacity_busy_seen = False
     affinity_spilled = False
+    history_incompatible_seen = False
     routing = current.settings.section("routing")
 
     while True:
@@ -924,6 +1310,7 @@ async def _acquire_route_capacity(
                 evaluation=evaluation,
                 prompt_tokens=prompt_tokens,
                 output_reserve_tokens=output_reserve_tokens,
+                requested_context_tokens=requested_context_tokens,
                 modalities=modalities,
                 image_count=image_count,
                 has_tools=has_tools,
@@ -935,9 +1322,11 @@ async def _acquire_route_capacity(
                 trace=trace,
                 trace_attempt=route_attempt,
             )
-        except NoEligibleModelError:
+        except (NoCompatibleModelError, NoEligibleModelError):
             if trace:
                 await _save_request_trace(current, trace)
+            if history_incompatible_seen:
+                raise HistoryMigrationRequiredError()
             if capacity_busy_seen:
                 if requested_model == "auto":
                     raise AllLocalCapacityBusyError()
@@ -1147,6 +1536,17 @@ async def _acquire_route_capacity(
         if trace:
             trace.record(
                 route_attempt,
+                "history_preflight",
+                "running",
+                reason="history_preflight",
+                evidence={
+                    "endpoint_id": decision.endpoint.id,
+                    "provider": provider_family(decision.endpoint),
+                    "allow_compaction": allow_compaction,
+                },
+            )
+            trace.record(
+                route_attempt,
                 "request_prepare",
                 "running",
                 reason="request_prepare",
@@ -1162,7 +1562,42 @@ async def _acquire_route_capacity(
                 api_kind=api_kind,
                 decision=decision,
                 request_id=request_id,
+                identity=identity,
+                conversation=conversation,
+                allow_compaction=allow_compaction,
+                history_precompacted=history_precompacted,
             )
+        except HistoryMigrationRequiredError as exc:
+            if trace:
+                trace.record(
+                    route_attempt,
+                    "history_preflight",
+                    "failed",
+                    reason=exc.code,
+                    evidence={
+                        "endpoint_id": decision.endpoint.id,
+                        "provider": provider_family(decision.endpoint),
+                        "allow_compaction": allow_compaction,
+                    },
+                )
+                trace.record(
+                    route_attempt,
+                    "retry_decision",
+                    (
+                        "passed"
+                        if requested_model == "auto"
+                        else "failed"
+                    ),
+                    reason=exc.code,
+                    evidence={"allowed": requested_model == "auto"},
+                )
+                await _save_request_trace(current, trace)
+            await lease.release_deployment()
+            if requested_model != "auto":
+                raise
+            history_incompatible_seen = True
+            excluded_endpoints.add(decision.endpoint.id)
+            continue
         except RouterError as exc:
             if trace:
                 trace.record(
@@ -1178,6 +1613,17 @@ async def _acquire_route_capacity(
         if trace:
             trace.record(
                 route_attempt,
+                "history_preflight",
+                "passed",
+                reason=decision.history_mode,
+                evidence={
+                    "history_mode": decision.history_mode,
+                    "provider": provider_family(decision.endpoint),
+                },
+                path=False,
+            )
+            trace.record(
+                route_attempt,
                 "request_prepare",
                 "passed",
                 reason="request_prepared",
@@ -1185,6 +1631,7 @@ async def _acquire_route_capacity(
                     "protocol": api_kind,
                     "image_resizes": decision.image_resizes,
                     "compacted": capsule is not None,
+                    "history_mode": decision.history_mode,
                 },
             )
             trace.record(
@@ -1255,6 +1702,14 @@ async def _acquire_route_capacity(
                 task=decision.task,
                 reason=decision.reason,
                 affinity=decision.affinity,
+                strategy_version=decision.strategy_version,
+                route_profile=decision.route_profile,
+                complexity=decision.complexity,
+                context_required=decision.context_required,
+                history_mode=decision.history_mode,
+                remote_fallback_position=(
+                    decision.remote_fallback_position
+                ),
             )
             trace.confirm_selection(attempt=route_attempt)
             await _save_request_trace(current, trace)
@@ -1427,8 +1882,15 @@ async def _send_upstream(
     *,
     api_kind: str,
     decision: RouteDecision,
+    identity: IdentityProfile,
 ) -> httpx.Response:
-    payload = json.loads(json.dumps(body))
+    payload = identity.inject(body, api_kind)
+    responses_adapter = (
+        api_kind == "responses"
+        and decision.native_or_adapter == "adapter"
+    )
+    if responses_adapter:
+        payload = responses_request_to_chat(payload)
     direct = bool(decision.upstream_api_base)
     if decision.endpoint.metadata.get("thinking_via_extra_body"):
         thinking = payload.pop("thinking", None)
@@ -1441,12 +1903,16 @@ async def _send_upstream(
                     code="invalid_request",
                 )
             extra_body.setdefault("thinking", thinking)
-    if api_kind == "responses" and not decision.endpoint.cloud:
+    if (
+        api_kind == "responses"
+        and not responses_adapter
+        and not decision.endpoint.cloud
+    ):
         _mirror_responses_format(payload)
     payload["model"] = (
         decision.endpoint.provider_model if direct else decision.endpoint.id
     )
-    if api_kind == "responses":
+    if api_kind == "responses" and not responses_adapter:
         payload.pop("conversation", None)
         payload.pop("previous_response_id", None)
     base_url = (
@@ -1454,7 +1920,11 @@ async def _send_upstream(
         if decision.upstream_api_base
         else f"{current.internal_base_url}/v1"
     )
-    url = f"{base_url}/{'chat/completions' if api_kind == 'chat' else 'responses'}"
+    upstream_api_kind = "chat" if responses_adapter else api_kind
+    url = (
+        f"{base_url}/"
+        f"{'chat/completions' if upstream_api_kind == 'chat' else 'responses'}"
+    )
     api_key = current.internal_api_key
     if direct:
         api_key = os.environ.get(
@@ -1633,6 +2103,78 @@ async def _exclude_failed_vision_profile(
     )
 
 
+async def _maybe_compact_for_route(
+    current: RouterRuntime,
+    body: dict[str, Any],
+    *,
+    api_kind: str,
+    request_id: str,
+    requested_model: str,
+    evaluation: Evaluation,
+    prompt_tokens: int,
+    output_reserve_tokens: int,
+    modalities: set[str],
+    image_count: int,
+    has_tools: bool,
+    required_capabilities: RequestCapabilities,
+    conversation: ConversationState | None,
+    excluded_endpoints: set[str],
+    identity: IdentityProfile,
+) -> tuple[dict[str, Any], int, Any | None]:
+    try:
+        await current.policy.choose(
+            requested_model=requested_model,
+            evaluation=evaluation,
+            prompt_tokens=prompt_tokens,
+            output_reserve_tokens=output_reserve_tokens,
+            modalities=modalities,
+            image_count=image_count,
+            has_tools=has_tools,
+            required_capabilities=required_capabilities,
+            conversation=conversation,
+            excluded_endpoint_ids=excluded_endpoints,
+            routing_key=f"{request_id}:preflight",
+        )
+        return body, prompt_tokens, None
+    except (NoCompatibleModelError, NoEligibleModelError) as original:
+        try:
+            target = await current.policy.choose(
+                requested_model=requested_model,
+                evaluation=evaluation,
+                prompt_tokens=1,
+                output_reserve_tokens=output_reserve_tokens,
+                modalities=modalities,
+                image_count=image_count,
+                has_tools=has_tools,
+                required_capabilities=required_capabilities,
+                conversation=conversation,
+                excluded_endpoint_ids=excluded_endpoints,
+                routing_key=f"{request_id}:compaction-target",
+            )
+        except (NoCompatibleModelError, NoEligibleModelError):
+            raise original
+
+    target_context = (
+        target.deployment_safe_context_tokens
+        or target.endpoint.safe_context_tokens
+    )
+    capsule, routed, compacted_prompt_tokens = (
+        await _compact_body_for_target(
+            current,
+            body,
+            api_kind=api_kind,
+            request_id=request_id,
+            target_context=target_context,
+            identity=identity,
+        )
+    )
+    if compacted_prompt_tokens + output_reserve_tokens > target_context:
+        raise NoCompatibleModelError(
+            "the compacted request still exceeds the selected model context"
+        )
+    return routed, compacted_prompt_tokens, capsule
+
+
 async def _prepare_routed_body(
     current: RouterRuntime,
     body: dict[str, Any],
@@ -1640,60 +2182,99 @@ async def _prepare_routed_body(
     api_kind: str,
     decision: RouteDecision,
     request_id: str,
+    identity: IdentityProfile | None = None,
+    conversation: ConversationState | None = None,
+    allow_compaction: bool = False,
+    history_precompacted: bool = False,
 ) -> tuple[dict[str, Any], Any | None]:
+    identity = identity or IdentityProfile.from_settings(
+        current.settings.section("identity")
+    )
     target_context = (
         decision.deployment_safe_context_tokens
         or decision.endpoint.safe_context_tokens
     )
+    target_provider = provider_family(decision.endpoint)
+    previous_endpoint = (
+        current.registry.by_id(conversation.endpoint_id)
+        if conversation
+        else None
+    )
+    source_provider = (
+        conversation.provider_family
+        if conversation and conversation.provider_family
+        else provider_family(previous_endpoint)
+    )
+    cross_provider = bool(
+        source_provider
+        and target_provider
+        and source_provider != target_provider
+    )
+    deepseek_incompatible = (
+        target_provider == "deepseek"
+        and deepseek_history_requires_migration(body, api_kind)
+    )
+    routed = (
+        normalize_history_for_provider(body, api_kind)
+        if cross_provider
+        else json.loads(json.dumps(body))
+    )
+    decision.history_mode = (
+        "normalized"
+        if cross_provider
+        else "native"
+    )
+    if deepseek_incompatible and not allow_compaction:
+        raise HistoryMigrationRequiredError(
+            "DeepSeek history is missing reasoning_content required for "
+            "the preceding tool transaction"
+        )
+
+    routed_prompt_tokens = current.token_counter.count_request(
+        identity.inject(routed, api_kind),
+        api_kind,
+    )
+    needs_context_compaction = (
+        routed_prompt_tokens + decision.output_reserve_tokens
+        > target_context
+    )
+    force_compaction = deepseek_incompatible
     capsule = None
-    if (
-        not decision.migration
-        or (
-            api_kind == "chat"
-            and decision.prompt_tokens + decision.output_reserve_tokens
-            <= target_context
+    if needs_context_compaction and not allow_compaction:
+        raise NoCompatibleModelError(
+            "the request exceeds the selected model context and compaction "
+            "was not explicitly allowed"
         )
-    ):
-        routed = json.loads(json.dumps(body))
-    else:
-        if not bool(
-            current.settings.section("compaction").get("enabled", True)
+    if force_compaction or needs_context_compaction:
+        compaction = current.settings.section("compaction")
+        if (
+            not bool(compaction.get("enabled", True))
+            or compaction.get("mode", "explicit_only") == "disabled"
         ):
-            raise RouterError(
-                "cross-model upgrade requires context compaction",
-                status_code=503,
-                code="compaction_disabled",
-            )
-        compaction_lease = await current.scheduler.begin_request(None)
-        try:
-            compaction_target = await _acquire_internal_model(
-                current,
-                lease=compaction_lease,
-                request_id=f"{request_id}:compactor",
-                model_id=current.compactor.model_id,
-                prompt_tokens=current.token_counter.count_request(
-                    body,
-                    api_kind,
-                ),
-                output_reserve_tokens=2048,
-            )
-            capsule = await current.compactor.compact(
-                body,
-                api_kind=api_kind,
-                target_context_tokens=target_context,
-                target=compaction_target,
-            )
-        except QueueTimeoutError as exc:
             raise CompactionUnavailableError(
-                "the compaction model queue did not become available in time"
-            ) from exc
-        finally:
-            await compaction_lease.release()
-        compacted_messages = current.compactor.cipher.decrypt(
-            capsule.encrypted_messages
+                "explicitly requested compaction is disabled"
+            )
+        capsule, routed, decision.prompt_tokens = (
+            await _compact_body_for_target(
+                current,
+                routed,
+                api_kind=api_kind,
+                request_id=request_id,
+                target_context=target_context,
+                identity=identity,
+            )
         )
-        routed = replace_messages(body, api_kind, compacted_messages)
-        decision.prompt_tokens = capsule.after_tokens
+        decision.history_mode = "capsule"
+        if (
+            decision.prompt_tokens + decision.output_reserve_tokens
+            > target_context
+        ):
+            raise NoCompatibleModelError(
+                "the compacted request still exceeds the selected model "
+                "context"
+            )
+    else:
+        decision.prompt_tokens = routed_prompt_tokens
 
     if (
         decision.endpoint.backend_type == "ai_pool"
@@ -1723,7 +2304,78 @@ async def _prepare_routed_body(
     ):
         routed.pop("conversation", None)
         routed.pop("previous_response_id", None)
+    if history_precompacted:
+        decision.history_mode = "capsule"
     return routed, capsule
+
+
+async def _compact_body_for_target(
+    current: RouterRuntime,
+    body: dict[str, Any],
+    *,
+    api_kind: str,
+    request_id: str,
+    target_context: int,
+    identity: IdentityProfile,
+) -> tuple[Any, dict[str, Any], int]:
+    compaction_lease = await current.scheduler.begin_request(None)
+    try:
+        compaction_target = await _acquire_internal_model(
+            current,
+            lease=compaction_lease,
+            request_id=f"{request_id}:compactor",
+            model_id=current.compactor.model_id,
+            prompt_tokens=current.token_counter.count_request(
+                body,
+                api_kind,
+            ),
+            output_reserve_tokens=2048,
+        )
+        capsule = await current.compactor.compact(
+            body,
+            api_kind=api_kind,
+            target_context_tokens=target_context,
+            target=compaction_target,
+        )
+    except QueueTimeoutError as exc:
+        raise CompactionUnavailableError(
+            "the compaction model queue did not become available in time"
+        ) from exc
+    finally:
+        await compaction_lease.release()
+    compacted_messages = current.compactor.cipher.decrypt(
+        capsule.encrypted_messages
+    )
+    routed = replace_messages(
+        body,
+        api_kind,
+        compacted_messages,
+    )
+    prompt_tokens = current.token_counter.count_request(
+        identity.inject(routed, api_kind),
+        api_kind,
+    )
+    return capsule, routed, prompt_tokens
+
+
+def _compaction_allowed(
+    current: RouterRuntime,
+    client_allows: bool,
+    header_value: str,
+) -> bool:
+    compaction = current.settings.section("compaction")
+    if (
+        not bool(compaction.get("enabled", True))
+        or compaction.get("mode", "explicit_only") == "disabled"
+    ):
+        return False
+    if compaction.get("mode", "explicit_only") == "automatic":
+        return True
+    return client_allows or header_value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 async def _acquire_internal_model(
@@ -1930,18 +2582,43 @@ async def _stream_response(
     training_token: str | None,
     started_at: float,
     cache_snapshot: dict[str, float] | None,
+    identity: IdentityProfile,
+    identifiers: tuple[str, ...],
 ) -> AsyncIterator[bytes]:
     accumulator = SSEAccumulator(api_kind)
+    sanitizer = IdentityStreamSanitizer(
+        api_kind,
+        identity,
+        identifiers,
+    )
     status_code = upstream.status_code
     completed = False
     try:
-        async for chunk in upstream.aiter_bytes():
-            accumulator.feed(chunk)
-            yield chunk
-            if accumulator.completed:
+        source = (
+            chat_stream_to_responses(
+                upstream,
+                model=decision.endpoint.public_model,
+            )
+            if (
+                api_kind == "responses"
+                and decision.native_or_adapter == "adapter"
+            )
+            else upstream.aiter_bytes()
+        )
+        async for chunk in source:
+            batch_completed = False
+            for public_chunk in sanitizer.feed(chunk):
+                accumulator.feed(public_chunk)
+                yield public_chunk
+                if accumulator.completed:
+                    batch_completed = True
+            if batch_completed:
                 completed = True
                 break
         else:
+            for public_chunk in sanitizer.finish():
+                accumulator.feed(public_chunk)
+                yield public_chunk
             completed = True
     finally:
         accumulator.finish()
@@ -2006,6 +2683,7 @@ async def _stream_response(
                     current,
                     decision.trace,
                 )
+            decision.response_redactions = sanitizer.redactions
             await _audit(
                 current,
                 request_id=request_id,
@@ -2062,7 +2740,50 @@ def _response_headers(
     *,
     conversation_id: str,
     conversation_mode: str,
+    identity: IdentityProfile,
 ) -> dict[str, str]:
+    if identity.enabled:
+        headers = {
+            key: value
+            for key, value in upstream.headers.items()
+            if key.lower() in {"cache-control", "retry-after"}
+        }
+        headers.update(
+            {
+                "X-1Panel-Route-Request-ID": request_id,
+                "X-1Panel-Public-Model": identity.public_model_id,
+                "X-1Panel-Prompt-Tokens": str(decision.prompt_tokens),
+                "X-1Panel-Route-Attempts": str(decision.attempts),
+                "X-1Panel-Capacity-Attempts": str(
+                    decision.capacity_attempts
+                ),
+                "X-1Panel-Queue-Wait-Ms": str(
+                    round(decision.queue_wait_ms, 2)
+                ),
+                "X-1Panel-Conversation-ID": conversation_id,
+                "X-1Panel-Conversation-Mode": conversation_mode,
+                "X-1Panel-Route-Strategy": (
+                    decision.strategy_version
+                ),
+                "X-1Panel-Route-Profile": decision.route_profile,
+                "X-1Panel-Context-Required": str(
+                    decision.context_required
+                    or decision.prompt_tokens
+                    + decision.output_reserve_tokens
+                ),
+                "X-1Panel-History-Mode": decision.history_mode,
+                "X-SIYUAN-Identity-Revision": identity.revision,
+            }
+        )
+        if decision.tool_history_repairs:
+            headers["X-1Panel-Tool-History-Repaired"] = str(
+                decision.tool_history_repairs
+            )
+        if decision.image_resizes:
+            headers["X-1Panel-Image-Resized"] = str(
+                decision.image_resizes
+            )
+        return headers
     headers = {
         key: value
         for key, value in upstream.headers.items()
@@ -2138,6 +2859,13 @@ async def _audit(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         output_reserve_tokens=decision.output_reserve_tokens,
+        requested_output_tokens=decision.output_reserve_tokens,
+        context_required=decision.context_required,
+        strategy_version=decision.strategy_version,
+        route_profile=decision.route_profile,
+        complexity=decision.complexity,
+        history_mode=decision.history_mode,
+        remote_fallback_position=decision.remote_fallback_position,
         attempts=decision.attempts,
         capacity_attempts=decision.capacity_attempts,
         queue_wait_ms=round(decision.queue_wait_ms, 2),
@@ -2150,6 +2878,9 @@ async def _audit(
         protocol=decision.protocol,
         native_or_adapter=decision.native_or_adapter,
         candidate_rejections=list(decision.candidate_rejections),
+        identity_revision=decision.identity_revision,
+        legacy_model_alias_used=decision.legacy_model_alias_used,
+        response_redactions=decision.response_redactions,
         instance_id=current.instance_id,
         boot_id=current.boot_id,
     )
@@ -2320,6 +3051,13 @@ def _audit_started(
         affinity=decision.affinity,
         prompt_tokens=decision.prompt_tokens,
         output_reserve_tokens=decision.output_reserve_tokens,
+        requested_output_tokens=decision.output_reserve_tokens,
+        context_required=decision.context_required,
+        strategy_version=decision.strategy_version,
+        route_profile=decision.route_profile,
+        complexity=decision.complexity,
+        history_mode=decision.history_mode,
+        remote_fallback_position=decision.remote_fallback_position,
         attempts=decision.attempts,
         capacity_attempts=decision.capacity_attempts,
         queue_wait_ms=round(decision.queue_wait_ms, 2),
@@ -2328,6 +3066,8 @@ def _audit_started(
         protocol=decision.protocol,
         native_or_adapter=decision.native_or_adapter,
         candidate_rejections=list(decision.candidate_rejections),
+        identity_revision=decision.identity_revision,
+        legacy_model_alias_used=decision.legacy_model_alias_used,
         instance_id=current.instance_id,
         boot_id=current.boot_id,
     )
@@ -2448,7 +3188,12 @@ def _payload_too_large(max_request_bytes: int) -> RouterError:
     )
 
 
-def _error_response(exc: RouterError) -> JSONResponse:
+def _error_response(
+    exc: RouterError,
+    *,
+    profile: IdentityProfile | None = None,
+    identifiers: tuple[str, ...] = (),
+) -> JSONResponse:
     error = {
         "message": str(exc),
         "type": "invalid_request_error"
@@ -2458,6 +3203,12 @@ def _error_response(exc: RouterError) -> JSONResponse:
     }
     if exc.details:
         error["details"] = exc.details
+    if profile and profile.enabled:
+        error, _redactions = sanitize_value(
+            error,
+            profile,
+            identifiers,
+        )
     return JSONResponse(
         status_code=exc.status_code,
         headers=exc.headers,

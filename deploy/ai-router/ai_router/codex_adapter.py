@@ -35,6 +35,7 @@ class CodexGateway:
         *,
         accounts: CodexAccountStore | None = None,
         client: httpx.AsyncClient | None = None,
+        account_max_concurrency: int | None = None,
     ) -> None:
         accounts_dir = os.environ.get(
             "AI_ROUTER_CODEX_ACCOUNTS_DIR",
@@ -47,6 +48,17 @@ class CodexGateway:
         self._owned_client = client is None
         self._catalog_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._locks: dict[str, asyncio.Semaphore] = {}
+        self.account_max_concurrency = max(
+            1,
+            int(
+                account_max_concurrency
+                if account_max_concurrency is not None
+                else os.environ.get(
+                    "AI_ROUTER_CODEX_ACCOUNT_MAX_CONCURRENCY",
+                    "2",
+                )
+            ),
+        )
 
     async def close(self) -> None:
         if self._owned_client:
@@ -99,12 +111,14 @@ class CodexGateway:
                         )
                         or 0
                     ),
+                    "max_concurrency": self.account_max_concurrency,
                 }
             )
         return {
             "ok": any(item["ready"] for item in workers),
             "model": MODEL_ID,
             "safe_context_tokens": SAFE_CONTEXT_TOKENS,
+            "max_concurrency": self.account_max_concurrency,
             "workers": workers,
         }
 
@@ -185,11 +199,11 @@ class CodexGateway:
 
         semaphore = self._locks.setdefault(
             selected_alias,
-            asyncio.Semaphore(1),
+            asyncio.Semaphore(self.account_max_concurrency),
         )
         try:
             await asyncio.wait_for(semaphore.acquire(), timeout=3.0)
-        except TimeoutError:
+        except (asyncio.TimeoutError, TimeoutError):
             return _error(
                 429,
                 "codex_account_busy",

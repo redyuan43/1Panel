@@ -49,6 +49,33 @@ class NoEligibleModelError(RouterError):
         super().__init__(message, status_code=503, code="no_eligible_model")
 
 
+class NoCompatibleModelError(RouterError):
+    def __init__(
+        self,
+        message: str = "no model can satisfy the complete request constraints",
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=422,
+            code="no_compatible_model",
+        )
+
+
+class HistoryMigrationRequiredError(RouterError):
+    def __init__(
+        self,
+        message: str = (
+            "conversation history requires explicit compaction before it can "
+            "move to another provider"
+        ),
+    ) -> None:
+        super().__init__(
+            message,
+            status_code=409,
+            code="history_migration_required",
+        )
+
+
 class QueueTimeoutError(RouterError):
     def __init__(self) -> None:
         super().__init__(

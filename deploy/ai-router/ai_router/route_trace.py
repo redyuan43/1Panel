@@ -14,8 +14,8 @@ from typing import Any
 from .config import Registry, Settings
 
 
-SCHEMA_VERSION = 1
-GRAPH_VERSION = 2
+SCHEMA_VERSION = 2
+GRAPH_VERSION = 3
 TERMINAL_STATUSES = {"succeeded", "failed", "interrupted"}
 REVIEW_VERDICTS = {"correct", "incorrect", "needs_review"}
 
@@ -34,12 +34,22 @@ GRAPH_NODES: tuple[dict[str, str], ...] = (
     },
     {
         "id": "candidate_scope",
-        "label": "候选池资格筛选",
+        "label": "完整约束资格筛选",
         "mermaid_label": (
-            "候选池资格筛选<br/>"
-            "能力 · 模态 · 上下文 · 健康 · 策略"
+            "完整约束资格筛选<br/>"
+            "模态 · 协议 · 工具 · 历史 · 健康"
         ),
         "kind": "process",
+        "group": "core",
+    },
+    {
+        "id": "context_formula",
+        "label": "上下文完整满足？",
+        "mermaid_label": (
+            "上下文完整满足？<br/>"
+            "prompt + 客户端 max_output ≤ safe_context"
+        ),
+        "kind": "decision",
         "group": "core",
     },
     {
@@ -55,17 +65,33 @@ GRAPH_NODES: tuple[dict[str, str], ...] = (
         "group": "core",
     },
     {
+        "id": "local_sufficiency",
+        "label": "本地候选充分？",
+        "kind": "decision",
+        "group": "core",
+    },
+    {
         "id": "provider_priority",
-        "label": "应用层级与本地优先",
+        "label": "legacy_v1 Provider 优先",
         "kind": "process",
+        "group": "core",
+    },
+    {
+        "id": "remote_expert_dispatch",
+        "label": "云端专家分流",
+        "mermaid_label": (
+            "云端专家分流<br/>"
+            "画像与复杂度决定固定回退顺序"
+        ),
+        "kind": "decision",
         "group": "core",
     },
     {
         "id": "score_candidates",
         "label": "综合评分并选择模型",
         "mermaid_label": (
-            "综合评分并选择模型<br/>"
-            "质量 · 负载 · 延迟 · 上下文 · 成本"
+            "阶段内排序并选择<br/>"
+            "质量 · 负载 · 延迟 · 上下文余量"
         ),
         "kind": "process",
         "group": "core",
@@ -80,6 +106,18 @@ GRAPH_NODES: tuple[dict[str, str], ...] = (
         "id": "capacity_check",
         "label": "容量可获取？",
         "kind": "decision",
+        "group": "core",
+    },
+    {
+        "id": "history_preflight",
+        "label": "历史可无损迁移？",
+        "kind": "decision",
+        "group": "core",
+    },
+    {
+        "id": "request_prepare",
+        "label": "协议翻译与请求准备",
+        "kind": "process",
         "group": "core",
     },
     {
@@ -104,19 +142,28 @@ GRAPH_NODES: tuple[dict[str, str], ...] = (
 
 GRAPH_EDGES: tuple[dict[str, str], ...] = (
     {"id": "e-eval-explicit", "from": "task_evaluation", "to": "explicit_model", "label": ""},
-    {"id": "e-explicit-scope", "from": "explicit_model", "to": "candidate_scope", "label": "显式", "branch": "explicit"},
-    {"id": "e-auto-scope", "from": "explicit_model", "to": "candidate_scope", "label": "Auto", "branch": "auto"},
+    {"id": "e-explicit-context", "from": "explicit_model", "to": "context_formula", "label": "显式", "branch": "explicit"},
+    {"id": "e-auto-context", "from": "explicit_model", "to": "context_formula", "label": "Auto", "branch": "auto"},
+    {"id": "e-context-scope", "from": "context_formula", "to": "candidate_scope", "label": "完整保留"},
+    {"id": "e-context-failed", "from": "context_formula", "to": "failed", "label": "无模型满足"},
     {"id": "e-scope-affinity", "from": "candidate_scope", "to": "conversation_affinity", "label": "有合格候选"},
     {"id": "e-scope-failed", "from": "candidate_scope", "to": "failed", "label": "无合格候选"},
     {"id": "e-affinity-deploy", "from": "conversation_affinity", "to": "deployment_binding", "label": "命中"},
     {"id": "e-affinity-explicit", "from": "conversation_affinity", "to": "explicit_selection", "label": "显式未命中"},
-    {"id": "e-affinity-provider", "from": "conversation_affinity", "to": "provider_priority", "label": "Auto 未命中"},
+    {"id": "e-affinity-local", "from": "conversation_affinity", "to": "local_sufficiency", "label": "intelligent_v2"},
+    {"id": "e-affinity-legacy", "from": "conversation_affinity", "to": "provider_priority", "label": "legacy_v1"},
     {"id": "e-explicit-deploy", "from": "explicit_selection", "to": "deployment_binding", "label": ""},
-    {"id": "e-provider-score", "from": "provider_priority", "to": "score_candidates", "label": ""},
+    {"id": "e-local-score", "from": "local_sufficiency", "to": "score_candidates", "label": "本地充分"},
+    {"id": "e-local-remote", "from": "local_sufficiency", "to": "remote_expert_dispatch", "label": "本地不足或全忙"},
+    {"id": "e-legacy-score", "from": "provider_priority", "to": "score_candidates", "label": "旧策略"},
+    {"id": "e-remote-score", "from": "remote_expert_dispatch", "to": "score_candidates", "label": "固定顺序"},
     {"id": "e-score-deploy", "from": "score_candidates", "to": "deployment_binding", "label": ""},
     {"id": "e-deploy-capacity", "from": "deployment_binding", "to": "capacity_check", "label": ""},
-    {"id": "e-capacity-selected", "from": "capacity_check", "to": "route_selected", "label": "可用"},
+    {"id": "e-capacity-history", "from": "capacity_check", "to": "history_preflight", "label": "可用"},
     {"id": "e-capacity-retry", "from": "capacity_check", "to": "retry_decision", "label": "忙碌"},
+    {"id": "e-history-prepare", "from": "history_preflight", "to": "request_prepare", "label": "原生或无损标准化"},
+    {"id": "e-history-retry", "from": "history_preflight", "to": "retry_decision", "label": "不兼容"},
+    {"id": "e-prepare-selected", "from": "request_prepare", "to": "route_selected", "label": "准备完成"},
     {"id": "e-retry-scope", "from": "retry_decision", "to": "candidate_scope", "label": "继续"},
     {"id": "e-retry-failed", "from": "retry_decision", "to": "failed", "label": "停止"},
 )
@@ -133,6 +180,7 @@ _REJECTION_STAGE = {
     "unhealthy_or_stale": 2,
     "physical_deployment": 3,
     "modality": 3,
+    "deepseek_multimodal_unsupported": 3,
     "capability": 3,
     "task": 4,
     "context": 4,
@@ -217,8 +265,8 @@ def _graph_mermaid() -> str:
             "  classDef decision fill:#151c24,stroke:#73808d,color:#f3f6f8;",
             "  classDef success fill:#10291f,stroke:#3fd091,color:#b9f5d8,stroke-width:2px;",
             "  classDef error fill:#30171b,stroke:#ef6a72,color:#ffc2c7,stroke-width:2px;",
-            "  class task_evaluation,candidate_scope,explicit_selection,provider_priority,score_candidates,deployment_binding process;",
-            "  class explicit_model,conversation_affinity,capacity_check,retry_decision decision;",
+            "  class task_evaluation,candidate_scope,explicit_selection,provider_priority,score_candidates,deployment_binding,request_prepare process;",
+            "  class explicit_model,context_formula,conversation_affinity,local_sufficiency,remote_expert_dispatch,capacity_check,history_preflight,retry_decision decision;",
             "  class route_selected success;",
             "  class failed error;",
             "  style input fill:#0b1015,stroke:#29313a,color:#8d99a5;",
@@ -411,6 +459,16 @@ class DecisionTrace:
             request["prompt_tokens"] = int(prompt_tokens)
         if output_reserve_tokens is not None:
             request["output_reserve_tokens"] = int(output_reserve_tokens)
+            request["requested_output_tokens"] = int(
+                output_reserve_tokens
+            )
+        if (
+            prompt_tokens is not None
+            and output_reserve_tokens is not None
+        ):
+            request["required_context_tokens"] = (
+                int(prompt_tokens) + int(output_reserve_tokens)
+            )
         if modalities is not None:
             request["modalities"] = sorted(modalities)
         if required_capabilities is not None:
@@ -419,12 +477,19 @@ class DecisionTrace:
 
     def set_evaluation(self, evaluation: Any, *, attempt: int = 1) -> None:
         self.payload["task"] = str(evaluation.task)
+        self.payload["route_profile"] = str(
+            evaluation.route_profile
+        )
+        self.payload["complexity"] = str(evaluation.complexity)
         self.payload["evaluation"] = {
             "task": str(evaluation.task),
+            "route_profile": str(evaluation.route_profile),
+            "complexity": str(evaluation.complexity),
             "confidence": float(evaluation.confidence),
             "reason": str(evaluation.reason),
             "required_tier": evaluation.required_tier,
             "preferred_tier": evaluation.preferred_tier,
+            "evidence": dict(evaluation.evidence),
         }
         self.record(
             attempt,
@@ -445,6 +510,28 @@ class DecisionTrace:
             branch=mode,
             reason=f"{mode}_model",
             evidence={"requested_model": self.payload["requested_model"]},
+        )
+        request = self.payload.get("request", {})
+        prompt_tokens = int(request.get("prompt_tokens", 0))
+        output_tokens = int(
+            request.get("requested_output_tokens", 0)
+        )
+        self.record(
+            attempt,
+            "context_formula",
+            "evaluated",
+            branch="preserved",
+            reason="full_requested_context",
+            evidence={
+                "prompt_tokens": prompt_tokens,
+                "requested_output_tokens": output_tokens,
+                "required_context_tokens": (
+                    prompt_tokens + output_tokens
+                ),
+                "formula": (
+                    "prompt_tokens + requested_output_tokens"
+                ),
+            },
         )
 
     def record(
@@ -591,6 +678,12 @@ class DecisionTrace:
         task: str,
         reason: str,
         affinity: str,
+        strategy_version: str = "legacy_v1",
+        route_profile: str = "general",
+        complexity: str = "standard",
+        context_required: int = 0,
+        history_mode: str = "native",
+        remote_fallback_position: int | None = None,
     ) -> None:
         self.payload.update(
             {
@@ -598,6 +691,12 @@ class DecisionTrace:
                 "endpoint_id": endpoint_id,
                 "deployment_id": deployment_id,
                 "task": task,
+                "strategy_version": strategy_version,
+                "route_profile": route_profile,
+                "complexity": complexity,
+                "context_required": int(context_required),
+                "history_mode": history_mode,
+                "remote_fallback_position": remote_fallback_position,
             }
         )
         self._attempt(attempt)["selection"] = {
@@ -606,6 +705,12 @@ class DecisionTrace:
             "deployment_id": deployment_id,
             "reason": reason,
             "affinity": affinity,
+            "strategy_version": strategy_version,
+            "route_profile": route_profile,
+            "complexity": complexity,
+            "context_required": int(context_required),
+            "history_mode": history_mode,
+            "remote_fallback_position": remote_fallback_position,
         }
         self._touch()
 
@@ -623,6 +728,18 @@ class DecisionTrace:
                 "deployment_id": self.payload.get("deployment_id"),
                 "task": self.payload.get("task"),
                 "affinity": selection.get("affinity"),
+                "strategy_version": selection.get(
+                    "strategy_version"
+                ),
+                "route_profile": selection.get("route_profile"),
+                "complexity": selection.get("complexity"),
+                "context_required": selection.get(
+                    "context_required"
+                ),
+                "history_mode": selection.get("history_mode"),
+                "remote_fallback_position": selection.get(
+                    "remote_fallback_position"
+                ),
             },
         )
 
@@ -750,6 +867,7 @@ class RouteTraceStore:
         client_id: str | None = None,
         conversation_id: str | None = None,
         task: str | None = None,
+        route_profile: str | None = None,
         selected_model: str | None = None,
         status: str | None = None,
         review_status: str | None = None,
@@ -763,6 +881,7 @@ class RouteTraceStore:
             client_id,
             conversation_id,
             task,
+            route_profile,
             selected_model,
             status,
             review_status,
@@ -821,6 +940,9 @@ class RouteTraceStore:
                     selected_model TEXT,
                     endpoint_id TEXT,
                     task TEXT,
+                    route_profile TEXT,
+                    strategy_version TEXT,
+                    history_mode TEXT,
                     status TEXT NOT NULL,
                     status_code INTEGER,
                     graph_version INTEGER NOT NULL,
@@ -855,6 +977,27 @@ class RouteTraceStore:
                     ON route_reviews(request_id, id DESC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in connection.execute(
+                    "PRAGMA table_info(route_traces)"
+                ).fetchall()
+            }
+            for name in (
+                "route_profile",
+                "strategy_version",
+                "history_mode",
+            ):
+                if name not in columns:
+                    connection.execute(
+                        f"ALTER TABLE route_traces ADD COLUMN {name} TEXT"
+                    )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS route_traces_profile
+                ON route_traces(route_profile, started_at DESC)
+                """
+            )
 
     def _save(self, payload: dict[str, Any]) -> None:
         encoded = json.dumps(
@@ -874,9 +1017,10 @@ class RouteTraceStore:
                     request_id, started_at, updated_at, completed_at,
                     instance_id, boot_id, client_id, conversation_id,
                     protocol, requested_model, selected_model, endpoint_id,
-                    task, status, status_code, graph_version,
+                    task, route_profile, strategy_version, history_mode,
+                    status, status_code, graph_version,
                     excerpt_json, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(request_id) DO UPDATE SET
                     updated_at=excluded.updated_at,
                     completed_at=excluded.completed_at,
@@ -884,6 +1028,9 @@ class RouteTraceStore:
                     selected_model=excluded.selected_model,
                     endpoint_id=excluded.endpoint_id,
                     task=excluded.task,
+                    route_profile=excluded.route_profile,
+                    strategy_version=excluded.strategy_version,
+                    history_mode=excluded.history_mode,
                     status=excluded.status,
                     status_code=excluded.status_code,
                     graph_version=excluded.graph_version,
@@ -904,6 +1051,9 @@ class RouteTraceStore:
                     payload.get("selected_model"),
                     payload.get("endpoint_id"),
                     payload.get("task"),
+                    payload.get("route_profile"),
+                    payload.get("strategy_version"),
+                    payload.get("history_mode"),
                     payload["status"],
                     payload.get("status_code"),
                     payload["graph_version"],
@@ -946,6 +1096,7 @@ class RouteTraceStore:
         client_id: str | None,
         conversation_id: str | None,
         task: str | None,
+        route_profile: str | None,
         selected_model: str | None,
         status: str | None,
         review_status: str | None,
@@ -967,6 +1118,9 @@ class RouteTraceStore:
         if task:
             where.append("t.task = ?")
             values.append(task)
+        if route_profile:
+            where.append("t.route_profile = ?")
+            values.append(route_profile)
         if selected_model:
             where.append("t.selected_model = ?")
             values.append(selected_model)
@@ -1051,6 +1205,21 @@ class RouteTraceStore:
             "selected_model": row["selected_model"],
             "endpoint_id": row["endpoint_id"],
             "task": row["task"],
+            "route_profile": (
+                row["route_profile"]
+                or payload.get("route_profile")
+                or "general"
+            ),
+            "strategy_version": (
+                row["strategy_version"]
+                or payload.get("strategy_version")
+                or "legacy_v1"
+            ),
+            "history_mode": (
+                row["history_mode"]
+                or payload.get("history_mode")
+                or "native"
+            ),
             "status": row["status"],
             "status_code": row["status_code"],
             "graph_version": row["graph_version"],

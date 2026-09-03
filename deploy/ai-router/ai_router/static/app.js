@@ -42,6 +42,10 @@ const reasonLabels = {
   capacity_spillover: "容量分流",
   affinity_spillover: "亲和迁移",
   cloud_capacity_fallback: "云端容量兜底",
+  local_sufficient: "本地完整满足",
+  remote_profile_fallback: "云端画像回退",
+  configured_remote_order: "固定云端顺序",
+  history_migration_required: "历史迁移受阻",
   local_priority: "本地优先",
   cloud_priority: "云端优先",
   balanced_score: "均衡评分",
@@ -78,6 +82,7 @@ const traceNodeLabels = {};
 let traceGraphRenderKey = "";
 let traceGraphRenderSequence = 0;
 let traceGraphScale = 1;
+let traceGraphNeedsInitialFocus = false;
 let traceSearchTimer = null;
 
 const byId = (id) => document.getElementById(id);
@@ -202,7 +207,7 @@ function renderClients() {
           <td>${clientModelSummary(item.models)}</td>
           <td>
             <strong class="table-primary">${formatTokens(item.tpm_limit)} TPM</strong>
-            <span class="table-secondary">${item.rpm_limit} RPM · ${item.max_parallel_requests} 并发</span>
+            <span class="table-secondary">${item.rpm_limit} RPM · ${item.max_parallel_requests} 并发 · ${item.allow_compaction ? "可压缩" : "不压缩"}</span>
           </td>
           <td>
             <strong class="table-primary">${activeKeys.length} 把有效</strong>
@@ -301,6 +306,9 @@ function openClientDialog(clientId = null) {
   byId("client-tpm").value = client?.tpm_limit || 1000000;
   byId("client-parallel").value = client?.max_parallel_requests || 4;
   byId("client-enabled").checked = client?.enabled ?? true;
+  byId("client-allow-compaction").checked = Boolean(
+    client?.allow_compaction,
+  );
   renderClientModels(client?.models || ["auto"]);
   byId("client-dialog").showModal();
 }
@@ -316,6 +324,7 @@ function collectClient() {
     rpm_limit: Number(byId("client-rpm").value),
     tpm_limit: Number(byId("client-tpm").value),
     max_parallel_requests: Number(byId("client-parallel").value),
+    allow_compaction: byId("client-allow-compaction").checked,
   };
 }
 
@@ -1103,7 +1112,7 @@ function traceFilterQuery(cursor = null) {
   const values = {
     review_status: byId("trace-review-filter").value,
     client_id: byId("trace-client-filter").value,
-    task: byId("trace-task-filter").value,
+    route_profile: byId("trace-task-filter").value,
     selected_model: byId("trace-model-filter").value,
     status: byId("trace-status-filter").value,
     search: byId("trace-search").value.trim(),
@@ -1157,7 +1166,7 @@ function syncTraceFilterOptions() {
   );
   state.clients.forEach((item) => clientValues.add(item.id));
   const taskValues = new Set(
-    state.routeTraces.map((item) => item.task).filter(Boolean),
+    state.routeTraces.map((item) => item.route_profile).filter(Boolean),
   );
   const modelValues = new Set(
     state.routeTraces.map((item) => item.selected_model).filter(Boolean),
@@ -1239,7 +1248,7 @@ function traceListItem(item) {
         )}
       </span>
       <span class="trace-list-secondary">
-        <span>${escapeHtml(item.task || "等待画像")} · ${escapeHtml(item.client_id)}</span>
+        <span>${escapeHtml(item.route_profile || item.task || "等待画像")} · ${escapeHtml(item.client_id)}</span>
         <span>${formatTime(item.started_at)}</span>
       </span>
       <span class="trace-list-tertiary">
@@ -1262,7 +1271,12 @@ function reviewBadge(value) {
 
 async function selectRouteTrace(requestId, silent = false) {
   if (!requestId) return;
+  const changed = state.selectedTraceId !== requestId;
   state.selectedTraceId = requestId;
+  if (changed) {
+    traceGraphScale = defaultTraceGraphScale();
+    traceGraphNeedsInitialFocus = true;
+  }
   renderTraceList();
   try {
     const payload = await api(`/api/route-traces/${encodeURIComponent(requestId)}`);
@@ -1367,8 +1381,11 @@ function renderTraceAttempts() {
     button.addEventListener("click", () => {
       state.selectedTraceAttempt = Number(button.dataset.traceAttempt);
       state.selectedTraceNodeId = null;
+      traceGraphScale = defaultTraceGraphScale();
+      traceGraphNeedsInitialFocus = true;
       renderTraceAttempts();
       applyTraceGraphState();
+      scheduleInitialTraceGraphFocus();
     });
   });
 }
@@ -1419,6 +1436,7 @@ async function ensureTraceGraphRendered() {
   if (renderKey === traceGraphRenderKey && target.querySelector("svg")) {
     applyTraceGraphScale();
     applyTraceGraphState();
+    scheduleInitialTraceGraphFocus();
     return;
   }
   if (!initializeTraceMermaid()) {
@@ -1438,8 +1456,9 @@ async function ensureTraceGraphRendered() {
     target.innerHTML = result?.svg || "";
     traceGraphRenderKey = renderKey;
     bindTraceGraph();
-    fitTraceGraph(false);
+    applyTraceGraphScale();
     applyTraceGraphState();
+    scheduleInitialTraceGraphFocus();
   } catch (error) {
     target.classList.remove("loading");
     renderTraceGraphFallback(`流程图渲染失败：${error.message}`);
@@ -1544,6 +1563,34 @@ function traceGraphSteps() {
   return steps;
 }
 
+function defaultTraceGraphScale() {
+  return 1;
+}
+
+function defaultTraceFocusNodeId(steps = traceGraphSteps()) {
+  if (!steps.length) return null;
+  if (state.selectedTrace?.status === "running") {
+    return steps[steps.length - 1]?.node_id || null;
+  }
+  const requestedModel = state.selectedTrace?.requested_model;
+  const preferred = requestedModel === "auto"
+    ? [
+        "local_sufficiency",
+        "remote_expert_dispatch",
+        "candidate_scope",
+        "route_selected",
+      ]
+    : [
+        "explicit_model",
+        "explicit_selection",
+        "candidate_scope",
+        "route_selected",
+      ];
+  return preferred.find(
+    (nodeId) => steps.some((step) => step.node_id === nodeId),
+  ) || steps[steps.length - 1]?.node_id || null;
+}
+
 function traceDisplayStatus(step, steps = traceGraphSteps()) {
   if (
     step.status === "selected"
@@ -1590,7 +1637,8 @@ function applyTraceGraphState() {
   steps.forEach((step) => latest.set(step.node_id, step));
   const currentStep = steps[steps.length - 1] || null;
   if (!state.selectedTraceNodeId && currentStep) {
-    state.selectedTraceNodeId = currentStep.node_id;
+    state.selectedTraceNodeId =
+      defaultTraceFocusNodeId(steps) || currentStep.node_id;
   }
 
   (state.routeGraph?.nodes || []).forEach((flowNode) => {
@@ -1655,12 +1703,7 @@ function applyTraceGraphState() {
 function selectTraceGraphNode(nodeId) {
   state.selectedTraceNodeId = nodeId;
   applyTraceGraphState();
-  const target = traceGraphNodeElement(nodeId);
-  target?.scrollIntoView({
-    behavior: "smooth",
-    block: "center",
-    inline: "center",
-  });
+  centerTraceGraphNode(nodeId);
 }
 
 function renderTraceNodeInspector() {
@@ -1838,9 +1881,50 @@ function applyTraceGraphScale() {
   const svg = byId("trace-graph").querySelector("svg");
   if (!svg) return;
   const viewBoxWidth = Number(svg.viewBox?.baseVal?.width) || 1440;
-  svg.style.width = `${Math.max(1800, viewBoxWidth * traceGraphScale)}px`;
+  const vertical = state.routeGraph?.mermaid?.includes("flowchart TD");
+  const minimumWidth = vertical ? 320 : 1800;
+  svg.style.width =
+    `${Math.max(minimumWidth, viewBoxWidth * traceGraphScale)}px`;
   svg.style.maxWidth = "none";
   svg.style.height = "auto";
+}
+
+function centerTraceGraphNode(nodeId, smooth = true) {
+  const target = traceGraphNodeElement(nodeId);
+  const viewport = byId("trace-graph-viewport");
+  if (!target || !viewport) return;
+  const targetRect = target.getBoundingClientRect();
+  const viewportRect = viewport.getBoundingClientRect();
+  viewport.scrollTo({
+    left: Math.max(
+      0,
+      viewport.scrollLeft
+        + targetRect.left
+        - viewportRect.left
+        - (viewport.clientWidth - targetRect.width) / 2,
+    ),
+    top: Math.max(
+      0,
+      viewport.scrollTop
+        + targetRect.top
+        - viewportRect.top
+        - (viewport.clientHeight - targetRect.height) / 2,
+    ),
+    behavior: smooth ? "smooth" : "auto",
+  });
+}
+
+function scheduleInitialTraceGraphFocus() {
+  if (!traceGraphNeedsInitialFocus) return;
+  traceGraphNeedsInitialFocus = false;
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      centerTraceGraphNode(
+        state.selectedTraceNodeId || defaultTraceFocusNodeId(),
+        false,
+      );
+    });
+  });
 }
 
 function fitTraceGraph(smooth = true) {
@@ -1892,6 +1976,31 @@ async function loadSettings() {
 
 function renderSettings() {
   if (!state.settings) return;
+  byId("identity-enabled").checked = Boolean(value("identity.enabled", false));
+  byId("identity-model-id").value = value(
+    "identity.public_model_id",
+    "siyuan/auto",
+  );
+  byId("identity-name-zh").value = value(
+    "identity.display_name_zh",
+    "思源",
+  );
+  byId("identity-name-en").value = value(
+    "identity.display_name_en",
+    "SIYUAN",
+  );
+  byId("identity-provider").value = value(
+    "identity.provider_name",
+    "SIYUAN",
+  );
+  byId("identity-description").value = value(
+    "identity.description",
+    "由思源智能路由服务提供的统一 AI 助手。",
+  );
+  byId("identity-response").value = value(
+    "identity.identity_response",
+    "我是思源（SIYUAN），由思源智能路由服务提供的统一 AI 助手。",
+  );
   byId("cloud-enabled").checked = Boolean(value("cloud.enabled", false));
   byId("cloud-auto").checked = Boolean(value("cloud.auto_escalate", false));
   byId("cloud-budget").value = value("cloud.monthly_budget", 0);
@@ -1901,6 +2010,10 @@ function renderSettings() {
   byId("evaluator-model").value = value("evaluator.model_id");
   byId("evaluator-confidence").value = value("evaluator.confidence_threshold", 0.85);
   byId("compaction-enabled").checked = Boolean(value("compaction.enabled", true));
+  byId("compaction-mode").value = value(
+    "compaction.mode",
+    "explicit_only",
+  );
   byId("compaction-model").value = value("compaction.model_id");
   byId("affinity-ttl-minutes").value = Math.round(
     value("affinity.ttl_seconds", 86400) / 60,
@@ -1919,6 +2032,10 @@ function renderSettings() {
   byId("provider-priority").value = value(
     "routing.provider_priority",
     "local_first",
+  );
+  byId("routing-strategy").value = value(
+    "routing.strategy",
+    "legacy_v1",
   );
   byId("all-local-busy-policy").value = value(
     "routing.all_local_busy_policy",
@@ -1953,6 +2070,16 @@ function collectSettings() {
       ttl_seconds: Number(byId("affinity-ttl-minutes").value) * 60,
       max_priority_burst: Number(byId("affinity-burst").value),
     },
+    identity: {
+      ...state.settings.identity,
+      enabled: byId("identity-enabled").checked,
+      public_model_id: byId("identity-model-id").value.trim(),
+      display_name_zh: byId("identity-name-zh").value.trim(),
+      display_name_en: byId("identity-name-en").value.trim(),
+      provider_name: byId("identity-provider").value.trim(),
+      description: byId("identity-description").value.trim(),
+      identity_response: byId("identity-response").value.trim(),
+    },
     cloud: {
       ...state.settings.cloud,
       enabled: byId("cloud-enabled").checked,
@@ -1964,6 +2091,7 @@ function collectSettings() {
     compaction: {
       ...state.settings.compaction,
       enabled: byId("compaction-enabled").checked,
+      mode: byId("compaction-mode").value,
       model_id: byId("compaction-model").value.trim(),
     },
     evaluator: {
@@ -1989,6 +2117,7 @@ function collectSettings() {
       new_request_capacity_wait_seconds: Number(
         byId("new-request-capacity-wait").value,
       ),
+      strategy: byId("routing-strategy").value,
       provider_priority: byId("provider-priority").value,
       all_local_busy_policy: byId("all-local-busy-policy").value,
       weights,
@@ -2018,6 +2147,10 @@ async function saveSettings(event) {
 
 function switchView(view) {
   state.view = view;
+  document.querySelector("main")?.classList.toggle(
+    "audit-main",
+    view === "audit",
+  );
   document.querySelectorAll(".tab").forEach((item) => {
     item.classList.toggle("active", item.dataset.view === view);
   });

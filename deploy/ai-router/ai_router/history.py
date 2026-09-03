@@ -13,7 +13,7 @@ from .compaction import (
     replace_messages,
 )
 from .errors import ConversationStateConflictError
-from .types import ConversationState
+from .types import ConversationState, Endpoint
 
 
 class ConversationWriter(Protocol):
@@ -25,6 +25,171 @@ class ConversationWriter(Protocol):
         identities: tuple[str, ...],
         conversation_id: str,
     ) -> None: ...
+
+
+def provider_family(endpoint: Endpoint | None) -> str:
+    if endpoint is None:
+        return ""
+    configured = str(endpoint.metadata.get("provider", "")).strip()
+    if configured:
+        return configured
+    if endpoint.backend_type in {"ai_pool", "llama_cpp", "vllm"}:
+        return endpoint.backend_type
+    return endpoint.node or endpoint.backend_type
+
+
+def normalize_history_for_provider(
+    body: dict[str, Any],
+    api_kind: str,
+) -> dict[str, Any]:
+    value = copy.deepcopy(body)
+    if api_kind == "chat":
+        messages = value.get("messages")
+        if isinstance(messages, list):
+            value["messages"] = [
+                normalized
+                for item in messages
+                if isinstance(item, dict)
+                if (normalized := _normalize_chat_item(item)) is not None
+            ]
+        return value
+
+    items = value.get("input")
+    if isinstance(items, list):
+        value["input"] = [
+            normalized
+            for item in items
+            if isinstance(item, dict)
+            if (
+                normalized := _normalize_responses_item(item)
+            )
+            is not None
+        ]
+    return value
+
+
+def deepseek_history_requires_migration(
+    body: dict[str, Any],
+    api_kind: str,
+) -> bool:
+    if api_kind == "chat":
+        messages = body.get("messages")
+        if not isinstance(messages, list):
+            return False
+        return any(
+            isinstance(item, dict)
+            and item.get("role") == "assistant"
+            and (
+                bool(item.get("tool_calls"))
+                or bool(item.get("codex_reasoning_items"))
+                or bool(item.get("codex_message_items"))
+            )
+            and not isinstance(item.get("reasoning_content"), str)
+            for item in messages
+        )
+
+    items = body.get("input")
+    if not isinstance(items, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and (
+            item.get("type") == "reasoning"
+            or (
+                item.get("type") == "function_call"
+                and not isinstance(item.get("reasoning_content"), str)
+            )
+        )
+        for item in items
+    )
+
+
+def _normalize_chat_item(
+    item: dict[str, Any],
+) -> dict[str, Any] | None:
+    role = str(item.get("role", "")).lower()
+    if role not in {"system", "developer", "user", "assistant", "tool"}:
+        return None
+    allowed = {
+        "role",
+        "content",
+        "name",
+    }
+    if role == "assistant":
+        allowed.update({"tool_calls", "refusal", "audio"})
+    elif role == "tool":
+        allowed.add("tool_call_id")
+    result = {
+        key: copy.deepcopy(value)
+        for key, value in item.items()
+        if key in allowed
+    }
+    if isinstance(result.get("tool_calls"), list):
+        result["tool_calls"] = [
+            normalized
+            for value in result["tool_calls"]
+            if isinstance(value, dict)
+            if (
+                normalized := _normalize_chat_tool_call(value)
+            )
+            is not None
+        ]
+    return result
+
+
+def _normalize_chat_tool_call(
+    value: dict[str, Any],
+) -> dict[str, Any] | None:
+    function = value.get("function")
+    if not isinstance(function, dict):
+        return None
+    return {
+        "id": str(value.get("id", "")),
+        "type": "function",
+        "function": {
+            key: copy.deepcopy(function[key])
+            for key in ("name", "arguments")
+            if key in function
+        },
+    }
+
+
+def _normalize_responses_item(
+    item: dict[str, Any],
+) -> dict[str, Any] | None:
+    item_type = str(item.get("type", ""))
+    if item_type == "reasoning":
+        return None
+    if item_type == "function_call":
+        allowed = {
+            "type",
+            "call_id",
+            "name",
+            "arguments",
+            "status",
+        }
+    elif item_type == "function_call_output":
+        allowed = {
+            "type",
+            "call_id",
+            "output",
+            "status",
+        }
+    elif item_type == "message" or "role" in item:
+        allowed = {
+            "type",
+            "role",
+            "content",
+            "status",
+            "name",
+        }
+    else:
+        return None
+    return {
+        key: copy.deepcopy(value)
+        for key, value in item.items()
+        if key in allowed
+    }
 
 
 def history_identities(
