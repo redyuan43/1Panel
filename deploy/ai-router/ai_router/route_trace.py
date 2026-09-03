@@ -14,7 +14,7 @@ from typing import Any
 from .config import Registry, Settings
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 GRAPH_VERSION = 3
 TERMINAL_STATUSES = {"succeeded", "failed", "interrupted"}
 REVIEW_VERDICTS = {"correct", "incorrect", "needs_review"}
@@ -437,15 +437,21 @@ class DecisionTrace:
         settings_hash: str,
         registry_hash: str,
         client_models: list[str] | tuple[str, ...] | None = None,
+        client_request_id: str | None = None,
+        disclosure_mode: str = "internal",
     ) -> None:
         now = time.time()
         self.payload: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "graph_version": GRAPH_VERSION,
             "request_id": request_id,
+            "client_request_id": client_request_id,
             "client_id": client_id,
             "key_id": key_id,
             "client_models": list(client_models or ()),
+            "disclosure_mode": disclosure_mode,
+            "identity_intercepted": False,
+            "response_redactions": 0,
             "conversation_id": None,
             "branch_id": None,
             "parent_branch_id": None,
@@ -846,6 +852,41 @@ class DecisionTrace:
         self.payload["completed_at"] = now
         self._touch(now)
 
+    def finish_identity_intercept(
+        self,
+        *,
+        status_code: int,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        if self.terminal:
+            return
+        self.payload.update(
+            {
+                "task": "identity",
+                "route_profile": "identity",
+                "identity_intercepted": True,
+                "route_selected": False,
+            }
+        )
+        self.record(
+            1,
+            "identity_intercept",
+            "passed",
+            reason="public_identity_response",
+            evidence={
+                "status_code": status_code,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+            },
+            path=False,
+        )
+        now = time.time()
+        self.payload["status"] = "succeeded"
+        self.payload["status_code"] = int(status_code)
+        self.payload["completed_at"] = now
+        self._touch(now)
+
     def fail(
         self,
         *,
@@ -1002,6 +1043,7 @@ class RouteTraceStore:
                 """
                 CREATE TABLE IF NOT EXISTS route_traces (
                     request_id TEXT PRIMARY KEY,
+                    client_request_id TEXT,
                     started_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     completed_at REAL,
@@ -1058,6 +1100,7 @@ class RouteTraceStore:
                 ).fetchall()
             }
             for name in (
+                "client_request_id",
                 "route_profile",
                 "strategy_version",
                 "history_mode",
@@ -1070,6 +1113,12 @@ class RouteTraceStore:
                 """
                 CREATE INDEX IF NOT EXISTS route_traces_profile
                 ON route_traces(route_profile, started_at DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS route_traces_client_request
+                ON route_traces(client_request_id, started_at DESC)
                 """
             )
 
@@ -1088,14 +1137,15 @@ class RouteTraceStore:
             connection.execute(
                 """
                 INSERT INTO route_traces (
-                    request_id, started_at, updated_at, completed_at,
+                    request_id, client_request_id, started_at, updated_at, completed_at,
                     instance_id, boot_id, client_id, conversation_id,
                     protocol, requested_model, selected_model, endpoint_id,
                     task, route_profile, strategy_version, history_mode,
                     status, status_code, graph_version,
                     excerpt_json, payload_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(request_id) DO UPDATE SET
+                    client_request_id=excluded.client_request_id,
                     updated_at=excluded.updated_at,
                     completed_at=excluded.completed_at,
                     conversation_id=excluded.conversation_id,
@@ -1113,6 +1163,7 @@ class RouteTraceStore:
                 """,
                 (
                     payload["request_id"],
+                    payload.get("client_request_id"),
                     payload["started_at"],
                     payload["updated_at"],
                     payload.get("completed_at"),
@@ -1207,10 +1258,11 @@ class RouteTraceStore:
             base_values.append(review_status)
         if search:
             base_where.append(
-                "(t.request_id LIKE ? OR t.conversation_id LIKE ?)"
+                "(t.request_id LIKE ? OR t.client_request_id LIKE ? "
+                "OR t.conversation_id LIKE ?)"
             )
             term = f"%{search[:256]}%"
-            base_values.extend((term, term))
+            base_values.extend((term, term, term))
         if endpoint_ids is not None:
             if endpoint_ids:
                 placeholders = ", ".join("?" for _ in endpoint_ids)
@@ -1331,6 +1383,15 @@ class RouteTraceStore:
             ),
             {},
         )
+        if not upstream_evidence:
+            upstream_evidence = next(
+                (
+                    step.get("evidence") or {}
+                    for step in reversed(steps)
+                    if step.get("node_id") == "identity_intercept"
+                ),
+                {},
+            )
         queue_wait_ms = max(
             (
                 float((step.get("evidence") or {}).get("queue_wait_ms"))
@@ -1378,6 +1439,7 @@ class RouteTraceStore:
             }
         return {
             "request_id": row["request_id"],
+            "client_request_id": row["client_request_id"],
             "started_at": row["started_at"],
             "updated_at": row["updated_at"],
             "completed_at": row["completed_at"],
@@ -1417,6 +1479,15 @@ class RouteTraceStore:
             "excerpt": excerpt,
             "error": payload.get("error"),
             "route_selected": bool(payload.get("route_selected")),
+            "disclosure_mode": str(
+                payload.get("disclosure_mode") or "internal"
+            ),
+            "identity_intercepted": bool(
+                payload.get("identity_intercepted")
+            ),
+            "response_redactions": int(
+                payload.get("response_redactions") or 0
+            ),
             "current_review": review,
             "reason": selection.get("reason"),
             "affinity": selection.get("affinity"),

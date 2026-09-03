@@ -5,6 +5,7 @@ import json
 import os
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
@@ -21,6 +22,7 @@ from .errors import (
     HistoryMigrationRequiredError,
     NoCompatibleModelError,
     NoEligibleModelError,
+    PublicIdentityUnavailableError,
     QueueTimeoutError,
     RouterError,
 )
@@ -37,6 +39,7 @@ from .identity import (
     IdentityProfile,
     IdentityStreamSanitizer,
     internal_identifiers,
+    is_identity_disclosure_request,
     sanitize_payload,
     sanitize_value,
 )
@@ -118,20 +121,25 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             exc,
             profile=profile,
             identifiers=internal_identifiers(current.registry),
+            public=(
+                getattr(
+                    request.state,
+                    "disclosure_mode",
+                    "public",
+                )
+                == "public"
+            ),
+            request_id=getattr(
+                request.state,
+                "server_request_id",
+                None,
+            ),
         )
 
     @app.get("/health")
     async def health(request: Request) -> dict[str, Any]:
         current = _runtime(request)
-        return {
-            "ok": True,
-            "state_store": await current.store.ping(),
-            "registry_endpoints": len(current.registry.endpoints),
-            "instance_id": current.instance_id,
-            "boot_id": current.boot_id,
-            "draining": current.draining,
-            "training_archive": current.training is not None,
-        }
+        return {"ok": bool(await current.store.ping())}
 
     @app.get("/internal/status")
     async def internal_status(request: Request) -> dict[str, Any]:
@@ -175,15 +183,19 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     @app.get("/v1/models")
     async def models(request: Request) -> JSONResponse:
         current = _runtime(request)
+        request.state.server_request_id = uuid4().hex
+        request.state.disclosure_mode = "public"
         current.reload_settings()
         await current.reload_endpoint_config()
         client = await current.auth.authenticate(
             request.headers.get("authorization")
         )
+        request.state.disclosure_mode = client.policy.disclosure_mode
         profile = IdentityProfile.from_settings(
             current.settings.section("identity")
         )
-        if profile.enabled:
+        if client.policy.disclosure_mode == "public":
+            _ensure_public_identity(profile)
             values = await _identity_model_descriptors(
                 current,
                 client.policy.models,
@@ -201,7 +213,14 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 ):
                     continue
                 values.append(await _model_descriptor(current, model))
-        return JSONResponse({"object": "list", "data": values})
+        return JSONResponse(
+            {"object": "list", "data": values},
+            headers={
+                "Cache-Control": "no-store",
+                "Vary": "Authorization",
+                "X-Request-ID": request.state.server_request_id,
+            },
+        )
 
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request) -> Response:
@@ -372,48 +391,25 @@ async def _identity_model_descriptors(
     profile: IdentityProfile,
 ) -> list[dict[str, Any]]:
     allowed = set(allowed_models)
-    alias_target = _identity_alias_target(
-        current,
-        allowed_models,
-        profile,
-    )
-    if alias_target is None:
+    if allowed != {profile.public_model_id}:
         return []
-    if alias_target == "auto":
-        endpoints = tuple(
-            endpoint
-            for endpoint in current.registry.responders()
-            if endpoint.enabled and endpoint.auto_candidate
-        )
-    else:
-        endpoints = tuple(
-            endpoint
-            for endpoint in current.registry.by_public_model(alias_target)
-            if endpoint.enabled
-        )
+    endpoints = tuple(
+        endpoint
+        for endpoint in current.registry.responders()
+        if endpoint.enabled and endpoint.auto_candidate
+    )
     if not endpoints:
         return []
 
-    values = []
-    if "*" in allowed or "auto" in allowed:
-        values.append(
-            await _model_descriptor(
-                current,
-                "auto",
-                endpoints_override=endpoints,
-                owned_by=profile.provider_name,
-            )
-        )
-    values.append(
+    return [
         await _model_descriptor(
             current,
             profile.public_model_id,
             endpoints_override=endpoints,
             owned_by=profile.provider_name,
-            use_auto_limits=alias_target == "auto",
+            use_auto_limits=True,
         )
-    )
-    return values
+    ]
 
 
 def _identity_alias_target(
@@ -443,7 +439,20 @@ def _resolve_requested_model(
     allowed_models: tuple[str, ...],
     requested_model: str,
     profile: IdentityProfile,
+    disclosure_mode: str = "internal",
 ) -> str:
+    if disclosure_mode == "public":
+        _ensure_public_identity(profile)
+        if (
+            requested_model != profile.public_model_id
+            or set(allowed_models) != {profile.public_model_id}
+        ):
+            raise RouterError(
+                "the requested model is not available",
+                status_code=404,
+                code="model_not_found",
+            )
+        return "auto"
     if (
         not profile.enabled
         or requested_model != profile.public_model_id
@@ -461,15 +470,36 @@ def _resolve_requested_model(
     )
 
 
+def _ensure_public_identity(profile: IdentityProfile) -> None:
+    if not profile.enabled or not profile.complete:
+        raise PublicIdentityUnavailableError()
+
+
+def _identity_for_disclosure(
+    profile: IdentityProfile,
+    disclosure_mode: str,
+) -> IdentityProfile:
+    if disclosure_mode == "public":
+        _ensure_public_identity(profile)
+        return profile
+    return replace(profile, enabled=False)
+
+
 async def _proxy(request: Request, api_kind: str) -> Response:
     current = _runtime(request)
     current.reload_settings()
     await current.reload_endpoint_config()
-    identity = IdentityProfile.from_settings(
+    configured_identity = IdentityProfile.from_settings(
         current.settings.section("identity")
     )
-    request.state.identity_profile = identity
-    request_id = request.headers.get("x-request-id") or uuid4().hex
+    request.state.identity_profile = configured_identity
+    request.state.disclosure_mode = "public"
+    request_id = uuid4().hex
+    client_request_id = (
+        request.headers.get("x-request-id", "").strip()[:256]
+        or None
+    )
+    request.state.server_request_id = request_id
     max_request_bytes = int(
         current.settings.section("limits").get(
             "max_request_bytes",
@@ -514,12 +544,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     authenticated = await current.auth.authenticate(
         request.headers.get("authorization")
     )
-    requested_model = _resolve_requested_model(
-        current,
-        authenticated.policy.models,
-        client_requested_model,
-        identity,
+    request.state.disclosure_mode = authenticated.policy.disclosure_mode
+    identity = _identity_for_disclosure(
+        configured_identity,
+        authenticated.policy.disclosure_mode,
     )
+    request.state.identity_profile = identity
     trace = DecisionTrace(
         request_id=request_id,
         client_id=authenticated.policy.id,
@@ -532,12 +562,21 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         settings_hash=settings_fingerprint(current.settings),
         registry_hash=registry_fingerprint(current.registry),
         client_models=authenticated.policy.models,
+        client_request_id=client_request_id,
+        disclosure_mode=authenticated.policy.disclosure_mode,
     )
     request.state.route_trace = trace
     await _save_request_trace(current, trace)
+    requested_model = _resolve_requested_model(
+        current,
+        authenticated.policy.models,
+        client_requested_model,
+        configured_identity,
+        authenticated.policy.disclosure_mode,
+    )
     if not (
-        identity.enabled
-        and client_requested_model == identity.public_model_id
+        configured_identity.enabled
+        and client_requested_model == configured_identity.public_model_id
     ):
         current.auth.ensure_model_access(
             authenticated,
@@ -585,6 +624,27 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         ),
     )
     await _save_request_trace(current, trace)
+    if identity.enabled and is_identity_disclosure_request(
+        body,
+        api_kind,
+    ):
+        return await _identity_intercept_response(
+            current,
+            body=body,
+            api_kind=api_kind,
+            request_id=request_id,
+            client_id=authenticated.policy.id,
+            key_id=authenticated.key_id,
+            conversation_id=conversation_id,
+            identity=identity,
+            trace=trace,
+            lineage=lineage,
+            rpm_limit=authenticated.policy.rpm_limit,
+            tpm_limit=authenticated.policy.tpm_limit,
+            max_parallel_requests=(
+                authenticated.policy.max_parallel_requests
+            ),
+        )
     training_token = None
     try:
         if current.training is not None:
@@ -625,7 +685,15 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         request_tracked = True
         stored_conversation = lineage.parent
         routing_conversation = (
-            None if client_compacted else stored_conversation
+            None
+            if (
+                client_compacted
+                or (
+                    stored_conversation is not None
+                    and stored_conversation.identity_only
+                )
+            )
+            else stored_conversation
         )
         effective_body = json.loads(json.dumps(body))
         if (
@@ -1102,11 +1170,28 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     await upstream.aclose()
                     await current.budget.release(budget_reservation)
                     budget_reservation = None
-                    public_payload, redactions = sanitize_payload(
-                        payload,
-                        identity,
-                        identifiers,
-                    )
+                    if identity.enabled:
+                        public_payload = json.dumps(
+                            {
+                                "error": {
+                                    "message": (
+                                        "the model request could not be "
+                                        "completed"
+                                    ),
+                                    "type": (
+                                        "invalid_request_error"
+                                        if upstream.status_code < 500
+                                        else "server_error"
+                                    ),
+                                    "code": "model_request_failed",
+                                }
+                            },
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                        redactions = 1
+                    else:
+                        public_payload = payload
+                        redactions = 0
                     decision.response_redactions = redactions
                     await _audit(
                         current,
@@ -1133,7 +1218,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         content=public_payload,
                         status_code=upstream.status_code,
                         headers=headers,
-                        media_type=upstream.headers.get("content-type"),
+                        media_type=(
+                            "application/json"
+                            if identity.enabled
+                            else upstream.headers.get("content-type")
+                        ),
                     )
 
                 await current.budget.commit(budget_reservation)
@@ -1329,8 +1418,362 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     authenticated.policy.id,
                     lease.owner_token,
                 )
-            if request_tracked:
-                await current.track_request_finished(lease.owner_token)
+        if request_tracked:
+            await current.track_request_finished(lease.owner_token)
+
+
+async def _identity_intercept_response(
+    current: RouterRuntime,
+    *,
+    body: dict[str, Any],
+    api_kind: str,
+    request_id: str,
+    client_id: str,
+    key_id: str,
+    conversation_id: str,
+    identity: IdentityProfile,
+    trace: DecisionTrace,
+    lineage: LineageContext,
+    rpm_limit: int,
+    tpm_limit: int,
+    max_parallel_requests: int,
+) -> Response:
+    owner_token = f"identity:{request_id}"
+    parallel_acquired = False
+    request_tracked = False
+    input_tokens = 0
+    output_tokens = max(1, len(identity.identity_response) // 4)
+    try:
+        await current.track_request_started(
+            owner_token,
+            request_id,
+            conversation_id,
+        )
+        request_tracked = True
+        parallel_acquired = await current.limiter.acquire_parallel(
+            client_id,
+            owner_token,
+            max_parallel_requests,
+        )
+        if not parallel_acquired:
+            raise RouterError(
+                "client parallel request limit exceeded",
+                status_code=429,
+                code="parallel_limit_exceeded",
+            )
+
+        effective_body = json.loads(json.dumps(body))
+        if api_kind == "responses" and lineage.parent is not None:
+            effective_body = await apply_stored_history(
+                current.compactor,
+                current.conversations,
+                effective_body,
+                api_kind=api_kind,
+                conversation=lineage.parent,
+            )
+        effective_body = normalize_request(
+            effective_body,
+            api_kind,
+        ).body
+        input_tokens = current.token_counter.count_request(
+            identity.inject(effective_body, api_kind),
+            api_kind,
+        )
+        allowed, limit_code = await current.limiter.check_rate_limits(
+            client_id,
+            prompt_tokens=input_tokens,
+            rpm_limit=rpm_limit,
+            tpm_limit=tpm_limit,
+        )
+        if not allowed:
+            raise RouterError(
+                limit_code or "rate limit exceeded",
+                status_code=429,
+                code=limit_code or "rate_limit_exceeded",
+            )
+
+        headers = {
+            "Cache-Control": "no-store",
+            "X-Request-ID": request_id,
+            "X-1Panel-Public-Model": identity.public_model_id,
+            "X-1Panel-Conversation-ID": conversation_id,
+        }
+        payload = _identity_response_payload(
+            api_kind,
+            request_id=request_id,
+            identity=identity,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        response_payload = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        response: Response
+        if not bool(body.get("stream")):
+            response = JSONResponse(payload, headers=headers)
+        else:
+            response = StreamingResponse(
+                _identity_stream(
+                    api_kind,
+                    payload,
+                    identity.identity_response,
+                ),
+                headers=headers,
+                media_type="text/event-stream",
+            )
+        state = (
+            replace(
+                lineage.parent,
+                conversation_id=lineage.lineage_id,
+                branch_id=lineage.branch_id,
+                parent_branch_id=lineage.parent_branch_id,
+                lineage_relation=lineage.relation,
+                last_seen=time.time(),
+            )
+            if lineage.parent is not None
+            else ConversationState(
+                conversation_id=lineage.lineage_id,
+                branch_id=lineage.branch_id,
+                parent_branch_id=lineage.parent_branch_id,
+                lineage_relation=lineage.relation,
+                public_model=identity.public_model_id,
+                endpoint_id="",
+                tier_rank=0,
+                task="identity",
+                last_seen=time.time(),
+                identity_only=True,
+            )
+        )
+        await persist_history(
+            current.compactor,
+            current.conversations,
+            state=state,
+            client_id=client_id,
+            body=effective_body,
+            api_kind=api_kind,
+            response_payload=response_payload,
+        )
+        await _map_response_id(current, response_payload, state)
+        current.audit.write(
+            "identity_intercepted",
+            request_id=request_id,
+            client_request_id=trace.payload.get("client_request_id"),
+            client_id=client_id,
+            key_id=key_id,
+            conversation_id=conversation_id,
+            disclosure_mode="public",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            instance_id=current.instance_id,
+            boot_id=current.boot_id,
+        )
+        trace.finish_identity_intercept(
+            status_code=200,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        await _save_request_trace(current, trace)
+        await _record_client_usage(
+            current,
+            client_id=client_id,
+            key_id=key_id,
+            request_id=request_id,
+            status_code=200,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        return response
+    except BaseException as exc:
+        await _finish_trace_exception(current, trace, exc)
+        await _record_client_usage(
+            current,
+            client_id=client_id,
+            key_id=key_id,
+            request_id=request_id,
+            status_code=(
+                499
+                if isinstance(exc, asyncio.CancelledError)
+                else int(getattr(exc, "status_code", 500))
+            ),
+            input_tokens=input_tokens,
+            output_tokens=0,
+        )
+        raise
+    finally:
+        if parallel_acquired:
+            await current.limiter.release_parallel(
+                client_id,
+                owner_token,
+            )
+        if request_tracked:
+            await current.track_request_finished(owner_token)
+
+
+def _identity_response_payload(
+    api_kind: str,
+    *,
+    request_id: str,
+    identity: IdentityProfile,
+    input_tokens: int,
+    output_tokens: int,
+) -> dict[str, Any]:
+    created = int(time.time())
+    if api_kind == "chat":
+        return {
+            "id": f"chatcmpl-{request_id}",
+            "object": "chat.completion",
+            "created": created,
+            "model": identity.public_model_id,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": identity.identity_response,
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": input_tokens,
+                "completion_tokens": output_tokens,
+                "total_tokens": input_tokens + output_tokens,
+            },
+        }
+    response_id = f"resp_{request_id}"
+    message = {
+        "id": f"msg_{request_id}",
+        "type": "message",
+        "status": "completed",
+        "role": "assistant",
+        "content": [
+            {
+                "type": "output_text",
+                "text": identity.identity_response,
+                "annotations": [],
+            }
+        ],
+    }
+    return {
+        "id": response_id,
+        "object": "response",
+        "created_at": created,
+        "status": "completed",
+        "model": identity.public_model_id,
+        "output": [message],
+        "output_text": identity.identity_response,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+    }
+
+
+async def _identity_stream(
+    api_kind: str,
+    payload: dict[str, Any],
+    text: str,
+) -> AsyncIterator[bytes]:
+    if api_kind == "chat":
+        base = {
+            "id": payload["id"],
+            "object": "chat.completion.chunk",
+            "created": payload["created"],
+            "model": payload["model"],
+        }
+        chunks = [
+            {
+                **base,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": ""},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                **base,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": text},
+                        "finish_reason": None,
+                    }
+                ],
+            },
+            {
+                **base,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        ]
+    else:
+        response = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"output", "output_text"}
+        }
+        output = payload["output"][0]
+        part = output["content"][0]
+        chunks = [
+            {"type": "response.created", "response": response},
+            {
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    **output,
+                    "status": "in_progress",
+                    "content": [],
+                },
+            },
+            {
+                "type": "response.content_part.added",
+                "item_id": output["id"],
+                "output_index": 0,
+                "content_index": 0,
+                "part": {**part, "text": ""},
+            },
+            {
+                "type": "response.output_text.delta",
+                "item_id": output["id"],
+                "output_index": 0,
+                "content_index": 0,
+                "delta": text,
+            },
+            {
+                "type": "response.output_text.done",
+                "item_id": output["id"],
+                "output_index": 0,
+                "content_index": 0,
+                "text": text,
+            },
+            {
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": output,
+            },
+            {"type": "response.completed", "response": payload},
+        ]
+    for chunk in chunks:
+        yield (
+            "data: "
+            + json.dumps(
+                chunk,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n\n"
+        ).encode("utf-8")
+    yield b"data: [DONE]\n\n"
 
 
 async def _acquire_route_capacity(
@@ -2058,7 +2501,11 @@ async def _send_upstream(
         )
     headers = {
         "Content-Type": "application/json",
-        "X-Request-ID": request.headers.get("x-request-id") or uuid4().hex,
+        "X-Request-ID": getattr(
+            request.state,
+            "server_request_id",
+            uuid4().hex,
+        ),
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -2397,6 +2844,15 @@ async def _prepare_routed_body(
             raise NoCompatibleModelError(
                 "the compacted request still exceeds the selected model "
                 "context"
+            )
+        if deepseek_incompatible and deepseek_history_requires_migration(
+            routed,
+            api_kind,
+        ):
+            raise HistoryMigrationRequiredError(
+                "DeepSeek history is still missing reasoning_content "
+                "required for the preceding tool transaction after "
+                "compaction"
             )
     else:
         decision.prompt_tokens = routed_prompt_tokens
@@ -2894,52 +3350,11 @@ def _response_headers(
         }
         headers.update(
             {
-                "X-1Panel-Route-Request-ID": request_id,
+                "X-Request-ID": request_id,
                 "X-1Panel-Public-Model": identity.public_model_id,
-                "X-1Panel-Prompt-Tokens": str(decision.prompt_tokens),
-                "X-1Panel-Route-Attempts": str(decision.attempts),
-                "X-1Panel-Capacity-Attempts": str(
-                    decision.capacity_attempts
-                ),
-                "X-1Panel-Queue-Wait-Ms": str(
-                    round(decision.queue_wait_ms, 2)
-                ),
                 "X-1Panel-Conversation-ID": conversation_id,
-                "X-1Panel-Conversation-Mode": conversation_mode,
-                "X-1Panel-Branch-ID": decision.branch_id or "",
-                "X-1Panel-Parent-Branch-ID": (
-                    decision.parent_branch_id or ""
-                ),
-                "X-1Panel-Lineage-Relation": (
-                    decision.lineage_relation or ""
-                ),
-                "X-1Panel-Route-Strategy": (
-                    decision.strategy_version
-                ),
-                "X-1Panel-Route-Profile": decision.route_profile,
-                "X-1Panel-Context-Required": str(
-                    decision.context_required
-                    or decision.prompt_tokens
-                    + decision.output_reserve_tokens
-                ),
-                "X-1Panel-History-Mode": decision.history_mode,
-                "X-SIYUAN-Identity-Revision": identity.revision,
             }
         )
-        if decision.context_compacted:
-            headers["X-1Panel-Context-Compacted"] = "true"
-        if decision.context_compaction_source:
-            headers["X-1Panel-Context-Compaction-Source"] = (
-                decision.context_compaction_source
-            )
-        if decision.tool_history_repairs:
-            headers["X-1Panel-Tool-History-Repaired"] = str(
-                decision.tool_history_repairs
-            )
-        if decision.image_resizes:
-            headers["X-1Panel-Image-Resized"] = str(
-                decision.image_resizes
-            )
         return headers
     headers = {
         key: value
@@ -2948,6 +3363,7 @@ def _response_headers(
         and key.lower() not in {"content-length", "content-encoding"}
     }
     headers.update(decision.response_headers(request_id))
+    headers["X-Request-ID"] = request_id
     headers["X-1Panel-Conversation-ID"] = conversation_id
     headers["X-1Panel-Conversation-Mode"] = conversation_mode
     return headers
@@ -2984,6 +3400,9 @@ async def _audit(
         prompt_tokens_fallback=decision.prompt_tokens,
     )
     if decision.trace and not decision.trace.terminal:
+        decision.trace.payload["response_redactions"] = int(
+            decision.response_redactions
+        )
         decision.trace.finish(
             attempt=decision.attempts,
             status_code=status_code,
@@ -2998,6 +3417,11 @@ async def _audit(
     current.audit.write(
         "request_completed",
         request_id=request_id,
+        client_request_id=(
+            decision.trace.payload.get("client_request_id")
+            if decision.trace
+            else None
+        ),
         client_id=client_id,
         key_id=key_id,
         conversation_id=conversation_id,
@@ -3044,6 +3468,11 @@ async def _audit(
         identity_revision=decision.identity_revision,
         legacy_model_alias_used=decision.legacy_model_alias_used,
         response_redactions=decision.response_redactions,
+        disclosure_mode=(
+            decision.trace.payload.get("disclosure_mode", "internal")
+            if decision.trace
+            else "internal"
+        ),
         instance_id=current.instance_id,
         boot_id=current.boot_id,
     )
@@ -3062,6 +3491,27 @@ async def _audit(
                 ),
                 error=type(exc).__name__,
             )
+    await _record_client_usage(
+        current,
+        client_id=client_id,
+        key_id=key_id,
+        request_id=request_id,
+        status_code=status_code,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
+
+
+async def _record_client_usage(
+    current: RouterRuntime,
+    *,
+    client_id: str,
+    key_id: str,
+    request_id: str,
+    status_code: int,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
     try:
         await current.clients.record_usage(
             client_id=client_id,
@@ -3213,6 +3663,11 @@ def _audit_started(
     current.audit.write(
         "request_started",
         request_id=request_id,
+        client_request_id=(
+            decision.trace.payload.get("client_request_id")
+            if decision.trace
+            else None
+        ),
         client_id=client_id,
         key_id=key_id,
         conversation_id=conversation_id,
@@ -3252,6 +3707,11 @@ def _audit_started(
         candidate_rejections=list(decision.candidate_rejections),
         identity_revision=decision.identity_revision,
         legacy_model_alias_used=decision.legacy_model_alias_used,
+        disclosure_mode=(
+            decision.trace.payload.get("disclosure_mode", "internal")
+            if decision.trace
+            else "internal"
+        ),
         instance_id=current.instance_id,
         boot_id=current.boot_id,
     )
@@ -3377,26 +3837,75 @@ def _error_response(
     *,
     profile: IdentityProfile | None = None,
     identifiers: tuple[str, ...] = (),
+    public: bool = True,
+    request_id: str | None = None,
 ) -> JSONResponse:
+    message = str(exc)
+    if public:
+        message = _public_error_message(exc)
     error = {
-        "message": str(exc),
+        "message": message,
         "type": "invalid_request_error"
         if exc.status_code < 500
         else "server_error",
         "code": exc.code,
     }
-    if exc.details:
+    if exc.details and not public:
         error["details"] = exc.details
-    if profile and profile.enabled:
+    if public and profile and profile.enabled:
         error, _redactions = sanitize_value(
             error,
             profile,
             identifiers,
         )
+    headers = dict(exc.headers)
+    if request_id:
+        headers["X-Request-ID"] = request_id
     return JSONResponse(
         status_code=exc.status_code,
-        headers=exc.headers,
+        headers=headers,
         content={"error": error},
+    )
+
+
+def _public_error_message(exc: RouterError) -> str:
+    messages = {
+        "invalid_api_key": "invalid API key",
+        "model_not_found": "the requested model is not available",
+        "public_identity_unavailable": (
+            "public model identity is unavailable"
+        ),
+        "invalid_json": "request body must be valid JSON",
+        "invalid_request": "the request is invalid",
+        "model_required": "model is required",
+        "payload_too_large": "request body is too large",
+        "invalid_tool_history": "tool history is invalid",
+        "conversation_busy": (
+            "another request is already running for this conversation"
+        ),
+        "conversation_state_conflict": (
+            "conversation history does not match the stored state"
+        ),
+        "parallel_limit_exceeded": (
+            "client parallel request limit exceeded"
+        ),
+        "rate_limit_exceeded": "rate limit exceeded",
+        "model_capacity_busy": "model capacity is busy",
+        "all_local_capacity_busy": "model capacity is busy",
+        "model_queue_timeout": "model capacity is busy",
+        "no_eligible_model": "no eligible model is available",
+        "no_compatible_model": (
+            "no model can satisfy the request constraints"
+        ),
+        "router_draining": "service is restarting",
+    }
+    return messages.get(
+        exc.code,
+        (
+            "the request could not be completed"
+            if exc.status_code < 500
+            else "the model service is temporarily unavailable"
+        ),
     )
 
 

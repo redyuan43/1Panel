@@ -374,6 +374,9 @@ def client_policies(settings: Settings) -> tuple[ClientPolicy, ...]:
                 allow_compaction=bool(
                     value.get("allow_compaction", False)
                 ),
+                disclosure_mode=str(
+                    value.get("disclosure_mode", "internal")
+                ),
             )
         )
     return tuple(result)
@@ -568,6 +571,13 @@ def validate_settings(value: dict[str, Any]) -> None:
     if not ids or any(not item for item in ids) or len(ids) != len(set(ids)):
         raise ValueError("client policy IDs must be present and unique")
     for client in clients:
+        if client.get("disclosure_mode", "internal") not in {
+            "public",
+            "internal",
+        }:
+            raise ValueError(
+                "client disclosure_mode must be public or internal"
+            )
         if (
             int(client.get("rpm_limit", 0)) <= 0
             or int(client.get("tpm_limit", 0)) <= 0

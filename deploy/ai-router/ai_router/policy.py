@@ -35,6 +35,7 @@ INCOMPATIBLE_REJECTION_REASONS = frozenset(
         "modality",
         "task",
         "tier",
+        "tier_downgrade",
     }
 )
 
@@ -993,13 +994,6 @@ class RoutingPolicy:
             and conversation
             and endpoint.tier_rank < conversation.tier_rank
             and not self._cloud_to_local_migration(conversation, endpoint)
-            and str(
-                self.settings.section("routing").get(
-                    "strategy",
-                    "legacy_v1",
-                )
-            )
-            == "legacy_v1"
         ):
             return "tier_downgrade"
         if evaluation.required_tier:

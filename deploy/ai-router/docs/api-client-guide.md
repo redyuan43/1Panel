@@ -522,6 +522,7 @@ WorkBuddy 或重新进入模型选择页。Router 的 `/v1/models` 也会返回
 Model: siyuan/auto
 ```
 
-`auto`继续兼容。普通客户端的模型目录、JSON响应、SSE事件和响应头只显示
-`思源 / SIYUAN`公开身份，不显示实际模型、节点或GPU deployment。已有调用方
-暂时使用真实模型 ID时仍可继续工作，但应逐步迁移到`siyuan/auto`。
+`public`客户账号只能使用`siyuan/auto`；`auto`和真实模型 ID均会返回通用的
+`model_not_found`。`internal`账号继续使用`auto`或真实模型 ID，并保留完整
+路由诊断。公共账号的模型目录、JSON响应、SSE事件和响应头只显示
+`思源 / SIYUAN`公开身份，不显示实际模型、节点或GPU deployment。

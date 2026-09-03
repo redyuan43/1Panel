@@ -16,7 +16,7 @@ identity:
   display_name_en: SIYUAN
   provider_name: SIYUAN
   description: 由思源智能路由服务提供的统一 AI 助手。
-  identity_response: 我是思源（SIYUAN），由思源智能路由服务提供的统一 AI 助手。
+  identity_response: 我是思源（SIYUAN），由思源智能路由服务提供的统一 AI 助手。底层模型、节点和路由实现属于内部服务信息，不对外披露。
 
 routing:
   strategy: intelligent_v2
@@ -114,6 +114,7 @@ clients:
       tpm_limit: 1000000
       max_parallel_requests: 8
       allow_compaction: false
+      disclosure_mode: internal
     - id: check-boards
       key_env: AI_ROUTER_CHECK_BOARDS_API_KEY
       models:
@@ -122,3 +123,4 @@ clients:
       tpm_limit: 2000000
       max_parallel_requests: 4
       allow_compaction: false
+      disclosure_mode: internal

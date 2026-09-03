@@ -388,6 +388,118 @@ def test_v2_cloud_conversation_does_not_switch_on_transient_failure(
         )
 
 
+def test_v2_returns_422_when_only_lower_tier_fallbacks_remain(
+    tmp_path: Path,
+) -> None:
+    value = yaml.safe_load(
+        (ROOT / "config" / "registry.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    for endpoint in value["endpoints"]:
+        endpoint["enabled"] = endpoint["id"] == "ai-qwen38-27b"
+        endpoint["auto_candidate"] = endpoint["enabled"]
+    path = tmp_path / "registry.yaml"
+    path.write_text(
+        yaml.safe_dump(value, allow_unicode=True, sort_keys=False),
+        encoding="utf-8",
+    )
+    registry = Registry(path)
+    statuses = {
+        endpoint.id: status_for(endpoint)
+        for endpoint in registry.endpoints
+    }
+    policy = RoutingPolicy(
+        registry,
+        v2_settings(tmp_path),
+        FakeHealth(statuses),
+    )
+    previous = registry.by_id("ivan-qwen38-flash-128k")
+    assert previous is not None
+    conversation = ConversationState(
+        conversation_id="tier-floor-permanent",
+        public_model=previous.public_model,
+        endpoint_id=previous.id,
+        tier_rank=previous.tier_rank,
+        task="general",
+        last_seen=time.time(),
+        deployment_id=previous.id,
+    )
+
+    with pytest.raises(NoCompatibleModelError) as raised:
+        run(
+            policy.choose(
+                requested_model="auto",
+                evaluation=Evaluation(
+                    "general",
+                    None,
+                    1.0,
+                    "test",
+                ),
+                prompt_tokens=100,
+                output_reserve_tokens=100,
+                modalities={"text"},
+                has_tools=False,
+                conversation=conversation,
+            )
+        )
+
+    assert raised.value.status_code == 422
+    assert "ai-qwen38-27b:tier_downgrade" in str(raised.value)
+
+
+def test_v2_returns_503_when_tier_preserving_fallbacks_are_temporarily_busy(
+    tmp_path: Path,
+) -> None:
+    registry = v2_registry(tmp_path)
+    statuses = {
+        endpoint.id: status_for(endpoint)
+        for endpoint in registry.endpoints
+    }
+    cooldown_ids = {
+        endpoint.id
+        for endpoint in registry.endpoints
+        if endpoint.tier_rank >= 30
+    }
+    policy = RoutingPolicy(
+        registry,
+        v2_settings(tmp_path),
+        FakeHealth(statuses, cooldown_ids=cooldown_ids),
+    )
+    previous = registry.by_id("ivan-qwen38-flash-128k")
+    assert previous is not None
+    conversation = ConversationState(
+        conversation_id="tier-floor-temporary",
+        public_model=previous.public_model,
+        endpoint_id=previous.id,
+        tier_rank=previous.tier_rank,
+        task="general",
+        last_seen=time.time(),
+        deployment_id=previous.id,
+    )
+
+    with pytest.raises(NoEligibleModelError) as raised:
+        run(
+            policy.choose(
+                requested_model="auto",
+                evaluation=Evaluation(
+                    "general",
+                    None,
+                    1.0,
+                    "test",
+                ),
+                prompt_tokens=100,
+                output_reserve_tokens=100,
+                modalities={"text"},
+                has_tools=False,
+                conversation=conversation,
+            )
+        )
+
+    assert raised.value.status_code == 503
+    assert "ivan-qwen38-flash-128k:cooldown" in str(raised.value)
+
+
 def test_v2_output_limit_skips_codex_subscription(
     tmp_path: Path,
 ) -> None:
@@ -652,6 +764,112 @@ def test_deepseek_tool_history_is_rejected_before_upstream(
                 decision=decision,
                 request_id="history-preflight",
                 allow_compaction=False,
+            )
+        )
+    run(runtime.close())
+
+
+def test_deepseek_tool_history_still_rejected_after_compaction(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = v2_registry(tmp_path)
+    endpoint = registry.by_id("cloud-deepseek-v4-flash")
+    assert endpoint is not None
+    monkeypatch.setenv(
+        "AI_ROUTER_STATE_KEY",
+        Fernet.generate_key().decode(),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_LITELLM_MASTER_KEY",
+        "internal-key",
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(tmp_path / "route-traces.sqlite3"),
+    )
+    runtime = build_runtime(
+        settings=v2_settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    body = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+                "codex_reasoning_items": [
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "private",
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "result",
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    }
+    assert deepseek_history_requires_migration(body, "chat")
+
+    async def compact_without_fixing_reasoning_content(
+        _current,
+        source,
+        *,
+        api_kind,
+        request_id,
+        target_context,
+        identity,
+    ):
+        # Simulates ContextCompactor keeping the offending tool-call
+        # message verbatim in the "recent" partition, so the DeepSeek
+        # reasoning_content gap survives compaction untouched.
+        return object(), source, 100
+
+    monkeypatch.setattr(
+        "ai_router.api._compact_body_for_target",
+        compact_without_fixing_reasoning_content,
+    )
+    decision = RouteDecision(
+        endpoint=endpoint,
+        requested_model="auto",
+        task="general",
+        prompt_tokens=100,
+        output_reserve_tokens=65536,
+        reason="remote_profile_fallback",
+        affinity="new",
+        score=1,
+        strategy_version="intelligent_v2",
+        route_profile="general",
+        context_required=65636,
+    )
+    with pytest.raises(HistoryMigrationRequiredError):
+        run(
+            _prepare_routed_body(
+                runtime,
+                body,
+                api_kind="chat",
+                decision=decision,
+                request_id="history-preflight-compacted",
+                allow_compaction=True,
             )
         )
     run(runtime.close())
@@ -926,8 +1144,7 @@ def test_glm_responses_adapter_uses_chat_upstream(
     assert response.status_code == 200
     assert response.json()["object"] == "response"
     assert response.json()["output_text"] == "RESPONSES_OK"
-    assert response.headers["X-SIYUAN-Identity-Revision"]
-    assert "X-1Panel-Protocol-Mode" not in response.headers
+    assert response.headers["X-1Panel-Protocol-Mode"] == "adapter"
     assert requests[0]["path"] == "/v1/chat/completions"
     assert requests[0]["body"]["max_tokens"] == 65536
     assert "max_output_tokens" not in requests[0]["body"]

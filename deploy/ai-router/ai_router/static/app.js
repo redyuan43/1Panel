@@ -223,7 +223,7 @@ function renderClients() {
           <td>${accountStatusBadge(item.enabled)}</td>
           <td>
             <strong class="table-primary">${escapeHtml(item.name)}</strong>
-            <span class="table-secondary">${escapeHtml(item.id)} · ${escapeHtml(item.source)}</span>
+            <span class="table-secondary">${escapeHtml(item.id)} · ${escapeHtml(item.source)} · ${item.disclosure_mode === "public" ? "客户脱敏" : "内部详细"}</span>
           </td>
           <td>${clientModelSummary(item.models)}</td>
           <td>
@@ -290,8 +290,22 @@ function availableClientModels() {
   return values;
 }
 
-function renderClientModels(selected = ["auto"]) {
+function publicIdentityModelId() {
+  return state.settings?.identity?.public_model_id || "siyuan/auto";
+}
+
+function renderClientModels(selected = ["auto"], disclosureMode = "internal") {
   const target = byId("client-models");
+  if (disclosureMode === "public") {
+    const publicModel = publicIdentityModelId();
+    target.innerHTML = `
+      <label>
+        <input type="checkbox" data-client-model="${escapeHtml(publicModel)}" checked disabled>
+        <span>${escapeHtml(publicModel)}</span>
+      </label>
+    `;
+    return;
+  }
   const allSelected = selected.includes("*");
   const values = [
     {id: "*", label: "全部模型"},
@@ -326,11 +340,17 @@ function openClientDialog(clientId = null) {
   byId("client-rpm").value = client?.rpm_limit || 120;
   byId("client-tpm").value = client?.tpm_limit || 1000000;
   byId("client-parallel").value = client?.max_parallel_requests || 4;
+  byId("client-disclosure-mode").value = (
+    client?.disclosure_mode || (client ? "internal" : "public")
+  );
   byId("client-enabled").checked = client?.enabled ?? true;
   byId("client-allow-compaction").checked = Boolean(
     client?.allow_compaction,
   );
-  renderClientModels(client?.models || ["auto"]);
+  renderClientModels(
+    client?.models || [publicIdentityModelId()],
+    byId("client-disclosure-mode").value,
+  );
   byId("client-dialog").showModal();
 }
 
@@ -341,11 +361,14 @@ function collectClient() {
     id: byId("client-id").value.trim(),
     name: byId("client-name").value.trim(),
     enabled: byId("client-enabled").checked,
-    models: selected.includes("*") ? ["*"] : selected,
+    models: byId("client-disclosure-mode").value === "public"
+      ? [publicIdentityModelId()]
+      : (selected.includes("*") ? ["*"] : selected),
     rpm_limit: Number(byId("client-rpm").value),
     tpm_limit: Number(byId("client-tpm").value),
     max_parallel_requests: Number(byId("client-parallel").value),
     allow_compaction: byId("client-allow-compaction").checked,
+    disclosure_mode: byId("client-disclosure-mode").value,
   };
 }
 
@@ -1764,7 +1787,9 @@ function renderTraceDetail() {
   byId("trace-detail-empty").hidden = true;
   byId("trace-detail").hidden = false;
   byId("trace-detail-title").textContent =
-    shortModel(trace.selected_model || trace.requested_model || "路由轨迹");
+    trace.identity_intercepted
+      ? "身份直答"
+      : shortModel(trace.selected_model || trace.requested_model || "路由轨迹");
   byId("trace-detail-status").innerHTML =
     statusBadge(
       trace.status,
@@ -1775,8 +1800,12 @@ function renderTraceDetail() {
   byId("trace-detail-summary").textContent =
     trace.excerpt?.text || "此请求没有可显示的文本摘要。";
   byId("trace-detail-meta").innerHTML = [
-    `请求 <code>${escapeHtml(shortId(trace.request_id, 20))}</code>`,
+    `请求 <code>${escapeHtml(trace.request_id)}</code>`,
+    ...(trace.client_request_id
+      ? [`客户端请求 <code>${escapeHtml(trace.client_request_id)}</code>`]
+      : []),
     `客户端 <strong>${escapeHtml(trace.client_id)}</strong>`,
+    `披露 <strong>${trace.disclosure_mode === "public" ? "客户脱敏" : "内部详细"}</strong>`,
     `会话 <code title="${escapeHtml(trace.conversation_id || "")}">${escapeHtml(shortId(trace.conversation_id || "—", 24))}</code>`,
     `上下文 <strong>${trace.request?.context_compacted ? `${trace.request?.context_compaction_source === "client" ? "客户端" : "Router"}压缩` : trace.request?.conversation_mode === "stateful" ? "显式 ID" : "推断 ID"}</strong>`,
     `画像 <strong>${escapeHtml(trace.task || "—")}</strong>`,
@@ -1811,14 +1840,19 @@ function renderTraceRoutingState(trace) {
     : (client?.models || []);
   const accessDenied = trace.error?.code === "invalid_api_key";
   target.className = "trace-routing-state warning";
-  target.innerHTML = accessDenied
-    ? `<strong>未进入智能路由</strong><span>客户端 ${escapeHtml(trace.client_id)} 未授权 ${escapeHtml(trace.requested_model)}；当前允许：${escapeHtml(allowedModels.join(", ") || "未配置")}</span>`
-    : `<strong>未进入智能路由</strong><span>${escapeHtml(trace.error?.message || "请求在选模前被拒绝")}</span>`;
+  target.innerHTML = trace.identity_intercepted
+    ? `<strong>身份直答</strong><span>公共身份请求已由 Router 直接完成，未调用 evaluator 或底层模型。</span>`
+    : accessDenied
+      ? `<strong>未进入智能路由</strong><span>客户端 ${escapeHtml(trace.client_id)} 未授权 ${escapeHtml(trace.requested_model)}；当前允许：${escapeHtml(allowedModels.join(", ") || "未配置")}</span>`
+      : `<strong>未进入智能路由</strong><span>${escapeHtml(trace.error?.message || "请求在选模前被拒绝")}</span>`;
   target.hidden = false;
 }
 
 function traceEnteredRouting(trace) {
-  return Boolean(trace?.task || trace?.selected_model);
+  return Boolean(
+    !trace?.identity_intercepted
+    && (trace?.task || trace?.selected_model),
+  );
 }
 
 function renderTraceAttempts() {
@@ -2950,6 +2984,14 @@ byId("trace-fullscreen").addEventListener("click", async () => {
 byId("client-status-filter").addEventListener("change", renderClients);
 byId("create-client").addEventListener("click", () => openClientDialog());
 byId("client-form").addEventListener("submit", saveClient);
+byId("client-disclosure-mode").addEventListener("change", (event) => {
+  renderClientModels(
+    event.target.value === "public"
+      ? [publicIdentityModelId()]
+      : ["auto"],
+    event.target.value,
+  );
+});
 byId("key-form").addEventListener("submit", createKey);
 byId("endpoint-form").addEventListener("submit", saveEndpointDraft);
 byId("endpoint-validate").addEventListener("click", () => {

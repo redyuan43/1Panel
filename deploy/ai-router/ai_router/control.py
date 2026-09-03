@@ -317,10 +317,12 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         account = await current.clients.create_account(
             value,
             allowed_models=_allowed_client_models(current),
+            public_model_id=_public_model_id(current),
         )
         current.audit.write(
             "client_created",
             client_id=account["id"],
+            disclosure_mode=account["disclosure_mode"],
             source=request.client.host if request.client else "unknown",
         )
         return JSONResponse(
@@ -339,6 +341,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             client_id,
             value,
             allowed_models=_allowed_client_models(current),
+            public_model_id=_public_model_id(current),
         )
         current.audit.write(
             "client_updated",
@@ -348,6 +351,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             rpm_limit=account["rpm_limit"],
             tpm_limit=account["tpm_limit"],
             max_parallel_requests=account["max_parallel_requests"],
+            disclosure_mode=account["disclosure_mode"],
             source=request.client.host if request.client else "unknown",
         )
         if not account["enabled"]:
@@ -652,6 +656,15 @@ def _allowed_client_models(current: RouterRuntime) -> set[str]:
     if identity.public_model_id:
         values.add(identity.public_model_id)
     return values
+
+
+def _public_model_id(current: RouterRuntime) -> str:
+    return str(
+        current.settings.section("identity").get(
+            "public_model_id",
+            "siyuan/auto",
+        )
+    ).strip()
 
 
 def _query_text(value: str | None) -> str | None:

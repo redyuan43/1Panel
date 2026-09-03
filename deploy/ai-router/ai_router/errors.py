@@ -23,6 +23,15 @@ class AuthenticationError(RouterError):
         super().__init__(message, status_code=401, code="invalid_api_key")
 
 
+class PublicIdentityUnavailableError(RouterError):
+    def __init__(self) -> None:
+        super().__init__(
+            "public model identity is unavailable",
+            status_code=503,
+            code="public_identity_unavailable",
+        )
+
+
 class ConversationBusyError(RouterError):
     def __init__(self) -> None:
         super().__init__(

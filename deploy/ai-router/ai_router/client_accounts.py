@@ -21,6 +21,7 @@ from .types import ClientPolicy
 CLIENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 KEY_PREFIX = "sk-1panel"
 USAGE_RETENTION_SECONDS = 31 * 24 * 60 * 60
+DISCLOSURE_MODES = {"public", "internal"}
 
 
 class ClientAccountManager:
@@ -74,6 +75,7 @@ class ClientAccountManager:
                             policy.max_parallel_requests
                         ),
                         "allow_compaction": policy.allow_compaction,
+                        "disclosure_mode": policy.disclosure_mode,
                         "source": "legacy_env",
                         "created_at": now,
                         "updated_at": now,
@@ -170,10 +172,12 @@ class ClientAccountManager:
         value: dict[str, Any],
         *,
         allowed_models: set[str],
+        public_model_id: str = "siyuan/auto",
     ) -> dict[str, Any]:
         account = _validated_account(
             value,
             allowed_models=allowed_models,
+            public_model_id=public_model_id,
             existing=None,
         )
         token = uuid4().hex
@@ -211,11 +215,13 @@ class ClientAccountManager:
         value: dict[str, Any],
         *,
         allowed_models: set[str],
+        public_model_id: str = "siyuan/auto",
     ) -> dict[str, Any]:
         current = await self._required_account(client_id)
         account = _validated_account(
             value,
             allowed_models=allowed_models,
+            public_model_id=public_model_id,
             existing=current,
         )
         await self.store.set_json(_account_key(client_id), account)
@@ -402,6 +408,7 @@ def _validated_account(
     value: dict[str, Any],
     *,
     allowed_models: set[str],
+    public_model_id: str,
     existing: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -460,6 +467,28 @@ def _validated_account(
         )
     if "*" in models:
         models = ("*",)
+    disclosure_mode = str(
+        value.get(
+            "disclosure_mode",
+            (
+                existing.get("disclosure_mode", "internal")
+                if existing
+                else "public"
+            ),
+        )
+    ).strip().lower()
+    if disclosure_mode not in DISCLOSURE_MODES:
+        raise RouterError(
+            "client disclosure_mode must be public or internal",
+            status_code=400,
+            code="invalid_disclosure_mode",
+        )
+    if disclosure_mode == "public" and models != (public_model_id,):
+        raise RouterError(
+            "public clients must only use the public model",
+            status_code=400,
+            code="invalid_client_models",
+        )
     try:
         rpm_limit = int(
             value.get(
@@ -517,6 +546,7 @@ def _validated_account(
                 else False,
             )
         ),
+        "disclosure_mode": disclosure_mode,
         "source": (
             str(existing.get("source", "managed"))
             if existing
@@ -542,6 +572,9 @@ def _policy_from_account(value: dict[str, Any]) -> ClientPolicy:
         allow_compaction=bool(
             value.get("allow_compaction", False)
         ),
+        disclosure_mode=str(
+            value.get("disclosure_mode", "internal")
+        ),
     )
 
 
@@ -562,6 +595,9 @@ def _public_account(
         ),
         "allow_compaction": bool(
             account.get("allow_compaction", False)
+        ),
+        "disclosure_mode": str(
+            account.get("disclosure_mode", "internal")
         ),
         "source": str(account.get("source", "managed")),
         "created_at": float(account.get("created_at", 0)),

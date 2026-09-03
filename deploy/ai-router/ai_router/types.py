@@ -252,6 +252,7 @@ class ConversationState:
     complexity: str = "standard"
     provider_family: str = ""
     history_mode: str = "native"
+    identity_only: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -262,6 +263,7 @@ class ConversationState:
         fields.setdefault("branch_id", None)
         fields.setdefault("parent_branch_id", None)
         fields.setdefault("lineage_relation", "legacy")
+        fields.setdefault("identity_only", False)
         return cls(**fields)
 
 
@@ -384,6 +386,7 @@ class ClientPolicy:
     tpm_limit: int
     max_parallel_requests: int
     allow_compaction: bool = False
+    disclosure_mode: str = "internal"
 
 
 @dataclass
