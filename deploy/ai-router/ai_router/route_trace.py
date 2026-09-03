@@ -309,16 +309,31 @@ def request_excerpt(
     messages = body.get("messages") if api_kind == "chat" else body.get("input")
     values = messages if isinstance(messages, list) else [messages]
     latest_user = ""
+    context_wrapper_seen = False
     for item in reversed(values):
         if not isinstance(item, dict):
             continue
         if str(item.get("role", "")).lower() not in {"user", "developer"}:
             continue
-        latest_user = _content_text(item.get("content"))
+        candidate = _content_text(item.get("content"))
+        if not candidate:
+            continue
+        is_wrapper, wrapped_user_text = _system_reminder_excerpt(
+            candidate
+        )
+        if is_wrapper:
+            context_wrapper_seen = True
+            if wrapped_user_text:
+                latest_user = wrapped_user_text
+                break
+            continue
+        latest_user = candidate
         if latest_user:
             break
     if not latest_user and isinstance(messages, str):
         latest_user = messages
+    if not latest_user and context_wrapper_seen:
+        latest_user = "客户端上下文信息"
     latest_user = _redact_text(latest_user)
     if len(latest_user) > max_chars:
         latest_user = latest_user[: max_chars - 1] + "…"
@@ -371,6 +386,40 @@ def _redact_text(value: str) -> str:
     for pattern in _SECRET_PATTERNS:
         result = pattern.sub("[REDACTED]", result)
     return result
+
+
+def _system_reminder_excerpt(value: str) -> tuple[bool, str]:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text.lower().startswith("<system-reminder"):
+        return False, ""
+    user_query = re.search(
+        r"<user_query>(.*?)</user_query>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if user_query:
+        return True, user_query.group(1).strip()
+    return True, ""
+
+
+def _public_excerpt(value: str) -> str:
+    is_wrapper, wrapped_user_text = _system_reminder_excerpt(value)
+    if is_wrapper and wrapped_user_text:
+        return wrapped_user_text
+    if is_wrapper:
+        return "客户端上下文信息（历史记录未保留任务正文）"
+    return value
+
+
+def _latest_evidence_value(
+    steps: list[dict[str, Any]],
+    key: str,
+) -> Any:
+    for step in reversed(steps):
+        evidence = step.get("evidence") or {}
+        if evidence.get(key) is not None:
+            return evidence[key]
+    return None
 
 
 class DecisionTrace:
@@ -895,6 +944,7 @@ class RouteTraceStore:
         status: str | None = None,
         review_status: str | None = None,
         search: str | None = None,
+        endpoint_ids: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._list,
@@ -909,6 +959,7 @@ class RouteTraceStore:
             status,
             review_status,
             search,
+            endpoint_ids,
         )
 
     async def add_review(
@@ -1124,41 +1175,52 @@ class RouteTraceStore:
         status: str | None,
         review_status: str | None,
         search: str | None,
+        endpoint_ids: tuple[str, ...] | None,
     ) -> dict[str, Any]:
         limit = max(1, min(100, int(limit)))
-        where: list[str] = []
-        values: list[Any] = []
+        base_where: list[str] = []
+        base_values: list[Any] = []
         if request_mode == "auto":
-            where.append("t.requested_model = 'auto'")
+            base_where.append("t.requested_model = 'auto'")
         elif request_mode == "explicit":
-            where.append("t.requested_model <> 'auto'")
+            base_where.append("t.requested_model <> 'auto'")
         if client_id:
-            where.append("t.client_id = ?")
-            values.append(client_id)
+            base_where.append("t.client_id = ?")
+            base_values.append(client_id)
         if conversation_id:
-            where.append("t.conversation_id = ?")
-            values.append(conversation_id)
+            base_where.append("t.conversation_id = ?")
+            base_values.append(conversation_id)
         if task:
-            where.append("t.task = ?")
-            values.append(task)
+            base_where.append("t.task = ?")
+            base_values.append(task)
         if route_profile:
-            where.append("t.route_profile = ?")
-            values.append(route_profile)
+            base_where.append("t.route_profile = ?")
+            base_values.append(route_profile)
         if selected_model:
-            where.append("t.selected_model = ?")
-            values.append(selected_model)
+            base_where.append("t.selected_model = ?")
+            base_values.append(selected_model)
         if status:
-            where.append("t.status = ?")
-            values.append(status)
+            base_where.append("t.status = ?")
+            base_values.append(status)
         if review_status:
-            where.append("t.review_status = ?")
-            values.append(review_status)
+            base_where.append("t.review_status = ?")
+            base_values.append(review_status)
         if search:
-            where.append(
+            base_where.append(
                 "(t.request_id LIKE ? OR t.conversation_id LIKE ?)"
             )
             term = f"%{search[:256]}%"
-            values.extend((term, term))
+            base_values.extend((term, term))
+        if endpoint_ids is not None:
+            if endpoint_ids:
+                placeholders = ", ".join("?" for _ in endpoint_ids)
+                base_where.append(f"t.endpoint_id IN ({placeholders})")
+                base_values.extend(endpoint_ids)
+            else:
+                base_where.append("1 = 0")
+
+        where = list(base_where)
+        values = list(base_values)
         decoded_cursor = _decode_cursor(cursor)
         if decoded_cursor:
             where.append(
@@ -1172,6 +1234,11 @@ class RouteTraceStore:
                     decoded_cursor["request_id"],
                 )
             )
+        base_clause = (
+            f"WHERE {' AND '.join(base_where)}"
+            if base_where
+            else ""
+        )
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         query = f"""
             SELECT t.*,
@@ -1192,7 +1259,28 @@ class RouteTraceStore:
         """
         values.append(limit + 1)
         with self._connect() as connection:
+            total_count = int(
+                connection.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM route_traces t
+                    {base_clause}
+                    """,
+                    base_values,
+                ).fetchone()[0]
+            )
             rows = connection.execute(query, values).fetchall()
+            conversation_ids = tuple(
+                dict.fromkeys(
+                    str(row["conversation_id"])
+                    for row in rows[:limit]
+                    if row["conversation_id"]
+                )
+            )
+            conversation_summaries = self._conversation_summaries(
+                connection,
+                conversation_ids,
+            )
         has_more = len(rows) > limit
         rows = rows[:limit]
         items = [self._summary(row) for row in rows]
@@ -1202,11 +1290,83 @@ class RouteTraceStore:
                 float(rows[-1]["started_at"]),
                 str(rows[-1]["request_id"]),
             )
-        return {"items": items, "next_cursor": next_cursor}
+        return {
+            "items": items,
+            "next_cursor": next_cursor,
+            "total_count": total_count,
+            "conversation_summaries": conversation_summaries,
+        }
 
     @staticmethod
     def _summary(row: sqlite3.Row) -> dict[str, Any]:
         payload = json.loads(row["payload_json"])
+        excerpt = json.loads(row["excerpt_json"])
+        excerpt["text"] = _public_excerpt(
+            str(excerpt.get("text") or "")
+        )
+        request = payload.get("request") or {}
+        attempts = payload.get("attempts") or []
+        steps = [
+            step
+            for attempt in attempts
+            if isinstance(attempt, dict)
+            for step in (attempt.get("steps") or [])
+            if isinstance(step, dict)
+        ]
+        selection = next(
+            (
+                attempt.get("selection")
+                for attempt in reversed(attempts)
+                if isinstance(attempt, dict)
+                and isinstance(attempt.get("selection"), dict)
+            ),
+            {},
+        )
+        upstream_evidence = next(
+            (
+                step.get("evidence") or {}
+                for step in reversed(steps)
+                if step.get("node_id") == "upstream_request"
+                and step.get("reason") == "upstream_response"
+            ),
+            {},
+        )
+        queue_wait_ms = max(
+            (
+                float((step.get("evidence") or {}).get("queue_wait_ms"))
+                for step in steps
+                if (step.get("evidence") or {}).get("queue_wait_ms")
+                is not None
+            ),
+            default=None,
+        )
+        capacity_attempts = sum(
+            1
+            for step in steps
+            if step.get("node_id") == "capacity_check"
+            and step.get("reason") in {
+                "capacity_acquired",
+                "capacity_busy",
+            }
+        )
+        deployment_profile_id = _latest_evidence_value(
+            steps,
+            "deployment_profile_id",
+        )
+        image_resizes = _latest_evidence_value(
+            steps,
+            "image_resizes",
+        )
+        latency_ms = None
+        if row["completed_at"] is not None:
+            latency_ms = max(
+                0.0,
+                (
+                    float(row["completed_at"])
+                    - float(row["started_at"])
+                )
+                * 1000,
+            )
         review = None
         if row["review_verdict"]:
             review = {
@@ -1230,6 +1390,10 @@ class RouteTraceStore:
             "requested_model": row["requested_model"],
             "selected_model": row["selected_model"],
             "endpoint_id": row["endpoint_id"],
+            "node": payload.get("node"),
+            "deployment_id": payload.get("deployment_id"),
+            "deployment_profile_id": deployment_profile_id,
+            "image_resizes": image_resizes,
             "task": row["task"],
             "route_profile": (
                 row["route_profile"]
@@ -1250,11 +1414,99 @@ class RouteTraceStore:
             "status_code": row["status_code"],
             "graph_version": row["graph_version"],
             "review_status": row["review_status"],
-            "excerpt": json.loads(row["excerpt_json"]),
+            "excerpt": excerpt,
             "error": payload.get("error"),
             "route_selected": bool(payload.get("route_selected")),
             "current_review": review,
+            "reason": selection.get("reason"),
+            "affinity": selection.get("affinity"),
+            "attempts": len(attempts),
+            "capacity_attempts": capacity_attempts,
+            "queue_wait_ms": queue_wait_ms,
+            "prompt_tokens": int(request.get("prompt_tokens") or 0),
+            "input_tokens": int(
+                upstream_evidence.get("input_tokens") or 0
+            ),
+            "output_tokens": int(
+                upstream_evidence.get("output_tokens") or 0
+            ),
+            "cached_prompt_tokens": (
+                int(upstream_evidence["cached_prompt_tokens"])
+                if upstream_evidence.get("cached_prompt_tokens")
+                is not None
+                else None
+            ),
+            "cache_hit_ratio": upstream_evidence.get("cache_hit_ratio"),
+            "latency_ms": latency_ms,
+            "conversation_mode": request.get("conversation_mode"),
+            "context_compacted": bool(
+                request.get("context_compacted")
+            ),
+            "context_compaction_source": request.get(
+                "context_compaction_source"
+            ),
+            "required_context_tokens": int(
+                request.get("required_context_tokens") or 0
+            ),
         }
+
+    @staticmethod
+    def _conversation_summaries(
+        connection: sqlite3.Connection,
+        conversation_ids: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        if not conversation_ids:
+            return []
+        placeholders = ", ".join("?" for _ in conversation_ids)
+        rows = connection.execute(
+            f"""
+            WITH ranked AS (
+                SELECT
+                    t.*,
+                    COUNT(*) OVER (
+                        PARTITION BY t.conversation_id
+                    ) AS request_count,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY t.conversation_id
+                        ORDER BY t.started_at DESC, t.request_id DESC
+                    ) AS row_number
+                FROM route_traces t
+                WHERE t.conversation_id IN ({placeholders})
+            )
+            SELECT *
+            FROM ranked
+            WHERE row_number = 1
+            """,
+            conversation_ids,
+        ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            excerpt = json.loads(row["excerpt_json"])
+            excerpt["text"] = _public_excerpt(
+                str(excerpt.get("text") or "")
+            )
+            result.append(
+                {
+                    "conversation_id": row["conversation_id"],
+                    "request_count": int(row["request_count"]),
+                    "latest_request_id": row["request_id"],
+                    "latest_status": row["status"],
+                    "latest_status_code": row["status_code"],
+                    "latest_started_at": row["started_at"],
+                    "latest_updated_at": row["updated_at"],
+                    "latest_client_id": row["client_id"],
+                    "latest_requested_model": row["requested_model"],
+                    "latest_selected_model": row["selected_model"],
+                    "latest_endpoint_id": row["endpoint_id"],
+                    "latest_node": payload.get("node"),
+                    "latest_deployment_id": payload.get(
+                        "deployment_id"
+                    ),
+                    "latest_excerpt": excerpt,
+                }
+            )
+        return result
 
     def _add_review(
         self,

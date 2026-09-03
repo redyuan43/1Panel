@@ -631,7 +631,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         if (
             not client_compacted
             and api_kind == "responses"
-            and bool(str(body.get("previous_response_id", "")).strip())
+            and stored_conversation is not None
         ):
             effective_body = await apply_stored_history(
                 current.compactor,
@@ -1529,6 +1529,17 @@ async def _acquire_route_capacity(
                     )
                 except QueueTimeoutError as exc:
                     raise CapacityBusyError() from exc
+            backend_wait_seconds = max(
+                0.0,
+                wait_seconds - (time.monotonic() - wait_started),
+            )
+            if not await _wait_for_selected_deployment(
+                current,
+                decision,
+                selected_deployment,
+                timeout_seconds=backend_wait_seconds,
+            ):
+                raise CapacityBusyError()
         except CapacityBusyError:
             queue_wait_ms += (time.monotonic() - wait_started) * 1000
             capacity_busy_seen = True
@@ -1824,6 +1835,37 @@ def _capacity_wait_seconds(
         0.0,
         float(routing.get("new_request_capacity_wait_seconds", 0)),
     )
+
+
+async def _wait_for_selected_deployment(
+    current: RouterRuntime,
+    decision: RouteDecision,
+    deployment_id: str,
+    *,
+    timeout_seconds: float,
+) -> bool:
+    if decision.endpoint.backend_type != "ai_pool":
+        return True
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        status = await current.health.status(
+            decision.endpoint,
+            force_refresh=True,
+        )
+        worker = next(
+            (
+                item
+                for item in status.detail.get("workers", [])
+                if item.get("worker_id") == deployment_id
+            ),
+            None,
+        )
+        if worker and worker.get("state") == "available":
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(1.0, remaining))
 
 
 def _exclude_busy_decision(

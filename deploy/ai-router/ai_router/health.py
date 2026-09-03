@@ -166,14 +166,36 @@ class HealthMonitor:
         response.raise_for_status()
         payload = response.json()
         pool_fingerprint = str(payload.get("runtime_fingerprint", ""))
+        worker_values = [
+            worker
+            for worker in payload.get("workers", [])
+            if isinstance(worker, dict)
+        ]
+        processing = await asyncio.gather(
+            *(
+                self._ai_worker_is_processing(worker)
+                for worker in worker_values
+            )
+        )
+        worker_values = [
+            (
+                {**worker, "state": "busy"}
+                if is_processing and worker.get("state") == "available"
+                else worker
+            )
+            for worker, is_processing in zip(
+                worker_values,
+                processing,
+                strict=True,
+            )
+        ]
         workers = [
             _physical_deployment(
                 endpoint,
                 worker,
                 pool_fingerprint=pool_fingerprint,
             )
-            for worker in payload.get("workers", [])
-            if isinstance(worker, dict)
+            for worker in worker_values
         ]
         available = [
             worker
@@ -224,6 +246,34 @@ class HealthMonitor:
                 "effective_modalities": effective_modalities,
                 "workers": [item.to_dict() for item in workers],
             },
+        )
+
+    async def _ai_worker_is_processing(
+        self,
+        worker: dict[str, Any],
+    ) -> bool:
+        api_base = str(worker.get("api_base") or "").rstrip("/")
+        if api_base.endswith("/v1"):
+            root = api_base[:-3].rstrip("/")
+        else:
+            root = str(worker.get("url") or "").rstrip("/")
+        if not root and worker.get("port") is not None:
+            root = f"http://127.0.0.1:{int(worker['port'])}"
+        if not root:
+            return False
+        try:
+            response = await self.client.get(f"{root}/slots")
+            response.raise_for_status()
+            slots = response.json()
+        except (httpx.HTTPError, ValueError, TypeError):
+            return False
+        return bool(
+            isinstance(slots, list)
+            and any(
+                isinstance(slot, dict)
+                and bool(slot.get("is_processing"))
+                for slot in slots
+            )
         )
 
     async def _probe_codex_pool(

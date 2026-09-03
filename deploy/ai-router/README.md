@@ -83,6 +83,11 @@ GET  /api/route-traces/{request_id}
 POST /api/route-traces/{request_id}/reviews
 ```
 
+`GET /api/route-traces` 使用游标分页，支持 `node`、`status`、客户端、会话、
+画像、模型和 ID 搜索等服务端过滤，并返回过滤结果的 `total_count`。控制台
+“请求记录”页每页显示 30 个请求；同一 `conversation_id` 合并为会话主项，
+展开后可继续按 100 轮一批加载该会话的全部留存记录。
+
 审核记录只追加，不自动修改生产策略。`incorrect` 审核至少需要
 `expected_task`、`expected_model` 或 `note` 中的一项。
 

@@ -79,6 +79,34 @@ class ConversationRepository:
             ttl_seconds=ttl,
         )
 
+    async def map_lineage(
+        self,
+        client_id: str,
+        lineage_id: str,
+        branch_id: str,
+    ) -> None:
+        ttl = int(self.settings.section("affinity").get("ttl_seconds", 86400))
+        await self.store.set_json(
+            f"router:lineage-conversation:{client_id}:{lineage_id}",
+            {"branch_id": branch_id},
+            ttl_seconds=ttl,
+        )
+
+    async def branch_for_lineage(
+        self,
+        client_id: str,
+        lineage_id: str | None,
+    ) -> str | None:
+        if not lineage_id:
+            return None
+        value = await self.store.get_json(
+            f"router:lineage-conversation:{client_id}:{lineage_id}"
+        )
+        if not value:
+            return None
+        branch_id = value.get("branch_id") or value.get("conversation_id")
+        return str(branch_id) if branch_id else None
+
     async def map_history(
         self,
         client_id: str,
@@ -147,6 +175,11 @@ class ConversationRepository:
                 relation="compaction_reset",
             )
         parent_id = await self.branch_for_response(previous_response_id)
+        if not parent_id:
+            parent_id = await self.branch_for_lineage(
+                client_id,
+                explicit_lineage_id,
+            )
         if not parent_id:
             parent_id = await self.branch_for_history(client_id, identities)
         parent = await self.get(parent_id)
@@ -300,15 +333,21 @@ class RoutingPolicy:
                 ),
             )
         if requested_model == "auto" and conversation:
+            previous_endpoint = self.registry.by_id(
+                conversation.endpoint_id
+            )
             bound_rejection = rejection_by_endpoint.get(
                 conversation.endpoint_id
             )
             if (
-                bound_rejection
+                previous_endpoint
+                and previous_endpoint.cloud
+                and bound_rejection
                 and bound_rejection not in INCOMPATIBLE_REJECTION_REASONS
             ):
                 raise NoEligibleModelError(
-                    "the bound conversation model is temporarily unavailable: "
+                    "the bound cloud conversation model is temporarily "
+                    "unavailable: "
                     f"{conversation.endpoint_id}:{bound_rejection}"
                 )
         if not candidates:
@@ -1368,14 +1407,10 @@ class RoutingPolicy:
         recent = await self._recent_deployment_uses(
             tuple(item.worker_id for item in deployments)
         )
-        unprotected = [
-            item for item in deployments if item.worker_id not in recent
-        ]
-        if unprotected:
-            return sorted(unprotected, key=base_key)
         return sorted(
             deployments,
             key=lambda item: (
+                item.worker_id in recent,
                 recent.get(item.worker_id, 0.0),
                 *base_key(item),
             ),

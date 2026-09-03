@@ -6,6 +6,15 @@ const state = {
   routeGraph: null,
   routeTraces: [],
   routeTraceCursor: null,
+  requestTraces: [],
+  requestTraceTotal: 0,
+  requestTracePage: 1,
+  requestTraceCursors: [null],
+  requestTraceNextCursor: null,
+  requestConversationSummaries: new Map(),
+  requestExpandedConversations: new Set(),
+  requestExpandedRequests: new Set(),
+  requestConversationPages: new Map(),
   selectedTraceId: null,
   selectedTrace: null,
   selectedTraceAttempt: 1,
@@ -93,6 +102,9 @@ let traceGraphRenderSequence = 0;
 let traceGraphScale = 1;
 let traceGraphNeedsInitialFocus = false;
 let traceSearchTimer = null;
+let requestSearchTimer = null;
+let requestTraceLoadSequence = 0;
+const REQUEST_PAGE_SIZE = 30;
 
 const byId = (id) => document.getElementById(id);
 
@@ -177,7 +189,7 @@ function renderDashboard() {
   renderRecentRequests(data.requests.slice(0, 8));
   renderEndpointTable(data.endpoints);
   renderWorkerTable(data.workers);
-  renderRequestTable();
+  syncRequestNodeOptions();
 }
 
 async function loadClients(silent = false) {
@@ -1039,67 +1051,486 @@ function renderWorkerTable(workers) {
     : emptyRow(9, "当前端点没有公开物理 Worker");
 }
 
-function renderRequestTable() {
-  const requests = state.dashboard?.requests || [];
-  const node = byId("node-filter").value;
-  const status = byId("status-filter").value;
-  const nodes = [...new Set(requests.map((item) => item.node).filter(Boolean))].sort();
-  const currentNode = node;
-  byId("node-filter").innerHTML =
+function syncRequestNodeOptions() {
+  const select = byId("node-filter");
+  if (!select) return;
+  const current = select.value;
+  const nodes = [...new Set(
+    (state.dashboard?.endpoints || [])
+      .map((item) => item.node)
+      .filter(Boolean),
+  )].sort();
+  select.innerHTML =
     '<option value="">全部节点</option>' +
-    nodes.map((item) => `<option value="${escapeHtml(item)}">${escapeHtml(item.toUpperCase())}</option>`).join("");
-  byId("node-filter").value = currentNode;
-  const filtered = requests.filter((item) =>
-    (!node || item.node === node) && (!status || item.status === status)
+    nodes.map((item) => (
+      `<option value="${escapeHtml(item)}">${escapeHtml(item.toUpperCase())}</option>`
+    )).join("");
+  select.value = current;
+}
+
+function requestFilterQuery({
+  cursor = null,
+  conversationId = null,
+  limit = REQUEST_PAGE_SIZE,
+} = {}) {
+  const query = new URLSearchParams({
+    limit: String(limit),
+    request_mode: "all",
+  });
+  if (conversationId) {
+    query.set("conversation_id", conversationId);
+  } else {
+    const values = {
+      node: byId("node-filter").value,
+      status: byId("status-filter").value,
+      search: byId("request-search").value.trim(),
+    };
+    Object.entries(values).forEach(([key, value]) => {
+      if (value) query.set(key, value);
+    });
+  }
+  if (cursor) query.set("cursor", cursor);
+  return query.toString();
+}
+
+async function loadRequestTraces(silent = false) {
+  if (!state.key) return;
+  const sequence = ++requestTraceLoadSequence;
+  const listState = byId("request-list-state");
+  if (!silent) {
+    listState.textContent = "正在加载";
+    byId("refresh").disabled = true;
+  }
+  const cursor = state.requestTraceCursors[
+    state.requestTracePage - 1
+  ] || null;
+  try {
+    const payload = await api(
+      `/api/route-traces?${requestFilterQuery({cursor})}`,
+    );
+    if (sequence !== requestTraceLoadSequence) return;
+    state.requestTraces = payload.items || [];
+    state.requestTraceTotal = Number(payload.total_count || 0);
+    state.requestTraceNextCursor = payload.next_cursor || null;
+    state.requestConversationSummaries = new Map(
+      (payload.conversation_summaries || []).map((item) => [
+        item.conversation_id,
+        item,
+      ]),
+    );
+    renderRequestTable();
+    listState.textContent = "";
+    byId("last-updated").textContent =
+      `更新于 ${formatTime(Date.now() / 1000)}`;
+    setConnected(true);
+    if (!silent) notice("");
+  } catch (error) {
+    if (sequence !== requestTraceLoadSequence) return;
+    listState.textContent = "加载失败";
+    if (!silent) notice(error.message, true);
+  } finally {
+    if (!silent) byId("refresh").disabled = false;
+  }
+}
+
+function resetRequestPagination() {
+  state.requestTracePage = 1;
+  state.requestTraceCursors = [null];
+  state.requestTraceNextCursor = null;
+  state.requestExpandedConversations.clear();
+  state.requestExpandedRequests.clear();
+  state.requestConversationPages.clear();
+}
+
+function requestGroups() {
+  const groups = [];
+  const conversations = new Map();
+  state.requestTraces.forEach((item) => {
+    if (!item.conversation_id) {
+      groups.push({
+        key: `request:${item.request_id}`,
+        conversationId: null,
+        items: [item],
+      });
+      return;
+    }
+    let group = conversations.get(item.conversation_id);
+    if (!group) {
+      group = {
+        key: `conversation:${item.conversation_id}`,
+        conversationId: item.conversation_id,
+        items: [],
+      };
+      conversations.set(item.conversation_id, group);
+      groups.push(group);
+    }
+    group.items.push(item);
+  });
+  return groups;
+}
+
+function renderRequestTable() {
+  const groups = requestGroups();
+  const totalPages = Math.max(
+    1,
+    Math.ceil(state.requestTraceTotal / REQUEST_PAGE_SIZE),
   );
-  byId("request-count").textContent = `${filtered.length} 条`;
-  byId("request-table").innerHTML = filtered.length
-    ? filtered.map((item) => `
-      <tr>
-        <td>${statusBadge(
-          item.status,
-          item.status_code,
-          null,
-          Boolean(item.task || item.selected_model),
-        )}</td>
-        <td>${formatTime(item.timestamp)}</td>
-        <td>
-          <code class="request-id-full">${escapeHtml(item.conversation_id || "—")}</code>
-          <span class="table-secondary request-id-full">分支 ${escapeHtml(item.branch_id || "—")}</span>
-          <span class="table-secondary request-id-full">父分支 ${escapeHtml(item.parent_branch_id || "—")}</span>
-          <span class="table-secondary">${
-            item.context_compacted
-              ? `${item.context_compaction_source === "client" ? "客户端" : "Router"}压缩`
-              : lineageRelationLabels[item.lineage_relation]
-                || (item.conversation_mode === "stateful" ? "显式链路" : "推断链路")
-          }</span>
-        </td>
-        <td>
-          <strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong>
-          <span class="table-secondary request-id-full">${escapeHtml(item.request_id || "—")}</span>
-        </td>
-        <td>
-          <strong class="table-primary">${escapeHtml(shortModel(item.selected_model))}</strong>
-          <span class="table-secondary">${escapeHtml(reasonLabel(item.reason))}</span>
-        </td>
-        <td>
-          <code title="${escapeHtml(item.deployment_id || "")}">${escapeHtml(shortId(item.deployment_id || "—", 22))}</code>
-          <span class="table-secondary">${escapeHtml(item.deployment_profile_id || "—")}${item.image_resizes ? ` · 缩图 ${item.image_resizes}` : ""}</span>
-        </td>
-        <td>${escapeHtml(item.task || "—")}</td>
-        <td>
-          <strong class="table-primary">${escapeHtml(protocolLabel(item.protocol, item.native_or_adapter))}</strong>
-          <span class="table-secondary">${Number(item.tool_history_repairs || 0)} 次修复</span>
-        </td>
-        <td>${escapeHtml(affinityLabel(item.affinity))}</td>
-        <td>${item.attempts || 1} / ${item.capacity_attempts || 1}</td>
-        <td>${item.queue_wait_ms == null ? "—" : formatDuration(item.queue_wait_ms)}</td>
-        <td>${formatTokens(item.prompt_tokens || 0)}</td>
-        <td>${formatCacheHit(item.cached_prompt_tokens, item.cache_hit_ratio)}</td>
-        <td>${item.latency_ms == null ? formatRelative(item.timestamp) : formatDuration(item.latency_ms)}</td>
-      </tr>
-    `).join("")
-    : emptyRow(14, "没有符合筛选条件的请求");
+  byId("request-count").textContent =
+    `匹配 ${state.requestTraceTotal} 条`;
+  byId("request-page-label").textContent =
+    `第 ${state.requestTracePage} / ${totalPages} 页`;
+  byId("request-prev").disabled = state.requestTracePage <= 1;
+  byId("request-next").disabled = !state.requestTraceNextCursor;
+  byId("request-table").innerHTML = groups.length
+    ? groups.map(requestGroupRows).join("")
+    : emptyRow(8, "没有符合筛选条件的请求");
+  bindRequestTableActions();
+}
+
+function requestGroupRows(group) {
+  const latest = group.items[0];
+  if (!group.conversationId) {
+    return requestStandaloneRow(latest);
+  }
+  const summary = state.requestConversationSummaries.get(
+    group.conversationId,
+  ) || {};
+  const expanded = state.requestExpandedConversations.has(
+    group.conversationId,
+  );
+  const excerpt = summary.latest_excerpt?.text
+    || latest.excerpt?.text
+    || "无文本摘要";
+  const latestStatus = summary.latest_status || latest.status;
+  const latestStatusCode = summary.latest_status_code
+    ?? latest.status_code;
+  const selectedModel = summary.latest_selected_model
+    || latest.selected_model
+    || summary.latest_requested_model
+    || latest.requested_model;
+  const node = summary.latest_node || latest.node || "—";
+  const deployment = summary.latest_deployment_id
+    || latest.deployment_id
+    || "—";
+  const total = Number(summary.request_count || group.items.length);
+  return `
+    <tr class="request-conversation-row${expanded ? " expanded" : ""}">
+      <td>
+        <button class="request-expand-button" type="button"
+          data-request-conversation="${escapeHtml(group.conversationId)}"
+          aria-expanded="${expanded ? "true" : "false"}"
+          title="${expanded ? "折叠会话" : "展开会话"}">
+          ${expanded ? "⌄" : "›"}
+        </button>
+      </td>
+      <td>${statusBadge(
+        latestStatus,
+        latestStatusCode,
+        latest.error?.code,
+        Boolean(latest.task || selectedModel),
+      )}</td>
+      <td>
+        <code class="request-id-full">${escapeHtml(group.conversationId)}</code>
+        <span class="table-secondary">本页 ${group.items.length} 次请求</span>
+      </td>
+      <td>
+        <strong class="table-primary">${group.items.length} / ${total}</strong>
+        <span class="table-secondary">本页 / 留存</span>
+      </td>
+      <td>
+        <strong class="table-primary">${escapeHtml(shortModel(selectedModel))}</strong>
+        <span class="table-secondary">${escapeHtml(latest.client_id || "—")}</span>
+      </td>
+      <td>
+        <strong class="table-primary">${escapeHtml(String(node).toUpperCase())}</strong>
+        <span class="table-secondary" title="${escapeHtml(deployment)}">${escapeHtml(shortId(deployment, 28))}</span>
+      </td>
+      <td>
+        <span class="request-summary" title="${escapeHtml(excerpt)}">${escapeHtml(graphemeExcerpt(excerpt))}</span>
+      </td>
+      <td>${formatTime(summary.latest_started_at || latest.started_at)}</td>
+    </tr>
+    ${expanded ? requestConversationDetailRow(group.conversationId) : ""}
+  `;
+}
+
+function requestStandaloneRow(item) {
+  const excerpt = item.excerpt?.text || "无文本摘要";
+  const expanded = state.requestExpandedRequests.has(item.request_id);
+  return `
+    <tr class="request-standalone-row${expanded ? " expanded" : ""}">
+      <td>
+        <button class="request-expand-button" type="button"
+          data-request-standalone="${escapeHtml(item.request_id)}"
+          aria-expanded="${expanded ? "true" : "false"}"
+          title="${expanded ? "折叠请求" : "展开请求"}">
+          ${expanded ? "⌄" : "›"}
+        </button>
+      </td>
+      <td>${statusBadge(
+        item.status,
+        item.status_code,
+        item.error?.code,
+        Boolean(item.task || item.selected_model),
+      )}</td>
+      <td>
+        <code class="request-id-full">${escapeHtml(item.request_id)}</code>
+        <span class="table-secondary">无会话 ID</span>
+      </td>
+      <td><strong class="table-primary">1 / 1</strong></td>
+      <td>
+        <strong class="table-primary">${escapeHtml(shortModel(item.selected_model || item.requested_model))}</strong>
+        <span class="table-secondary">${escapeHtml(item.client_id || "—")}</span>
+      </td>
+      <td>
+        <strong class="table-primary">${escapeHtml(String(item.node || "—").toUpperCase())}</strong>
+        <span class="table-secondary">${escapeHtml(shortId(item.deployment_id || "—", 28))}</span>
+      </td>
+      <td><span class="request-summary" title="${escapeHtml(excerpt)}">${escapeHtml(graphemeExcerpt(excerpt))}</span></td>
+      <td>${formatTime(item.started_at)}</td>
+    </tr>
+    ${expanded ? requestStandaloneDetailRow(item) : ""}
+  `;
+}
+
+function requestRoundTable(items) {
+  return `
+    <div class="request-round-table-wrap">
+      <table class="request-round-table">
+        <thead>
+          <tr>
+            <th>状态</th>
+            <th>开始时间</th>
+            <th>请求 / 分支 ID</th>
+            <th>请求模型</th>
+            <th>实际路由</th>
+            <th>部署</th>
+            <th>任务</th>
+            <th>协议</th>
+            <th>亲和</th>
+            <th>网络/容量尝试</th>
+            <th>容量等待</th>
+            <th>Token</th>
+            <th>缓存命中</th>
+            <th>耗时</th>
+          </tr>
+        </thead>
+        <tbody>${items.map(requestRoundRow).join("")}</tbody>
+      </table>
+    </div>
+  `;
+}
+
+function requestConversationDetailRow(conversationId) {
+  const page = state.requestConversationPages.get(conversationId);
+  let content = '<div class="request-conversation-loading">正在加载会话轮次...</div>';
+  if (page?.error) {
+    content = `<div class="request-conversation-loading error">${escapeHtml(page.error)}</div>`;
+  } else if (page?.items) {
+    content = `
+      ${requestRoundTable(page.items)}
+      <div class="request-conversation-footer">
+        <span>已加载 ${page.items.length} / ${page.totalCount} 轮</span>
+        <button class="secondary compact" type="button"
+          data-request-earlier="${escapeHtml(conversationId)}"
+          ${page.nextCursor ? "" : "disabled"}>
+          ${page.nextCursor ? "加载更早记录" : "已显示全部记录"}
+        </button>
+      </div>
+    `;
+  }
+  return `
+    <tr class="request-conversation-detail-row">
+      <td colspan="8">
+        <div class="request-conversation-detail"
+          data-request-conversation-detail="${escapeHtml(conversationId)}">
+          ${content}
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function requestStandaloneDetailRow(item) {
+  return `
+    <tr class="request-conversation-detail-row">
+      <td colspan="8">
+        <div class="request-conversation-detail">
+          ${requestRoundTable([item])}
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function requestRoundRow(item) {
+  return `
+    <tr data-request-round-id="${escapeHtml(item.request_id)}">
+      <td>${statusBadge(
+        item.status,
+        item.status_code,
+        item.error?.code,
+        Boolean(item.task || item.selected_model),
+      )}</td>
+      <td>${formatTime(item.started_at)}</td>
+      <td>
+        <code class="request-id-full">${escapeHtml(item.request_id || "—")}</code>
+        <span class="table-secondary request-id-full">分支 ${escapeHtml(item.branch_id || "—")}</span>
+        <span class="table-secondary request-id-full">父分支 ${escapeHtml(item.parent_branch_id || "—")}</span>
+        <span class="table-secondary">${requestLineageLabel(item)}</span>
+      </td>
+      <td><strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong></td>
+      <td>
+        <strong class="table-primary">${escapeHtml(shortModel(item.selected_model))}</strong>
+        <span class="table-secondary">${escapeHtml(reasonLabel(item.reason))}</span>
+      </td>
+      <td>
+        <code title="${escapeHtml(item.deployment_id || "")}">${escapeHtml(shortId(item.deployment_id || "—", 28))}</code>
+        <span class="table-secondary">${escapeHtml(item.deployment_profile_id || "—")}${item.image_resizes ? ` · 缩图 ${item.image_resizes}` : ""}</span>
+      </td>
+      <td>${escapeHtml(item.task || "—")}</td>
+      <td>${escapeHtml(protocolLabel(item.protocol, item.native_or_adapter))}</td>
+      <td>${escapeHtml(affinityLabel(item.affinity))}</td>
+      <td>${item.attempts || 1} / ${item.capacity_attempts || 1}</td>
+      <td>${item.queue_wait_ms == null ? "—" : formatDuration(item.queue_wait_ms)}</td>
+      <td>
+        <strong class="table-primary">${formatTokens(item.prompt_tokens || 0)}</strong>
+        <span class="table-secondary">输入 ${formatTokens(item.input_tokens || 0)} · 输出 ${formatTokens(item.output_tokens || 0)}</span>
+      </td>
+      <td>${formatCacheHit(item.cached_prompt_tokens, item.cache_hit_ratio)}</td>
+      <td>${item.latency_ms == null ? formatRelative(item.started_at) : formatDuration(item.latency_ms)}</td>
+    </tr>
+  `;
+}
+
+function requestLineageLabel(item) {
+  if (item.context_compacted) {
+    return `${item.context_compaction_source === "client" ? "客户端" : "Router"}压缩`;
+  }
+  return lineageRelationLabels[item.lineage_relation]
+    || (item.conversation_mode === "stateful" ? "显式链路" : "推断链路");
+}
+
+function bindRequestTableActions() {
+  byId("request-table").querySelectorAll(
+    "[data-request-conversation]",
+  ).forEach((button) => {
+    button.addEventListener("click", () => {
+      void toggleRequestConversation(
+        button.dataset.requestConversation,
+      );
+    });
+  });
+  byId("request-table").querySelectorAll(
+    "[data-request-earlier]",
+  ).forEach((button) => {
+    button.addEventListener("click", () => {
+      void loadEarlierConversation(button.dataset.requestEarlier);
+    });
+  });
+  byId("request-table").querySelectorAll(
+    "[data-request-standalone]",
+  ).forEach((button) => {
+    button.addEventListener("click", () => {
+      const requestId = button.dataset.requestStandalone;
+      if (state.requestExpandedRequests.has(requestId)) {
+        state.requestExpandedRequests.delete(requestId);
+      } else {
+        state.requestExpandedRequests.add(requestId);
+      }
+      renderRequestTable();
+    });
+  });
+}
+
+async function toggleRequestConversation(conversationId) {
+  if (state.requestExpandedConversations.has(conversationId)) {
+    state.requestExpandedConversations.delete(conversationId);
+    renderRequestTable();
+    return;
+  }
+  state.requestExpandedConversations.add(conversationId);
+  renderRequestTable();
+  if (!state.requestConversationPages.has(conversationId)) {
+    await loadConversationPage(conversationId);
+  }
+}
+
+async function loadConversationPage(conversationId, cursor = null) {
+  const current = state.requestConversationPages.get(conversationId);
+  state.requestConversationPages.set(conversationId, {
+    ...(current || {}),
+    error: null,
+  });
+  try {
+    const payload = await api(
+      `/api/route-traces?${requestFilterQuery({
+        cursor,
+        conversationId,
+        limit: 100,
+      })}`,
+    );
+    const combined = cursor
+      ? [...(current?.items || []), ...(payload.items || [])]
+      : (payload.items || []);
+    const unique = new Map(
+      combined.map((item) => [item.request_id, item]),
+    );
+    const items = [...unique.values()].sort(
+      (left, right) => (
+        Number(left.started_at) - Number(right.started_at)
+        || String(left.request_id).localeCompare(String(right.request_id))
+      ),
+    );
+    state.requestConversationPages.set(conversationId, {
+      items,
+      nextCursor: payload.next_cursor || null,
+      totalCount: Number(payload.total_count || items.length),
+      error: null,
+    });
+  } catch (error) {
+    state.requestConversationPages.set(conversationId, {
+      ...(current || {}),
+      error: error.message,
+    });
+  }
+  renderRequestTable();
+}
+
+async function loadEarlierConversation(conversationId) {
+  const page = state.requestConversationPages.get(conversationId);
+  if (!page?.nextCursor) return;
+  const oldestRequestId = page.items?.[0]?.request_id;
+  const anchor = oldestRequestId
+    ? Array.from(document.querySelectorAll("[data-request-round-id]"))
+      .find((item) => item.dataset.requestRoundId === oldestRequestId)
+    : null;
+  const previousTop = anchor?.getBoundingClientRect().top;
+  await loadConversationPage(conversationId, page.nextCursor);
+  if (previousTop == null || !oldestRequestId) return;
+  requestAnimationFrame(() => {
+    const nextAnchor = Array.from(
+      document.querySelectorAll("[data-request-round-id]"),
+    ).find((item) => item.dataset.requestRoundId === oldestRequestId);
+    if (!nextAnchor) return;
+    window.scrollBy({
+      top: nextAnchor.getBoundingClientRect().top - previousTop,
+      behavior: "auto",
+    });
+  });
+}
+
+function graphemeExcerpt(value, limit = 80) {
+  const text = String(value || "").replace(/\s+/gu, " ").trim();
+  if (!text) return "无文本摘要";
+  const values = typeof Intl.Segmenter === "function"
+    ? [...new Intl.Segmenter("zh-CN", {
+      granularity: "grapheme",
+    }).segment(text)].map((item) => item.segment)
+    : Array.from(text);
+  return values.length > limit
+    ? `${values.slice(0, limit).join("")}…`
+    : text;
 }
 
 async function loadRouteAudit(silent = false) {
@@ -2169,10 +2600,6 @@ async function saveSettings(event) {
 
 function switchView(view) {
   state.view = view;
-  document.querySelector("main")?.classList.toggle(
-    "audit-main",
-    view === "audit",
-  );
   document.querySelectorAll(".tab").forEach((item) => {
     item.classList.toggle("active", item.dataset.view === view);
   });
@@ -2180,7 +2607,7 @@ function switchView(view) {
     item.classList.toggle("active", item.id === `${view}-view`);
   });
   byId("view-title").textContent = viewTitles[view];
-  if (view === "requests") renderRequestTable();
+  if (view === "requests") void loadRequestTraces();
   if (view === "audit") void loadRouteAudit();
   if (view === "clients") loadClients(true);
 }
@@ -2192,6 +2619,7 @@ function startPolling() {
     if (!document.hidden && state.key) {
       loadDashboard(true);
       if (state.view === "clients") loadClients(true);
+      if (state.view === "requests") loadRequestTraces(true);
       if (state.view === "audit") loadRouteTraces(true);
     }
   }, 5000);
@@ -2408,7 +2836,15 @@ document.querySelectorAll("[data-open-view]").forEach((button) => {
 
 byId("admin-key").value = state.key;
 byId("connect").addEventListener("click", connect);
-byId("refresh").addEventListener("click", () => loadDashboard());
+byId("refresh").addEventListener("click", () => {
+  if (state.view === "requests") {
+    void loadRequestTraces();
+  } else if (state.view === "audit") {
+    void loadRouteAudit();
+  } else {
+    void loadDashboard();
+  }
+});
 byId("reload").addEventListener("click", async () => {
   try {
     await loadSettings();
@@ -2419,8 +2855,31 @@ byId("reload").addEventListener("click", async () => {
 });
 byId("settings-form").addEventListener("submit", saveSettings);
 byId("auto-refresh").addEventListener("change", startPolling);
-byId("node-filter").addEventListener("change", renderRequestTable);
-byId("status-filter").addEventListener("change", renderRequestTable);
+["node-filter", "status-filter"].forEach((id) => {
+  byId(id).addEventListener("change", () => {
+    resetRequestPagination();
+    void loadRequestTraces();
+  });
+});
+byId("request-search").addEventListener("input", () => {
+  clearTimeout(requestSearchTimer);
+  requestSearchTimer = setTimeout(() => {
+    resetRequestPagination();
+    void loadRequestTraces();
+  }, 350);
+});
+byId("request-prev").addEventListener("click", () => {
+  if (state.requestTracePage <= 1) return;
+  state.requestTracePage -= 1;
+  void loadRequestTraces();
+});
+byId("request-next").addEventListener("click", () => {
+  if (!state.requestTraceNextCursor) return;
+  state.requestTraceCursors[state.requestTracePage] =
+    state.requestTraceNextCursor;
+  state.requestTracePage += 1;
+  void loadRequestTraces();
+});
 [
   "trace-mode-filter",
   "trace-review-filter",

@@ -27,6 +27,13 @@ class ConversationWriter(Protocol):
         conversation_id: str,
     ) -> None: ...
 
+    async def map_lineage(
+        self,
+        client_id: str,
+        lineage_id: str,
+        branch_id: str,
+    ) -> None: ...
+
 
 def provider_family(endpoint: Endpoint | None) -> str:
     if endpoint is None:
@@ -342,6 +349,11 @@ async def persist_history(
     await conversations.map_history(
         client_id,
         history_identities(messages),
+        state.branch_id or state.conversation_id,
+    )
+    await conversations.map_lineage(
+        client_id,
+        state.conversation_id,
         state.branch_id or state.conversation_id,
     )
 

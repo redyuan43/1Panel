@@ -423,6 +423,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         status: str | None = None,
         review_status: str | None = None,
         search: str | None = None,
+        node: str | None = None,
     ) -> dict[str, Any]:
         current = _authorized_runtime(request)
         if request_mode not in {"auto", "explicit", "all"}:
@@ -431,7 +432,21 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 status_code=400,
                 code="invalid_trace_filter",
             )
-        return await current.route_traces.list(
+        node_value = _query_text(node)
+        endpoint_nodes = {
+            item.id: item.node
+            for item in current.registry.endpoints
+        }
+        endpoint_ids = (
+            tuple(
+                item.id
+                for item in current.registry.endpoints
+                if item.node == node_value
+            )
+            if node_value
+            else None
+        )
+        payload = await current.route_traces.list(
             limit=limit,
             cursor=cursor,
             request_mode=request_mode,
@@ -443,7 +458,19 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             status=_query_text(status),
             review_status=_query_text(review_status),
             search=_query_text(search),
+            endpoint_ids=endpoint_ids,
         )
+        for item in payload["items"]:
+            item["node"] = (
+                item.get("node")
+                or endpoint_nodes.get(item.get("endpoint_id"))
+            )
+        for summary in payload["conversation_summaries"]:
+            summary["latest_node"] = (
+                summary.get("latest_node")
+                or endpoint_nodes.get(summary.get("latest_endpoint_id"))
+            )
+        return payload
 
     @app.get("/api/route-traces/{request_id}")
     async def route_trace(

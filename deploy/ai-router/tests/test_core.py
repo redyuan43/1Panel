@@ -27,6 +27,7 @@ from ai_router.api import (
     _prefix_cache_delta,
     _prepare_routed_body,
     _usage_totals,
+    _wait_for_selected_deployment,
     create_app,
 )
 from ai_router.budget import CloudBudget
@@ -1416,6 +1417,63 @@ def test_ai_pool_health_builds_physical_deployments_and_quarantines_drift(
     assert by_id["worker-5"]["profile_id"] == "v10032-qwen38-196k"
 
 
+def test_ai_pool_health_marks_directly_processing_worker_busy(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    workers = ai_workers()
+    busy_worker = workers[0]
+
+    async def scenario() -> EndpointStatus:
+        async def respond(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/health":
+                return httpx.Response(
+                    200,
+                    json={
+                        "ok": True,
+                        "runtime_fingerprint": "runtime-busy",
+                        "workers": workers,
+                    },
+                )
+            if request.url.port == busy_worker["port"]:
+                return httpx.Response(
+                    200,
+                    json=[{"id": 0, "is_processing": True}],
+                )
+            return httpx.Response(
+                200,
+                json=[{"id": 0, "is_processing": False}],
+            )
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(respond)
+        )
+        monitor = HealthMonitor(
+            InMemoryStateStore(),
+            client=client,
+        )
+        try:
+            return await monitor.status(
+                endpoint,
+                force_refresh=True,
+            )
+        finally:
+            await client.aclose()
+
+    status = run(scenario())
+    by_id = {
+        item["worker_id"]: item
+        for item in status.detail["workers"]
+    }
+    assert by_id[busy_worker["worker_id"]]["state"] == "busy"
+    assert busy_worker["worker_id"] not in (
+        status.detail["available_worker_ids"]
+    )
+    assert status.detail["available_workers"] == 1
+
+
 def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     endpoint = registry.by_id("ai-qwen38-27b")
@@ -1574,7 +1632,7 @@ def test_short_requests_hash_across_p40s_and_reserve_v100(
     assert v100.deployment_id == "worker-5"
 
 
-def test_ai_pool_keeps_affinity_worker_when_externally_leased(
+def test_ai_pool_keeps_affinity_candidate_when_externally_leased(
     tmp_path: Path,
 ) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
@@ -1616,12 +1674,12 @@ def test_ai_pool_keeps_affinity_worker_when_externally_leased(
             conversation=state,
         )
     )
-    assert changed.deployment_id == "worker-priority-1"
+    assert changed.deployment_id == original.deployment_id
     assert changed.affinity == "hit"
     assert changed.reason == "conversation_affinity"
 
 
-def test_ai_pool_waits_for_busy_affinity_worker(tmp_path: Path) -> None:
+def test_ai_pool_pins_busy_affinity_candidate(tmp_path: Path) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
@@ -1720,6 +1778,169 @@ def test_new_ai_session_avoids_recently_used_worker(
         )
     )
     assert second.deployment_id != first.deployment_id
+    assert second.deployment_candidates[0][0] == second.deployment_id
+    assert {
+        deployment_id
+        for deployment_id, _api_base in second.deployment_candidates
+    } == {
+        worker["worker_id"]
+        for worker in ai_workers()
+    }
+
+
+def test_auto_conversation_falls_back_from_disabled_bound_endpoint(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    edge = registry.by_id("edge-qwen38-flash")
+    assert edge is not None
+    assert edge.enabled is False
+    statuses = {
+        endpoint.id: healthy(
+            endpoint.id,
+            context=endpoint.safe_context_tokens,
+            workers=(
+                ai_workers()
+                if endpoint.backend_type == "ai_pool"
+                else None
+            ),
+        )
+        for endpoint in registry.endpoints
+    }
+    policy = RoutingPolicy(
+        registry,
+        settings(tmp_path),
+        FakeHealth(statuses),
+        store=InMemoryStateStore(),
+    )
+    conversation = ConversationState(
+        conversation_id="disabled-edge-lineage",
+        branch_id="disabled-edge-branch",
+        parent_branch_id=None,
+        lineage_relation="new",
+        public_model=edge.public_model,
+        endpoint_id=edge.id,
+        tier_rank=edge.tier_rank,
+        task="general",
+        last_seen=time.time(),
+        deployment_id=edge.id,
+    )
+
+    decision = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation("general", None, 1.0, "test"),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            has_tools=False,
+            conversation=conversation,
+        )
+    )
+
+    assert decision.endpoint.id in {
+        "ivan-qwen38-flash-128k",
+        "amd-qwen38-rocmfpx-128k",
+    }
+    assert decision.migration is True
+    assert decision.previous_endpoint_id == edge.id
+    assert decision.reason == "affinity_same_tier_fallback"
+
+
+def test_selected_ai_worker_rejects_external_busy_without_wait(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    ai = registry.by_id("ai-qwen38-27b")
+    assert ai is not None
+    workers = ai_workers()
+    workers[0]["state"] = "busy"
+    health = FakeHealth(
+        {
+            ai.id: healthy(
+                ai.id,
+                context=ai.safe_context_tokens,
+                workers=workers,
+            )
+        }
+    )
+    current = type("Current", (), {"health": health})()
+    decision = RouteDecision(
+        endpoint=ai,
+        requested_model="auto",
+        task="general",
+        prompt_tokens=100,
+        output_reserve_tokens=100,
+        reason="conversation_affinity",
+        affinity="hit",
+        score=1,
+    )
+
+    assert run(
+        _wait_for_selected_deployment(
+            current,
+            decision,
+            workers[0]["worker_id"],
+            timeout_seconds=0,
+        )
+    ) is False
+
+
+def test_selected_ai_worker_waits_through_release_lag(
+    tmp_path: Path,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    ai = registry.by_id("ai-qwen38-27b")
+    assert ai is not None
+    busy_workers = ai_workers()
+    busy_workers[0]["state"] = "busy"
+    available_workers = ai_workers()
+
+    class SequencedHealth:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def status(
+            self,
+            _endpoint: Endpoint,
+            *,
+            force_refresh: bool = False,
+        ) -> EndpointStatus:
+            assert force_refresh is True
+            self.calls += 1
+            workers = (
+                busy_workers
+                if self.calls == 1
+                else available_workers
+            )
+            return healthy(
+                ai.id,
+                context=ai.safe_context_tokens,
+                workers=workers,
+            )
+
+    health = SequencedHealth()
+    current = type("Current", (), {"health": health})()
+    decision = RouteDecision(
+        endpoint=ai,
+        requested_model="auto",
+        task="general",
+        prompt_tokens=100,
+        output_reserve_tokens=100,
+        reason="conversation_affinity",
+        affinity="hit",
+        score=1,
+    )
+
+    assert run(
+        _wait_for_selected_deployment(
+            current,
+            decision,
+            busy_workers[0]["worker_id"],
+            timeout_seconds=1.1,
+        )
+    ) is True
+    assert health.calls == 2
 
 
 def test_ai_pool_failure_excludes_only_the_failed_worker(tmp_path: Path) -> None:
@@ -6023,6 +6244,123 @@ def test_responses_previous_id_rebuilds_encrypted_history(
     run(runtime.internal_client.aclose())
 
 
+def test_responses_stable_conversation_id_rebuilds_encrypted_history(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("ivan-qwen38-flash-128k")
+    assert endpoint is not None
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "responses-stable-id-audit.jsonl"),
+    )
+
+    runtime = build_runtime(
+        settings=settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+        store=runtime.store,
+    )
+    calls = 0
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        payload = json.loads(request.content)
+        assert "previous_response_id" not in payload
+        if calls == 1:
+            assert payload["input"] == "first stable question"
+            response_id = "resp-stable-first"
+            answer = "first stable answer"
+        else:
+            assert [item["role"] for item in payload["input"]] == [
+                "user",
+                "assistant",
+                "user",
+            ]
+            assert payload["input"][0]["content"] == "first stable question"
+            assert (
+                payload["input"][1]["content"][0]["text"]
+                == "first stable answer"
+            )
+            assert payload["input"][2]["content"] == "second stable question"
+            response_id = "resp-stable-second"
+            answer = "second stable answer"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": response_id,
+                "object": "response",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": answer}
+                        ],
+                    }
+                ],
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_app(runtime)
+    headers = {
+        "Authorization": "Bearer client-key",
+        "X-1Panel-Conversation-ID": "stable-responses-lineage",
+    }
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/responses",
+            headers=headers,
+            json={
+                "model": endpoint.public_model,
+                "input": "first stable question",
+                "max_output_tokens": 16,
+            },
+        )
+        assert first.status_code == 200
+        first_branch = first.headers["x-1panel-branch-id"]
+        second = client.post(
+            "/v1/responses",
+            headers=headers,
+            json={
+                "model": endpoint.public_model,
+                "input": "second stable question",
+                "max_output_tokens": 16,
+            },
+        )
+    assert second.status_code == 200
+    assert second.headers["x-1panel-conversation-id"] == (
+        "stable-responses-lineage"
+    )
+    assert second.headers["x-1panel-parent-branch-id"] == first_branch
+    assert second.headers["x-1panel-lineage-relation"] == "continuation"
+    assert calls == 2
+    run(runtime.internal_client.aclose())
+
+
 def test_responses_previous_id_repairs_function_call_output(
     tmp_path: Path,
     monkeypatch,
@@ -6910,6 +7248,232 @@ def test_route_trace_store_redacts_filters_and_appends_reviews(
     assert run(store.get("trace-expired-1")) is None
 
 
+def test_route_trace_excerpt_skips_client_context_wrappers() -> None:
+    excerpt = request_excerpt(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "分析这个请求为什么没有命中缓存。",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        '<system-reminder data-role="user-context">'
+                        "<user_info>OS Version: win32</user_info>"
+                        "</system-reminder>"
+                    ),
+                },
+            ]
+        },
+        "chat",
+    )
+    assert excerpt["text"] == "分析这个请求为什么没有命中缓存。"
+
+    wrapper_only = request_excerpt(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        "<system-reminder data-role='user-context'>"
+                        "<user_info>OS Version: win32</user_info>"
+                        "</system-reminder>"
+                    ),
+                }
+            ]
+        },
+        "chat",
+    )
+    assert wrapper_only["text"] == "客户端上下文信息"
+
+    queued = request_excerpt(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": (
+                        '<system-reminder data-role="message-queue">'
+                        "The user sent the following message:"
+                        "<user_query>它最大占用多少G显存？</user_query>"
+                        "</system-reminder>"
+                    ),
+                }
+            ]
+        },
+        "chat",
+    )
+    assert queued["text"] == "它最大占用多少G显存？"
+
+
+def test_route_trace_store_paginates_and_summarizes_conversations(
+    tmp_path: Path,
+) -> None:
+    store = RouteTraceStore(tmp_path / "route-traces.sqlite3")
+    base_time = 1_700_000_000.0
+
+    def save_trace(index: int) -> None:
+        endpoint_id = (
+            "ai-qwen38-27b"
+            if index % 2 == 0
+            else "ivan-qwen38-flash-128k"
+        )
+        conversation_id = (
+            "conversation-shared"
+            if index % 4 == 0
+            else f"conversation-{index}"
+        )
+        trace = DecisionTrace(
+            request_id=f"page-trace-{index:03d}",
+            client_id="1panel",
+            key_id="key-1",
+            protocol="chat",
+            requested_model="auto",
+            excerpt={
+                "text": f"request summary {index}",
+                "tool_names": [],
+            },
+            instance_id="router-api-local",
+            boot_id="boot-1",
+            settings_hash="settings",
+            registry_hash="registry",
+        )
+        trace.set_request_context(
+            conversation_id=conversation_id,
+            prompt_tokens=1000 + index,
+            output_reserve_tokens=256,
+        )
+        trace.set_evaluation(Evaluation("general", None, 1, "test"))
+        trace.record(
+            1,
+            "deployment_binding",
+            "selected",
+            reason="deployment_selected",
+            evidence={
+                "deployment_profile_id": f"profile-{index % 3}",
+            },
+        )
+        trace.record(
+            1,
+            "capacity_check",
+            "selected",
+            reason="capacity_acquired",
+            evidence={"queue_wait_ms": float(index)},
+        )
+        trace.set_selection(
+            attempt=1,
+            selected_model="model/test",
+            endpoint_id=endpoint_id,
+            deployment_id=f"deployment-{index}",
+            task="general",
+            reason="local_sufficient",
+            affinity="new",
+        )
+        trace.finish(
+            attempt=1,
+            status_code=200,
+            evidence={
+                "input_tokens": 900 + index,
+                "output_tokens": index,
+                "cached_prompt_tokens": 800,
+                "cache_hit_ratio": 0.8,
+            },
+        )
+        timestamp = base_time + index
+        trace.payload["started_at"] = timestamp
+        trace.payload["updated_at"] = timestamp + 0.5
+        trace.payload["completed_at"] = timestamp + 0.5
+        run(store.save(trace))
+
+    for index in range(65):
+        save_trace(index)
+
+    first = run(store.list(limit=30, request_mode="all"))
+    second = run(
+        store.list(
+            limit=30,
+            cursor=first["next_cursor"],
+            request_mode="all",
+        )
+    )
+    third = run(
+        store.list(
+            limit=30,
+            cursor=second["next_cursor"],
+            request_mode="all",
+        )
+    )
+
+    assert [len(page["items"]) for page in (first, second, third)] == [
+        30,
+        30,
+        5,
+    ]
+    assert [page["total_count"] for page in (first, second, third)] == [
+        65,
+        65,
+        65,
+    ]
+    request_ids = [
+        item["request_id"]
+        for page in (first, second, third)
+        for item in page["items"]
+    ]
+    assert len(request_ids) == len(set(request_ids)) == 65
+    assert request_ids[0] == "page-trace-064"
+    assert request_ids[-1] == "page-trace-000"
+
+    shared = next(
+        item
+        for item in first["conversation_summaries"]
+        if item["conversation_id"] == "conversation-shared"
+    )
+    assert shared["request_count"] == 17
+    assert shared["latest_request_id"] == "page-trace-064"
+    assert shared["latest_excerpt"]["text"] == "request summary 64"
+    assert first["items"][0]["queue_wait_ms"] == 64
+    assert first["items"][0]["cached_prompt_tokens"] == 800
+    assert first["items"][0]["deployment_profile_id"] == "profile-1"
+
+    even_endpoint = run(
+        store.list(
+            limit=100,
+            request_mode="all",
+            endpoint_ids=("ai-qwen38-27b",),
+        )
+    )
+    assert even_endpoint["total_count"] == 33
+    assert all(
+        item["endpoint_id"] == "ai-qwen38-27b"
+        for item in even_endpoint["items"]
+    )
+
+    shared_history = run(
+        store.list(
+            limit=100,
+            request_mode="all",
+            conversation_id="conversation-shared",
+        )
+    )
+    assert shared_history["total_count"] == 17
+
+    page_two_before = [
+        item["request_id"] for item in second["items"]
+    ]
+    save_trace(65)
+    page_two_after = run(
+        store.list(
+            limit=30,
+            cursor=first["next_cursor"],
+            request_mode="all",
+        )
+    )
+    assert page_two_after["total_count"] == 66
+    assert [
+        item["request_id"] for item in page_two_after["items"]
+    ] == page_two_before
+
+
 def test_control_route_trace_api_and_review_validation(
     tmp_path: Path,
     monkeypatch,
@@ -6941,7 +7505,17 @@ def test_control_route_trace_api_and_review_validation(
         settings_hash=settings_fingerprint(value),
         registry_hash=registry_fingerprint(registry),
     )
+    trace.set_request_context(conversation_id="control-conversation")
     trace.set_evaluation(Evaluation("general", None, 1, "test"))
+    trace.set_selection(
+        attempt=1,
+        selected_model="huihui/Qwen3.8-27B-Q4-DFlash2",
+        endpoint_id="ai-qwen38-27b",
+        deployment_id="deployment-control",
+        task="general",
+        reason="local_sufficient",
+        affinity="new",
+    )
     trace.finish(attempt=1, status_code=200)
     run(runtime.route_traces.save(trace))
 
@@ -6959,6 +7533,16 @@ def test_control_route_trace_api_and_review_validation(
         listing = client.get(
             "/api/route-traces",
             headers={"Authorization": "Bearer admin-key"},
+        )
+        node_listing = client.get(
+            "/api/route-traces",
+            headers={"Authorization": "Bearer admin-key"},
+            params={"node": "ai", "request_mode": "all"},
+        )
+        missing_node_listing = client.get(
+            "/api/route-traces",
+            headers={"Authorization": "Bearer admin-key"},
+            params={"node": "missing", "request_mode": "all"},
         )
         detail = client.get(
             "/api/route-traces/control-trace-1",
@@ -6997,6 +7581,15 @@ def test_control_route_trace_api_and_review_validation(
     }
     assert listing.status_code == 200
     assert listing.json()["items"][0]["request_id"] == "control-trace-1"
+    assert listing.json()["total_count"] == 1
+    assert listing.json()["conversation_summaries"][0][
+        "request_count"
+    ] == 1
+    assert node_listing.status_code == 200
+    assert node_listing.json()["items"][0]["node"] == "ai"
+    assert missing_node_listing.status_code == 200
+    assert missing_node_listing.json()["items"] == []
+    assert missing_node_listing.json()["total_count"] == 0
     assert detail.status_code == 200
     assert invalid.status_code == 400
     assert reviewed.status_code == 200
