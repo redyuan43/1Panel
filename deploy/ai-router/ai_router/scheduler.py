@@ -108,6 +108,12 @@ class Scheduler:
         await lease.release_deployment()
         token = lease.owner_token
         for deployment_id in deployment_ids:
+            queue_key = self._deployment_queue_key(deployment_id)
+            if await self.store.queue_head(
+                queue_key,
+                stale_before=self._queue_stale_before(),
+            ) is not None:
+                continue
             deployment_key = f"router:deployment-capacity:{deployment_id}"
             acquired = await self.store.acquire_semaphore(
                 deployment_key,
@@ -136,12 +142,6 @@ class Scheduler:
         if not deployment_ids:
             raise ValueError("at least one deployment candidate is required")
         await lease.release_deployment()
-        queue_scope = (
-            f"deployment:{deployment_ids[0]}"
-            if affinity_priority and len(deployment_ids) == 1
-            else f"endpoint:{endpoint_id}"
-        )
-        queue_key = f"router:queue:{queue_scope}"
         token = lease.owner_token
         queue_member = f"{token}:{request_id}"
         priority = False
@@ -154,45 +154,60 @@ class Scheduler:
             )
             priority = burst <= self.max_priority_burst
         score = time.time() - (60.0 if priority else 0.0)
-        await self.store.enqueue(queue_key, queue_member, score)
+        queue_keys = tuple(
+            self._deployment_queue_key(deployment_id)
+            for deployment_id in deployment_ids
+        )
         deadline = time.monotonic() + timeout_seconds
 
         try:
+            for queue_key in queue_keys:
+                await self.store.enqueue(queue_key, queue_member, score)
             while True:
-                stale_before = (
-                    time.time() - self.lock_ttl_seconds - 60.0
-                )
-                if (
-                    await self.store.queue_head(
-                        queue_key,
-                        stale_before=stale_before,
-                    )
-                    == queue_member
+                for deployment_id, queue_key in zip(
+                    deployment_ids,
+                    queue_keys,
+                    strict=True,
                 ):
-                    for deployment_id in deployment_ids:
-                        deployment_key = (
-                            f"router:deployment-capacity:{deployment_id}"
+                    if (
+                        await self.store.queue_head(
+                            queue_key,
+                            stale_before=self._queue_stale_before(),
                         )
-                        acquired = await self.store.acquire_semaphore(
-                            deployment_key,
-                            token,
-                            max(1, capacity),
-                            self.lock_ttl_seconds,
-                        )
-                        if not acquired:
-                            continue
-                        await self.store.dequeue(queue_key, queue_member)
-                        lease.deployment_key = deployment_key
-                        lease.deployment_token = token
-                        lease.queue_key = None
-                        lease.queue_member = None
-                        return deployment_id
+                        != queue_member
+                    ):
+                        continue
+                    deployment_key = (
+                        f"router:deployment-capacity:{deployment_id}"
+                    )
+                    acquired = await self.store.acquire_semaphore(
+                        deployment_key,
+                        token,
+                        max(1, capacity),
+                        self.lock_ttl_seconds,
+                    )
+                    if not acquired:
+                        continue
+                    for item in queue_keys:
+                        await self.store.dequeue(item, queue_member)
+                    lease.deployment_key = deployment_key
+                    lease.deployment_token = token
+                    lease.queue_key = None
+                    lease.queue_member = None
+                    return deployment_id
                 if time.monotonic() >= deadline:
                     raise QueueTimeoutError()
                 await asyncio.sleep(0.1)
         except BaseException:
-            await self.store.dequeue(queue_key, queue_member)
+            for queue_key in queue_keys:
+                await self.store.dequeue(queue_key, queue_member)
             raise
+
+    def _deployment_queue_key(self, deployment_id: str) -> str:
+        return f"router:queue:deployment:{deployment_id}"
+
+    def _queue_stale_before(self) -> float:
+        return time.time() - self.lock_ttl_seconds - 60.0
 
 
 class ClientLimiter:

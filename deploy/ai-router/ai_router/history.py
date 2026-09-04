@@ -233,7 +233,11 @@ def history_identities(
     canonical = _canonical_history_items(messages)
     if not canonical:
         return ()
-    return (f"v3-full-{_messages_hash(canonical)}",)
+    semantic = _semantic_history_items(canonical)
+    return (
+        f"v4-tooltxn-{_messages_hash(semantic)}",
+        f"v3-full-{_messages_hash(canonical)}",
+    )
 
 
 def history_lookup_identities(
@@ -276,6 +280,154 @@ def _canonical_history_items(
                 normalized["content"] = None
         result.append(normalized)
     return result
+
+
+def _semantic_history_items(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    index = 0
+    while index < len(messages):
+        transaction = _closed_tool_transaction(messages, index)
+        if transaction is None:
+            result.append(copy.deepcopy(messages[index]))
+            index += 1
+            continue
+        item, index = transaction
+        result.append(item)
+    return result
+
+
+def _closed_tool_transaction(
+    messages: list[dict[str, Any]],
+    start: int,
+) -> tuple[dict[str, Any], int] | None:
+    first = messages[start]
+    protocol = _tool_call_protocol(first)
+    if protocol is None:
+        return None
+
+    calls: dict[str, dict[str, Any]] = {}
+    outputs: dict[str, dict[str, Any]] = {}
+    index = start
+    while index < len(messages):
+        item = messages[index]
+        item_protocol = _tool_call_protocol(item)
+        if item_protocol == protocol:
+            for call_id, call in _tool_calls(item, protocol):
+                if not call_id or call_id in calls:
+                    return None
+                calls[call_id] = call
+            index += 1
+            continue
+
+        output = _tool_output(item, protocol)
+        if output is not None:
+            call_id, value = output
+            if (
+                not call_id
+                or call_id not in calls
+                or call_id in outputs
+            ):
+                return None
+            outputs[call_id] = value
+            index += 1
+            continue
+        break
+
+    if not calls or set(calls) != set(outputs):
+        return None
+    return (
+        {
+            "type": "tool_transaction",
+            "protocol": protocol,
+            "calls": [
+                {
+                    "call_id": call_id,
+                    "call": calls[call_id],
+                    "output": outputs[call_id],
+                }
+                for call_id in sorted(calls)
+            ],
+        },
+        index,
+    )
+
+
+def _tool_call_protocol(item: dict[str, Any]) -> str | None:
+    if (
+        str(item.get("role", "")).lower() == "assistant"
+        and isinstance(item.get("tool_calls"), list)
+        and item["tool_calls"]
+        and (
+            item.get("content") is None
+            or item.get("content") == ""
+        )
+    ):
+        return "chat"
+    if item.get("type") == "function_call":
+        return "responses"
+    return None
+
+
+def _tool_calls(
+    item: dict[str, Any],
+    protocol: str,
+) -> list[tuple[str, dict[str, Any]]]:
+    if protocol == "responses":
+        return [
+            (
+                str(item.get("call_id", "")),
+                {
+                    key: copy.deepcopy(item[key])
+                    for key in ("name", "arguments", "status")
+                    if key in item
+                },
+            )
+        ]
+
+    result: list[tuple[str, dict[str, Any]]] = []
+    for call in item.get("tool_calls", []):
+        if not isinstance(call, dict):
+            continue
+        result.append(
+            (
+                str(call.get("id", "")),
+                {
+                    key: copy.deepcopy(call[key])
+                    for key in ("type", "function")
+                    if key in call
+                },
+            )
+        )
+    return result
+
+
+def _tool_output(
+    item: dict[str, Any],
+    protocol: str,
+) -> tuple[str, dict[str, Any]] | None:
+    if protocol == "chat":
+        if str(item.get("role", "")).lower() != "tool":
+            return None
+        return (
+            str(item.get("tool_call_id", "")),
+            {
+                key: copy.deepcopy(item[key])
+                for key in ("content", "name")
+                if key in item
+            },
+        )
+    if item.get("type") != "function_call_output":
+        return None
+    return (
+        str(item.get("call_id", "")),
+        {
+            key: copy.deepcopy(item[key])
+            for key in ("output", "status")
+            if key in item
+        },
+    )
 
 
 async def apply_stored_history(

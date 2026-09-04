@@ -383,6 +383,9 @@ def client_policies(settings: Settings) -> tuple[ClientPolicy, ...]:
 
 
 def validate_settings(value: dict[str, Any]) -> None:
+    from .privacy_review import validate_review_settings
+
+    validate_review_settings(value.get("identity", {}).get("review", {}))
     limits = value.get("limits", {})
     if int(limits.get("max_request_bytes", 0)) <= 0:
         raise ValueError("limits.max_request_bytes must be positive")

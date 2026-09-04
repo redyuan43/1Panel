@@ -21,6 +21,7 @@ from .endpoint_config import EndpointConfigManager
 from .health import HealthMonitor
 from .history import history_identities
 from .policy import ConversationRepository, RoutingPolicy
+from .privacy_review import PrivacyReviewer
 from .route_trace import RouteTraceStore
 from .scheduler import ClientLimiter, Scheduler
 from .store import InMemoryStateStore, RedisStateStore, StateStore
@@ -55,6 +56,7 @@ class RouterRuntime:
     instance_id: str
     boot_id: str
     state_encryption_key: str = field(repr=False)
+    privacy_reviewer: PrivacyReviewer | None = field(default=None, init=False)
     track_instance: bool = False
     draining: bool = False
     started_at: float = field(default_factory=time.time)
@@ -127,7 +129,10 @@ class RouterRuntime:
         clients_by_conversation: dict[str, set[str]] = {}
         history_prefix = "router:history-conversation:"
         for key, value in history_indexes:
-            conversation_id = str(value.get("conversation_id", ""))
+            conversation_id = str(
+                value.get("branch_id")
+                or value.get("conversation_id", "")
+            )
             suffix = key.removeprefix(history_prefix)
             if not conversation_id or ":" not in suffix:
                 continue
@@ -157,11 +162,7 @@ class RouterRuntime:
                 continue
             if not isinstance(messages, list):
                 continue
-            identities = tuple(
-                identity
-                for identity in history_identities(messages)
-                if identity.startswith("v3-")
-            )
+            identities = history_identities(messages)
             for client_id in clients_by_conversation.get(
                 conversation_id,
                 set(),
@@ -413,6 +414,8 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        if self.privacy_reviewer is not None:
+            await self.privacy_reviewer.close()
         if self.track_instance:
             await self._publish_instance_state("stopped")
         clients = {
@@ -427,6 +430,20 @@ class RouterRuntime:
         close = getattr(self.store, "close", None)
         if close:
             await close()
+
+    def review_privacy(self, body: dict[str, Any], api_kind: str, *, request_id: str, client_id: str) -> None:
+        settings = self.settings.section("identity").get("review", {})
+        if settings.get("mode", "off") != "shadow":
+            return
+        try:
+            if self.privacy_reviewer is None:
+                self.privacy_reviewer = PrivacyReviewer(self.store, self.audit)
+            self.privacy_reviewer.submit(
+                body, api_kind, settings, request_id=request_id, client_id=client_id,
+            )
+        except Exception:
+            # Shadow mode is not an availability dependency of the serving path.
+            pass
 
 
 def build_runtime(

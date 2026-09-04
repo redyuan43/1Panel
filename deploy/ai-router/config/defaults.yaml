@@ -17,6 +17,13 @@ identity:
   provider_name: SIYUAN
   description: 由思源智能路由服务提供的统一 AI 助手。
   identity_response: 我是思源（SIYUAN），由思源智能路由服务提供的统一 AI 助手。底层模型、节点和路由实现属于内部服务信息，不对外披露。
+  review:
+    mode: "off"
+    base_url: http://agx.taild500c8.ts.net:11434
+    model: qwen3:4b-instruct
+    sample_rate: 0.1
+    requests_per_minute: 2
+    timeout_seconds: 15
 
 routing:
   strategy: intelligent_v2

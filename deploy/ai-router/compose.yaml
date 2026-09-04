@@ -113,6 +113,7 @@ services:
     command:
       - uvicorn
       - ai_router.api:app
+      - --no-server-header
       - --host
       - 127.0.0.1
       - --port
@@ -148,6 +149,7 @@ services:
       - -c
       - >-
         exec uvicorn ai_router.api:app
+        --no-server-header
         --host "$$AI_ROUTER_TAILSCALE_IP" --port 4000
         --proxy-headers --forwarded-allow-ips "*"
         --timeout-graceful-shutdown 900

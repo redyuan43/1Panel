@@ -29,6 +29,7 @@ from .errors import (
 from .history import (
     SSEAccumulator,
     apply_stored_history,
+    assistant_items_from_response,
     deepseek_history_requires_migration,
     history_lookup_identities,
     normalize_history_for_provider,
@@ -38,6 +39,7 @@ from .history import (
 from .identity import (
     IdentityProfile,
     IdentityStreamSanitizer,
+    identity_disclosure_requires_model_protocol,
     internal_identifiers,
     is_identity_disclosure_request,
     sanitize_payload,
@@ -46,6 +48,8 @@ from .identity import (
 from .media import inspect_image_inputs, normalize_ai_images
 from .policy import updated_conversation_state
 from .protocol import normalize_request
+from .public_protocol import private_history_items
+from .privacy_view import review_view
 from .responses_adapter import (
     chat_response_to_responses,
     chat_stream_to_responses,
@@ -444,7 +448,7 @@ def _resolve_requested_model(
     if disclosure_mode == "public":
         _ensure_public_identity(profile)
         if (
-            requested_model != profile.public_model_id
+            requested_model not in {"auto", profile.public_model_id}
             or set(allowed_models) != {profile.public_model_id}
         ):
             raise RouterError(
@@ -574,7 +578,13 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         configured_identity,
         authenticated.policy.disclosure_mode,
     )
-    if not (
+    public_auto_request = (
+        authenticated.policy.disclosure_mode == "public"
+        and configured_identity.enabled
+        and client_requested_model
+        in {"auto", configured_identity.public_model_id}
+    )
+    if not public_auto_request and not (
         configured_identity.enabled
         and client_requested_model == configured_identity.public_model_id
     ):
@@ -623,10 +633,20 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             "client" if client_compacted else None
         ),
     )
+    if identity.enabled:
+        identity_view = review_view(body, api_kind)
+        trace.payload["privacy_input"] = {
+            "source": identity_view.source,
+            "certain": identity_view.certain,
+        }
     await _save_request_trace(current, trace)
     if identity.enabled and is_identity_disclosure_request(
         body,
         api_kind,
+        identity_context=bool(
+            lineage.parent is not None
+            and lineage.parent.identity_only
+        ),
     ):
         return await _identity_intercept_response(
             current,
@@ -754,6 +774,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 code=limit_code or "rate_limit_exceeded",
             )
 
+        if authenticated.policy.disclosure_mode == "public":
+            current.review_privacy(
+                effective_body, api_kind, request_id=request_id,
+                client_id=authenticated.policy.id,
+            )
         header_values = {key.lower(): value for key, value in request.headers.items()}
         async def acquire_evaluator() -> ModelCallTarget:
             return await _acquire_internal_model(
@@ -1288,7 +1313,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     client_id=authenticated.policy.id,
                     body=routed_body,
                     api_kind=api_kind,
-                    response_payload=public_payload,
+                    assistant_items=private_history_items(
+                        assistant_items_from_response(public_payload, api_kind),
+                        assistant_items_from_response(payload, api_kind),
+                    ),
                 )
                 if current.training is not None:
                     await current.training.complete(
@@ -1491,7 +1519,17 @@ async def _identity_intercept_response(
                 status_code=429,
                 code=limit_code or "rate_limit_exceeded",
             )
+        if identity_disclosure_requires_model_protocol(body, api_kind):
+            raise RouterError(
+                "the requested output format is not available",
+                status_code=400,
+                code="identity_disclosure_not_available",
+            )
 
+        if trace.payload.get("disclosure_mode") == "public":
+            current.review_privacy(
+                effective_body, api_kind, request_id=request_id, client_id=client_id,
+            )
         headers = {
             "Cache-Control": "no-store",
             "X-Request-ID": request_id,
@@ -1530,7 +1568,10 @@ async def _identity_intercept_response(
                 branch_id=lineage.branch_id,
                 parent_branch_id=lineage.parent_branch_id,
                 lineage_relation=lineage.relation,
+                public_model=identity.public_model_id,
+                task="identity",
                 last_seen=time.time(),
+                identity_only=True,
             )
             if lineage.parent is not None
             else ConversationState(
@@ -3186,6 +3227,7 @@ async def _stream_response(
     identifiers: tuple[str, ...],
 ) -> AsyncIterator[bytes]:
     accumulator = SSEAccumulator(api_kind)
+    private_accumulator = SSEAccumulator(api_kind)
     sanitizer = IdentityStreamSanitizer(
         api_kind,
         identity,
@@ -3206,6 +3248,7 @@ async def _stream_response(
             else upstream.aiter_bytes()
         )
         async for chunk in source:
+            private_accumulator.feed(chunk)
             batch_completed = False
             for public_chunk in sanitizer.feed(chunk):
                 accumulator.feed(public_chunk)
@@ -3222,6 +3265,7 @@ async def _stream_response(
             completed = True
     finally:
         accumulator.finish()
+        private_accumulator.finish()
         try:
             await upstream.aclose()
             if completed:
@@ -3232,7 +3276,9 @@ async def _stream_response(
                     client_id=client_id,
                     body=body,
                     api_kind=api_kind,
-                    assistant_items=accumulator.assistant_items(),
+                    assistant_items=private_history_items(
+                        accumulator.assistant_items(), private_accumulator.assistant_items(),
+                    ),
                 )
                 if accumulator.response_id and state:
                     await current.conversations.map_response(
@@ -3244,8 +3290,8 @@ async def _stream_response(
                         current.training.complete(
                             training_token,
                             status_code=status_code,
-                            assistant_items=accumulator.assistant_items(),
-                            usage=accumulator.usage,
+                            assistant_items=private_accumulator.assistant_items(),
+                            usage=private_accumulator.usage,
                         )
                     )
             elif current.training is not None:
@@ -3293,7 +3339,7 @@ async def _stream_response(
                 decision=decision,
                 status_code=status_code,
                 started_at=started_at,
-                usage=accumulator.usage,
+                usage=private_accumulator.usage,
                 cache_snapshot=cache_snapshot,
             )
         finally:

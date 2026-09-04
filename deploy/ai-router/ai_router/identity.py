@@ -11,6 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
+from .privacy_view import review_view
+from .public_protocol import public_payload
+from .errors import RouterError
 
 _SKIP_REDACTION_KEYS = {
     "tool_call_id",
@@ -24,31 +27,44 @@ _IDENTITY_DISCLOSURE_PATTERNS = tuple(
     re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
     for pattern in (
         (
-            r"(?:你|您|这个助手|该助手|当前助手|本次回答)"
-            r".{0,16}(?:是|使用|采用|运行|基于|接入|路由到|部署在|"
-            r"背后|底层|实际).{0,16}(?:谁|什么|哪个|哪种|模型|"
-            r"供应商|节点|显卡|gpu|量化|路由|部署|端点|执行者|"
-            r"系统提示|上下文来源)"
+            r"(?:你|您|这个助手|该助手|当前助手|本次回答|"
+            r"当前服务|这个服务|该服务)"
+            r"(?:到底|究竟|实际|现在|当前|正在|的|底层)*"
+            r"(?:是|使用|采用|运行于|运行在|基于|接入|路由到|部署在)"
+            r"(?:的|底层|实际|当前|什么|哪个|哪种|哪家|谁|\s)*"
+            r"(?:底层|实际|当前)?"
+            r"(?:大模型|模型|供应商|厂家|厂商|节点|显卡|gpu|量化|"
+            r"路由|部署|端点|执行者|系统提示|上下文来源)"
         ),
         (
-            r"(?:当前|本次)(?:请求|回答|会话|助手).{0,16}"
-            r"(?:实际|底层|背后|使用|运行|路由|部署).{0,12}"
-            r"(?:模型|供应商|节点|gpu|显卡|量化|路由|部署|端点|"
-            r"执行者|系统提示|上下文来源)"
+            r"(?:你|您|这个助手|该助手|当前助手|本次回答|"
+            r"当前服务|这个服务|该服务)"
+            r"(?:的|现在|当前)*(?:当前|实际|底层|背后)"
+            r"(?:是|什么|哪个|的|使用|采用|运行|接入|路由|部署)*"
+            r"(?:大模型|模型|供应商|厂家|厂商|节点|gpu|显卡|量化|"
+            r"路由|部署|端点|执行者|系统提示|上下文来源)"
+        ),
+        (
+            r"(?:当前|本次)(?:请求|回答|会话|助手|服务)(?:的|是|由|\s)*"
+            r"(?:实际|底层|背后|使用|运行|路由|部署)"
+            r"(?:的|是|由|哪个|什么|到|在|\s)*"
+            r"(?:大模型|模型|供应商|厂家|厂商|节点|gpu|显卡|量化|"
+            r"路由|部署|端点|执行者|系统提示|上下文来源)"
         ),
         r"(?:你|您)(?:到底|究竟|实际)?是谁",
         r"\bwho\s+(?:are|built|made|provides?)\s+you\b",
         (
             r"\b(?:what|which)\s+(?:underlying\s+|actual\s+|current\s+)?"
             r"(?:model|provider|node|gpu|quantization|routing|deployment|"
-            r"endpoint|system\s+prompt|context\s+source)\b.{0,32}"
+            r"endpoint|system\s+prompt|context\s+source)\b\s+"
             r"\b(?:are\s+you|do\s+you\s+use|is\s+this\s+assistant|"
             r"does\s+this\s+assistant\s+use)\b"
         ),
         (
             r"\b(?:you|this\s+assistant|this\s+response|this\s+request)\b"
-            r".{0,24}\b(?:use|using|run|running|based\s+on|powered\s+by|"
-            r"served\s+by|routed\s+to|deployed\s+on)\b.{0,24}"
+            r"\s+(?:(?:are|actually|currently)\s+)*(?:use|using|run|running|based\s+on|powered\s+by|"
+            r"served\s+by|routed\s+to|deployed\s+on)\s+"
+            r"(?:(?:which|what|a|the|underlying|actual)\s+)*"
             r"\b(?:model|provider|node|gpu|quantization|routing|deployment|"
             r"endpoint)\b"
         ),
@@ -57,6 +73,33 @@ _IDENTITY_DISCLOSURE_PATTERNS = tuple(
             r"(?:underlying\s+|actual\s+|current\s+)?"
             r"(?:model|provider|node|gpu|quantization|routing|deployment|"
             r"endpoint|system\s+prompt|context\s+source)\b"
+        ),
+    )
+)
+_IDENTITY_FOLLOWUP_PATTERNS = tuple(
+    re.compile(pattern, flags=re.IGNORECASE | re.DOTALL)
+    for pattern in (
+        (
+            r"(?:继续|再|然后|那|那么|顺便|你继续|请继续).{0,24}"
+            r"(?:它|他|这个|该服务|这个服务|底层)?(?:的)?"
+            r"(?:大模型|模型|供应商|厂家|厂商|provider|节点|gpu|"
+            r"显卡|量化|路由|部署|端点|执行者)"
+            r".{0,12}(?:是谁|是什么|哪个|哪种|哪家|呢|吗|查|告诉)"
+        ),
+        (
+            r"^(?:它|他|这个|该服务|这个服务|底层)(?:的)?"
+            r"(?:大模型|模型|供应商|厂家|厂商|provider|节点|gpu|"
+            r"显卡|量化|路由|部署|端点|执行者)"
+            r".{0,12}(?:是谁|是什么|哪个|哪种|哪家|呢|吗)?[？?]?$"
+        ),
+        (
+            r"\b(?:and|then|also|continue|what\s+about)\b.{0,24}"
+            r"\b(?:its?|this\s+service(?:'s)?)\b.{0,12}"
+            r"\b(?:model|provider|vendor|maker|node|gpu|quantization|"
+            r"routing|deployment|endpoint)\b"
+        ),
+        (
+            r"\bwho\s+(?:makes|provides|runs)\s+(?:it|this\s+service)\b"
         ),
     )
 )
@@ -259,17 +302,22 @@ def sanitize_payload(
     try:
         value = json.loads(payload)
     except Exception:
-        text, count = redact_text(
-            payload.decode("utf-8", errors="replace"),
-            profile,
-            identifiers,
+        raise RouterError(
+            "the model returned an invalid response",
+            status_code=502, code="invalid_upstream_response",
+        ) from None
+    if not isinstance(value, dict):
+        raise RouterError(
+            "the model returned an invalid response",
+            status_code=502, code="invalid_upstream_response",
         )
-        return text.encode("utf-8"), count
+    public = public_payload(value, profile.public_model_id)
     sanitized, count = sanitize_value(
-        value,
+        public,
         profile,
         identifiers,
     )
+    count += int(public != value)
     return (
         json.dumps(
             sanitized,
@@ -316,11 +364,6 @@ def sanitize_value(
     result: dict[str, Any] = {}
     count = 0
     for key, item in value.items():
-        if key == "model":
-            if item != profile.public_model_id:
-                count += 1
-            result[key] = profile.public_model_id
-            continue
         sanitized, item_count = sanitize_value(
             item,
             profile,
@@ -418,20 +461,37 @@ def _sanitize_identifier_value(
 def is_identity_disclosure_request(
     body: dict[str, Any],
     api_kind: str,
+    *,
+    identity_context: bool = False,
 ) -> bool:
-    if _requires_model_protocol(body, api_kind):
+    view = review_view(body, api_kind)
+    text = view.current_query
+    if not view.certain or not text or len(text) > 240:
         return False
-    text = _latest_user_text(body, api_kind)
+    # Quoted instructions, code and mixed tasks are not high-confidence direct asks.
+    if re.search(
+        r'["\'`“”‘’<>]|\n|翻译|比较|举例|解释|推荐|如何|为什么|'
+        r'顺便|另外|然后帮|translate|compare|explain|example',
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if any(
+        pattern.search(text)
+        for pattern in _IDENTITY_DISCLOSURE_PATTERNS
+    ):
+        return True
     return bool(
-        text
+        identity_context
+        and len(text) <= 160
         and any(
             pattern.search(text)
-            for pattern in _IDENTITY_DISCLOSURE_PATTERNS
+            for pattern in _IDENTITY_FOLLOWUP_PATTERNS
         )
     )
 
 
-def _requires_model_protocol(
+def identity_disclosure_requires_model_protocol(
     body: dict[str, Any],
     api_kind: str,
 ) -> bool:
@@ -543,20 +603,24 @@ class IdentityStreamSanitizer:
                 output.append(b"data: [DONE]\n")
                 continue
             if not stripped.startswith("data:"):
-                output.append(line.encode("utf-8"))
+                if not stripped or re.fullmatch(r"event: response\.[a-z_.]+", stripped):
+                    output.append(line.encode("utf-8"))
+                elif stripped.startswith(":"):
+                    output.append(b": keep-alive\n")
                 continue
             raw = stripped[5:].strip()
             try:
                 payload = json.loads(raw)
             except Exception:
-                text, count = redact_text(
-                    raw,
-                    self.profile,
-                    self.identifiers,
+                raise RouterError(
+                    "the model returned an invalid stream",
+                    status_code=502, code="invalid_upstream_response",
+                ) from None
+            if not isinstance(payload, dict):
+                raise RouterError(
+                    "the model returned an invalid stream",
+                    status_code=502, code="invalid_upstream_response",
                 )
-                self.redactions += count
-                output.append(f"data: {text}\n".encode("utf-8"))
-                continue
             event_type = str(payload.get("type", ""))
             if event_type in {
                 "response.output_text.done",
@@ -581,16 +645,8 @@ class IdentityStreamSanitizer:
         return output
 
     def _sanitize_event(self, payload: dict[str, Any]) -> dict[str, Any]:
-        value = copy.deepcopy(payload)
-        if "model" in value:
-            if value["model"] != self.profile.public_model_id:
-                self.redactions += 1
-            value["model"] = self.profile.public_model_id
-        response = value.get("response")
-        if isinstance(response, dict) and "model" in response:
-            if response["model"] != self.profile.public_model_id:
-                self.redactions += 1
-            response["model"] = self.profile.public_model_id
+        value = public_payload(payload, self.profile.public_model_id)
+        self.redactions += int(value != payload)
 
         choices = value.get("choices")
         if isinstance(choices, list):
@@ -600,17 +656,16 @@ class IdentityStreamSanitizer:
                 delta = choice.get("delta")
                 if not isinstance(delta, dict):
                     continue
-                content = delta.get("content")
-                if isinstance(content, str):
-                    key = (
-                        f"chat-content:{offset}:"
-                        f"{choice.get('index', offset)}"
-                    )
-                    delta["content"] = self._feed_text(
-                        key,
-                        content,
-                        value,
-                    )
+                choice_index = choice.get("index", offset)
+                for field in ("content", "refusal", "reasoning_content", "reasoning"):
+                    content = delta.get(field)
+                    if isinstance(content, str):
+                        key = f"chat-{field}:{choice_index}"
+                        template = {
+                            **{k: v for k, v in value.items() if k != "choices"},
+                            "choices": [{"index": choice_index, "delta": {field: ""}, "finish_reason": None}],
+                        }
+                        delta[field] = self._feed_text(key, content, template)
                 tool_calls = delta.get("tool_calls")
                 if not isinstance(tool_calls, list):
                     continue
@@ -629,14 +684,21 @@ class IdentityStreamSanitizer:
                             "id",
                             tool_offset,
                         )
-                    key = (
-                        f"chat-arguments:{offset}:{tool_offset}:"
-                        f"{call_identity}"
-                    )
+                    key = f"chat-arguments:{choice_index}:{call_identity}"
+                    template = {
+                        **{k: v for k, v in value.items() if k != "choices"},
+                        "choices": [{
+                            "index": choice_index,
+                            "delta": {"tool_calls": [{
+                                "index": call_identity, "function": {"arguments": ""},
+                            }]},
+                            "finish_reason": None,
+                        }],
+                    }
                     function["arguments"] = self._feed_text(
                         key,
                         arguments,
-                        value,
+                        template,
                     )
 
         if (
@@ -747,16 +809,16 @@ def _set_stream_fragment(
     if parts[0] in {"responses-text", "responses-arguments"}:
         payload["delta"] = text
         return
-    if parts[0] not in {"chat-content", "chat-arguments"}:
+    if not parts[0].startswith("chat-"):
         return
     try:
-        choice = payload["choices"][int(parts[1])]
+        choice = payload["choices"][0]
         delta = choice["delta"]
         choice["finish_reason"] = None
-        if parts[0] == "chat-content":
-            delta["content"] = text
+        if parts[0] != "chat-arguments":
+            delta[parts[0].removeprefix("chat-")] = text
             return
-        tool_call = delta["tool_calls"][int(parts[2])]
+        tool_call = delta["tool_calls"][0]
         tool_call["function"]["arguments"] = text
     except (KeyError, IndexError, TypeError, ValueError):
         return

@@ -18,6 +18,7 @@ from ai_router.errors import AuthenticationError
 from ai_router.identity import (
     IdentityProfile,
     IdentityStreamSanitizer,
+    identity_disclosure_requires_model_protocol,
     is_identity_disclosure_request,
     sanitize_payload,
 )
@@ -522,6 +523,8 @@ def test_payload_sanitizer_masks_encoded_internal_identifiers() -> None:
         ("Can you compare the Qwen and DeepSeek models?", False),
         ("你能解释这个模型的量化方式吗？", False),
         ("什么是 GPU 量化？", False),
+        ("然后你告诉我一下 PIM 的全称是什么？", False),
+        ("你继续查一下，那他的厂家是谁", False),
     ],
 )
 def test_identity_disclosure_detection_is_high_confidence(
@@ -536,7 +539,7 @@ def test_identity_disclosure_detection_is_high_confidence(
     assert is_identity_disclosure_request(body, "chat") is expected
 
 
-def test_identity_disclosure_intercept_preserves_required_protocols() -> None:
+def test_identity_disclosure_detects_required_protocols() -> None:
     body = {
         "messages": [
             {"role": "user", "content": "你现在底层是什么模型？"},
@@ -552,12 +555,34 @@ def test_identity_disclosure_intercept_preserves_required_protocols() -> None:
         ],
         "tool_choice": "required",
     }
-    assert is_identity_disclosure_request(body, "chat") is False
+    assert is_identity_disclosure_request(body, "chat") is True
+    assert identity_disclosure_requires_model_protocol(body, "chat") is True
 
     body.pop("tools")
     body.pop("tool_choice")
     body["response_format"] = {"type": "json_object"}
+    assert is_identity_disclosure_request(body, "chat") is True
+    assert identity_disclosure_requires_model_protocol(body, "chat") is True
+
+
+def test_identity_followup_requires_identity_context() -> None:
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": "你继续查一下，那他的厂家是谁",
+            },
+        ]
+    }
     assert is_identity_disclosure_request(body, "chat") is False
+    assert (
+        is_identity_disclosure_request(
+            body,
+            "chat",
+            identity_context=True,
+        )
+        is True
+    )
 
 
 def test_public_alias_preserves_single_model_legacy_permissions() -> None:
@@ -592,7 +617,7 @@ def test_public_alias_preserves_single_model_legacy_permissions() -> None:
         )
 
 
-def test_public_alias_requires_exact_public_model_permission() -> None:
+def test_public_alias_accepts_auto_but_rejects_internal_models() -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
 
     class Runtime:
@@ -607,19 +632,22 @@ def test_public_alias_requires_exact_public_model_permission() -> None:
         profile(),
         "public",
     ) == "auto"
-    for requested in (
+    assert _resolve_requested_model(
+        runtime,
+        ("siyuan/auto",),
         "auto",
-        "zhipu/glm-5.3-flash",
-    ):
-        with pytest.raises(Exception) as error:
-            _resolve_requested_model(
-                runtime,
-                ("siyuan/auto",),
-                requested,
-                profile(),
-                "public",
-            )
-        assert getattr(error.value, "code", "") == "model_not_found"
+        profile(),
+        "public",
+    ) == "auto"
+    with pytest.raises(Exception) as error:
+        _resolve_requested_model(
+            runtime,
+            ("siyuan/auto",),
+            "zhipu/glm-5.3-flash",
+            profile(),
+            "public",
+        )
+    assert getattr(error.value, "code", "") == "model_not_found"
 
 
 def test_public_alias_descriptor_uses_resolved_target_limits(
