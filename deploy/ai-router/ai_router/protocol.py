@@ -36,6 +36,59 @@ def normalize_request(
     )
 
 
+def normalize_llama_tool_schemas(tools: Any, api_kind: str) -> Any:
+    """Avoid llama.cpp treating an empty additional-property schema as object-only."""
+    result = copy.deepcopy(tools)
+    if not isinstance(result, list) or api_kind not in {"chat", "responses"}:
+        return result
+    pending: list[Any] = []
+    for tool in result:
+        if not isinstance(tool, dict) or tool.get("type") != "function":
+            continue
+        function = (
+            tool.get("function")
+            if api_kind == "chat"
+            else tool.get("function", tool)
+        )
+        if isinstance(function, dict):
+            pending.append(function.get("parameters"))
+
+    # Traverse schema positions only, never examples, defaults or arbitrary data.
+    while pending:
+        schema = pending.pop()
+        if not isinstance(schema, dict):
+            continue
+        if schema.get("additionalProperties") == {}:
+            schema["additionalProperties"] = True
+        for key in (
+            "properties", "patternProperties", "definitions", "$defs",
+            "dependentSchemas", "dependencies",
+        ):
+            children = schema.get(key)
+            if isinstance(children, dict):
+                pending.extend(
+                    child for child in children.values() if isinstance(child, dict)
+                )
+        for key in (
+            "additionalProperties", "additionalItems", "contains",
+            "propertyNames", "not", "if", "then", "else",
+            "unevaluatedProperties", "unevaluatedItems", "contentSchema",
+        ):
+            child = schema.get(key)
+            if isinstance(child, dict):
+                pending.append(child)
+        items = schema.get("items")
+        if isinstance(items, dict):
+            pending.append(items)
+        elif isinstance(items, list):
+            pending.extend(items)
+        for key in ("allOf", "anyOf", "oneOf", "prefixItems"):
+            children = schema.get(key)
+            if isinstance(children, list):
+                pending.extend(children)
+    return result
+
+
 def request_capabilities(
     body: dict[str, Any],
     api_kind: str,

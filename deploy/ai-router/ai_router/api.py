@@ -47,7 +47,7 @@ from .identity import (
 )
 from .media import inspect_image_inputs, normalize_ai_images
 from .policy import updated_conversation_state
-from .protocol import normalize_request
+from .protocol import normalize_llama_tool_schemas, normalize_request
 from .public_protocol import private_history_items
 from .privacy_view import review_view
 from .responses_adapter import (
@@ -2832,6 +2832,12 @@ async def _prepare_routed_body(
         if cross_provider
         else json.loads(json.dumps(body))
     )
+    if (
+        not decision.endpoint.cloud
+        and decision.endpoint.backend_type in {"llama_cpp", "ai_pool"}
+        and isinstance(routed.get("tools"), list)
+    ):
+        routed["tools"] = normalize_llama_tool_schemas(routed["tools"], api_kind)
     decision.history_mode = (
         "normalized"
         if cross_provider
