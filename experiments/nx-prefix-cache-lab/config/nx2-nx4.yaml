@@ -1,0 +1,93 @@
+version: 1
+
+nodes:
+  nx2:
+    ssh_host: nx2
+    base_url: http://nx2.taild500c8.ts.net:12350
+    health_path: /health
+    allow_lifecycle: false
+
+  nx3:
+    ssh_host: nx3
+    base_url: http://nx3.taild500c8.ts.net:18081
+    provider_model: Qwen_Qwen3.6-35B-A3B-IQ2_S.gguf
+    production_base_url: http://nx3.taild500c8.ts.net:8081
+    health_path: /health
+    service_unit: nx3-cerebellum-v3.service
+    service_scope: system
+    use_sudo: true
+    allow_lifecycle: true
+    lab_unit: prefix-cache-lab-nx3.service
+    lab_api_key_file: /home/nx/.config/prefix-cache-lab/api-key
+    backend_api_key_env: AI_ROUTER_NX3_BACKEND_KEY
+    lab_prestart:
+      - [sudo, -n, /home/nx/llama/open_fw.sh]
+      - [mkdir, -p, /home/nx/.local/state/prefix-cache-lab/slots]
+    lab_environment:
+      CUDA_MODULE_LOADING: LAZY
+    lab_command:
+      - /home/nx/llama/llama-server
+      - -m
+      - /home/nx/llama/Qwen_Qwen3.6-35B-A3B-IQ2_S.gguf
+      - --jinja
+      - -c
+      - '57344'
+      - -fa
+      - 'on'
+      - --cache-type-k
+      - q4_0
+      - --cache-type-v
+      - q4_0
+      - --cache-ram
+      - '0'
+      - --slot-save-path
+      - /home/nx/.local/state/prefix-cache-lab/slots
+      - -ngl
+      - '99'
+      - -b
+      - '2048'
+      - -ub
+      - '768'
+      - --parallel
+      - '1'
+      - --temp
+      - '1.0'
+      - --top-p
+      - '0.95'
+      - --top-k
+      - '20'
+      - --min-p
+      - '0.0'
+      - --api-key-file
+      - /home/nx/.config/prefix-cache-lab/api-key
+      - --host
+      - 0.0.0.0
+      - --port
+      - '18081'
+    slot_cache_file: workbuddy-prefix.bin
+
+  nx4:
+    ssh_host: nx4
+    base_url: http://nx4.taild500c8.ts.net:12350
+    health_path: /health
+    allow_lifecycle: false
+
+router:
+  base_url: http://127.0.0.1:4000
+  model: prefix-lab/nx3-qwen36
+  api_key_env: AI_ROUTER_1PANEL_API_KEY
+
+workbuddy:
+  ssh_host: ivan-laptop
+  data_root: 'C:\Users\Ivan\.workbuddy'
+  traces_dir: 'C:\Users\Ivan\.workbuddy\traces'
+  sessions_dir: 'C:\Users\Ivan\.workbuddy\sessions'
+  database: 'C:\Users\Ivan\.workbuddy\workbuddy.db'
+
+sampling:
+  count: 8
+  long_count: 6
+  long_min_tokens: 40000
+  long_max_tokens: 55000
+  control_min_tokens: 20000
+  control_max_tokens: 39999

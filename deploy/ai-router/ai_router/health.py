@@ -382,9 +382,16 @@ class HealthMonitor:
         )
 
     async def _probe_llama_cpp(self, endpoint: Endpoint, checked_at: float) -> EndpointStatus:
+        headers = {}
+        api_key = os.environ.get(endpoint.backend_api_key_env, "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         health_response, slots_response = await asyncio.gather(
-            self.client.get(endpoint.health_url),
-            self.client.get(endpoint.load_url or endpoint.health_url),
+            self.client.get(endpoint.health_url, headers=headers),
+            self.client.get(
+                endpoint.load_url or endpoint.health_url,
+                headers=headers,
+            ),
         )
         health_response.raise_for_status()
         slots_response.raise_for_status()

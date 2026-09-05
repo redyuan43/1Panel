@@ -380,7 +380,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 8
+    assert len(registry.endpoints) == 9
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
@@ -454,12 +454,13 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
         endpoint.capabilities.chat
         and endpoint.capabilities.tools == "parallel"
         for endpoint in registry.endpoints
+        if endpoint.enabled
     )
     assert glm.capabilities.responses == "adapter"
     assert all(
         endpoint.capabilities.responses == "native"
         for endpoint in registry.endpoints
-        if endpoint.id != glm.id
+        if endpoint.enabled and endpoint.id != glm.id
     )
 
 

@@ -305,6 +305,58 @@ endpoints:
       vision_projector: /data/models/Cerebellum-mmproj-BF16.gguf
       json_object_status: failed-markdown-fence-2026-09-04
 
+  - id: nx3-qwen36-prefix-lab
+    public_model: prefix-lab/nx3-qwen36
+    provider_model: Qwen_Qwen3.6-35B-A3B-IQ2_S.gguf
+    api_base: http://nx3.taild500c8.ts.net:18081/v1
+    node: nx3
+    role: responder
+    tier: edge-small
+    tier_rank: 10
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+      - long-context
+    safe_context_tokens: 57344
+    configured_context_tokens: 57344
+    max_concurrency: 1
+    backend_type: llama_cpp
+    health_url: http://nx3.taild500c8.ts.net:18081/health
+    load_url: http://nx3.taild500c8.ts.net:18081/slots
+    backend_api_key_env: AI_ROUTER_NX3_BACKEND_KEY
+    enabled: false
+    auto_candidate: false
+    capabilities:
+      chat: true
+      responses: none
+      tools: none
+      tool_choice: false
+      streaming: true
+      validation_status: isolated-router-chat-streaming-prefix-cache-validated
+      validated_at: "2026-09-05"
+    quality: {}
+    metadata:
+      context_status: live-random-17678-to-50603-token-prefix-cache-validated-2026-09-05
+      upstream_read_timeout_seconds: 1800
+      quality_status: unbenchmarked
+      model_artifact: /home/nx/llama/Qwen_Qwen3.6-35B-A3B-IQ2_S.gguf
+      quantization: IQ2_S
+      kv_cache: q4_0/q4_0
+      speculative_method: none
+      topology: Jetson-Orin-NX-single-integrated-GPU
+      cache_policy: dedicated-single-slot-process-memory
+      cache_persistence: disk-slot-restore-not-supported-for-this-model
+      batch_size: 2048
+      micro_batch_size: 768
+      isolation_required: true
+      access_control_status: api-key-file-validated-router-env-pending
+      output_isolation_status: direct-8-of-8-router-4-of-4-validated
+      router_validation: isolated-in-memory-state-harness
+      experiment_path: /home/ai/github/1Panel/experiments/nx-prefix-cache-lab
+      validation_report: /home/ai/github/1Panel/experiments/nx-prefix-cache-lab/docs/validation.md
+
   - id: codex-pro-gpt-5.6-sol
     public_model: codex-pro/gpt-5.6-sol
     provider_model: gpt-5.6-sol
