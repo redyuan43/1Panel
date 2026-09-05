@@ -212,17 +212,175 @@ _SECRET_PATTERNS = (
     re.compile(r"\b[A-Za-z0-9+/]{160,}={0,2}\b"),
 )
 
+# Simplified routing-audit graph: collapses the 17-node detailed pipeline
+# into the decision points that actually explain "why this turn landed
+# here" (see docs/... and the ai-router console's 路由审计 tab), and adds
+# two decisions the detailed graph never surfaced: lineage resolution and
+# the identity-disclosure short-circuit. Real per-attempt steps are
+# recorded against the OLD (detailed) node ids; remap_attempt_steps()
+# translates them at read time via _OLD_TO_SIMPLE_NODE.
+SIMPLE_GRAPH_NODES: tuple[dict[str, str], ...] = (
+    {
+        "id": "lineage_resolution",
+        "label": "会话链路解析",
+        "mermaid_label": "会话链路解析<br/>新建 · 续接 · 压缩重置",
+        "kind": "decision",
+        "group": "input",
+    },
+    {
+        "id": "identity_disclosure_check",
+        "label": "身份询问拦截？",
+        "kind": "decision",
+        "group": "input",
+    },
+    {
+        "id": "intake_evaluation",
+        "label": "任务评估与模型锁定",
+        "mermaid_label": "任务评估与模型锁定<br/>画像 · 模态 · Token",
+        "kind": "process",
+        "group": "input",
+    },
+    {
+        "id": "candidate_scope",
+        "label": "完整约束资格筛选",
+        "mermaid_label": (
+            "完整约束资格筛选<br/>"
+            "模态 · 协议 · 工具 · 历史 · 健康"
+        ),
+        "kind": "process",
+        "group": "core",
+    },
+    {
+        "id": "conversation_affinity",
+        "label": "会话原模型仍合格？",
+        "kind": "decision",
+        "group": "core",
+    },
+    {
+        "id": "provider_priority",
+        "label": "legacy_v1 Provider 优先",
+        "kind": "process",
+        "group": "core",
+    },
+    {
+        "id": "intelligent_v2_dispatch",
+        "label": "本地充分 / 云端专家分流",
+        "mermaid_label": (
+            "本地充分 / 云端专家分流<br/>"
+            "本地优先，不足才转云端"
+        ),
+        "kind": "decision",
+        "group": "core",
+    },
+    {
+        "id": "select_endpoint",
+        "label": "选定目标模型",
+        "kind": "process",
+        "group": "core",
+    },
+    {
+        "id": "deployment_and_capacity",
+        "label": "部署绑定与容量核验",
+        "mermaid_label": (
+            "部署绑定与容量核验<br/>"
+            "物理部署 · 容量 · 历史预检"
+        ),
+        "kind": "decision",
+        "group": "core",
+    },
+    {
+        "id": "route_selected",
+        "label": "最终路由模型",
+        "kind": "terminal-success",
+        "group": "result",
+    },
+    {
+        "id": "identity_answered",
+        "label": "身份直答（未路由模型）",
+        "kind": "terminal-success",
+        "group": "result",
+    },
+    {
+        "id": "failed",
+        "label": "无可用路由",
+        "kind": "terminal-error",
+        "group": "result",
+    },
+)
 
-def graph_document() -> dict[str, Any]:
+SIMPLE_GRAPH_EDGES: tuple[dict[str, str], ...] = (
+    {"id": "e-lineage-identity", "from": "lineage_resolution", "to": "identity_disclosure_check", "label": ""},
+    {"id": "e-identity-answered", "from": "identity_disclosure_check", "to": "identity_answered", "label": "拦截"},
+    {"id": "e-identity-intake", "from": "identity_disclosure_check", "to": "intake_evaluation", "label": "放行"},
+    {"id": "e-intake-scope", "from": "intake_evaluation", "to": "candidate_scope", "label": ""},
+    {"id": "e-scope-affinity", "from": "candidate_scope", "to": "conversation_affinity", "label": "有合格候选"},
+    {"id": "e-scope-failed", "from": "candidate_scope", "to": "failed", "label": "无合格候选"},
+    {"id": "e-affinity-deploy", "from": "conversation_affinity", "to": "deployment_and_capacity", "label": "命中"},
+    {"id": "e-affinity-explicit", "from": "conversation_affinity", "to": "select_endpoint", "label": "显式未命中"},
+    {"id": "e-affinity-v2", "from": "conversation_affinity", "to": "intelligent_v2_dispatch", "label": "intelligent_v2"},
+    {"id": "e-affinity-legacy", "from": "conversation_affinity", "to": "provider_priority", "label": "legacy_v1"},
+    {"id": "e-v2-select", "from": "intelligent_v2_dispatch", "to": "select_endpoint", "label": "候选池确定"},
+    {"id": "e-legacy-select", "from": "provider_priority", "to": "select_endpoint", "label": "旧策略"},
+    {"id": "e-select-deploy", "from": "select_endpoint", "to": "deployment_and_capacity", "label": ""},
+    {"id": "e-deploy-selected", "from": "deployment_and_capacity", "to": "route_selected", "label": "就绪"},
+    {"id": "e-deploy-retry", "from": "deployment_and_capacity", "to": "candidate_scope", "label": "重试/排除候选"},
+    {"id": "e-deploy-failed", "from": "deployment_and_capacity", "to": "failed", "label": "停止"},
+)
+
+# Maps a detailed-graph node id (as recorded in DecisionTrace steps) onto
+# the simplified node it rolls up into. Nodes with no entry here (the
+# candidate_* gate nodes, identity_intercept, upstream_request, completed,
+# context_compaction) are already recorded with path=False and are
+# dropped by remap_attempt_steps() before this lookup even runs.
+_OLD_TO_SIMPLE_NODE: dict[str, str] = {
+    "request_received": "intake_evaluation",
+    "task_evaluation": "intake_evaluation",
+    "explicit_model": "intake_evaluation",
+    "context_formula": "intake_evaluation",
+    "candidate_scope": "candidate_scope",
+    "conversation_affinity": "conversation_affinity",
+    "explicit_selection": "select_endpoint",
+    "score_candidates": "select_endpoint",
+    "local_sufficiency": "intelligent_v2_dispatch",
+    "remote_expert_dispatch": "intelligent_v2_dispatch",
+    "provider_priority": "provider_priority",
+    "deployment_binding": "deployment_and_capacity",
+    "capacity_check": "deployment_and_capacity",
+    "history_preflight": "deployment_and_capacity",
+    "request_prepare": "deployment_and_capacity",
+    "budget_check": "deployment_and_capacity",
+    "retry_decision": "deployment_and_capacity",
+    "route_selected": "route_selected",
+    "failed": "failed",
+}
+
+_GRAPH_GROUPS: tuple[tuple[str, str], ...] = (
+    ("input", "请求约束"),
+    ("core", "智能路由核心"),
+    ("result", "路由结果"),
+)
+
+_GRAPH_VARIANTS: dict[str, tuple[Any, Any]] = {
+    "simple": (SIMPLE_GRAPH_NODES, SIMPLE_GRAPH_EDGES),
+    "detailed": (GRAPH_NODES, GRAPH_EDGES),
+}
+
+
+def graph_document(mode: str = "simple") -> dict[str, Any]:
+    nodes, edges = _GRAPH_VARIANTS.get(mode, _GRAPH_VARIANTS["simple"])
     return {
         "graph_version": GRAPH_VERSION,
-        "nodes": [dict(item) for item in GRAPH_NODES],
-        "edges": [dict(item) for item in GRAPH_EDGES],
-        "mermaid": _graph_mermaid(),
+        "mode": mode if mode in _GRAPH_VARIANTS else "simple",
+        "nodes": [dict(item) for item in nodes],
+        "edges": [dict(item) for item in edges],
+        "mermaid": _graph_mermaid(nodes, edges),
     }
 
 
-def _graph_mermaid() -> str:
+def _graph_mermaid(
+    nodes: tuple[dict[str, str], ...],
+    edges: tuple[dict[str, str], ...],
+) -> str:
     lines = [
         "---",
         "config:",
@@ -232,15 +390,10 @@ def _graph_mermaid() -> str:
         "---",
         "flowchart LR",
     ]
-    groups = (
-        ("input", "请求约束"),
-        ("core", "智能路由核心"),
-        ("result", "路由结果"),
-    )
-    for group_id, group_label in groups:
+    for group_id, group_label in _GRAPH_GROUPS:
         lines.append(f'  subgraph {group_id}["{group_label}"]')
         lines.append("    direction LR")
-        for node in GRAPH_NODES:
+        for node in nodes:
             if node.get("group") != group_id:
                 continue
             node_id = node["id"]
@@ -255,26 +408,135 @@ def _graph_mermaid() -> str:
             else:
                 lines.append(f'    {node_id}["{label}"]')
         lines.append("  end")
-    for edge in GRAPH_EDGES:
+    for edge in edges:
         label = edge.get("label", "")
         connector = f' -->|"{label}"| ' if label else " --> "
         lines.append(f"  {edge['from']}{connector}{edge['to']}")
+    by_kind: dict[str, list[str]] = {}
+    for node in nodes:
+        by_kind.setdefault(node["kind"], []).append(node["id"])
     lines.extend(
         (
             "  classDef process fill:#10161d,stroke:#52606d,color:#f3f6f8;",
             "  classDef decision fill:#151c24,stroke:#73808d,color:#f3f6f8;",
             "  classDef success fill:#10291f,stroke:#3fd091,color:#b9f5d8,stroke-width:2px;",
             "  classDef error fill:#30171b,stroke:#ef6a72,color:#ffc2c7,stroke-width:2px;",
-            "  class task_evaluation,candidate_scope,explicit_selection,provider_priority,score_candidates,deployment_binding,request_prepare process;",
-            "  class explicit_model,context_formula,conversation_affinity,local_sufficiency,remote_expert_dispatch,capacity_check,history_preflight,retry_decision decision;",
-            "  class route_selected success;",
-            "  class failed error;",
+        )
+    )
+    if by_kind.get("process"):
+        lines.append(f"  class {','.join(by_kind['process'])} process;")
+    if by_kind.get("decision"):
+        lines.append(f"  class {','.join(by_kind['decision'])} decision;")
+    if by_kind.get("terminal-success"):
+        lines.append(f"  class {','.join(by_kind['terminal-success'])} success;")
+    if by_kind.get("terminal-error"):
+        lines.append(f"  class {','.join(by_kind['terminal-error'])} error;")
+    lines.extend(
+        (
             "  style input fill:#0b1015,stroke:#29313a,color:#8d99a5;",
             "  style core fill:#090c10,stroke:#55c9e8,color:#d9f7ff,stroke-width:2px;",
             "  style result fill:#0b1015,stroke:#29313a,color:#8d99a5;",
         )
     )
     return "\n".join(lines)
+
+
+def remap_attempt_steps(
+    payload: dict[str, Any],
+    attempt: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Translate one attempt's detailed-graph steps onto the simplified
+    graph, synthesizing the lineage/identity-disclosure decisions from
+    top-level trace fields (they aren't recorded as steps today) and
+    collapsing consecutive old steps that map onto the same simple node."""
+    result: list[dict[str, Any]] = []
+
+    def emit(
+        node_id: str,
+        status: str,
+        *,
+        branch: str | None = None,
+        reason: str | None = None,
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
+        result.append(
+            {
+                "sequence": len(result) + 1,
+                "node_id": node_id,
+                "status": status,
+                "branch": branch,
+                "reason": reason,
+                "evidence": dict(evidence or {}),
+                "path": True,
+            }
+        )
+
+    steps = attempt.get("steps") or []
+    lineage_relation = payload.get("lineage_relation")
+    intercepted = bool(payload.get("identity_intercepted"))
+    if lineage_relation is not None or intercepted:
+        emit(
+            "lineage_resolution",
+            "evaluated",
+            branch=lineage_relation or "new",
+            reason=f"lineage_{lineage_relation or 'new'}",
+            evidence={
+                "conversation_id": payload.get("conversation_id"),
+                "branch_id": payload.get("branch_id"),
+                "parent_branch_id": payload.get("parent_branch_id"),
+            },
+        )
+        intercept_step = next(
+            (
+                item
+                for item in steps
+                if item.get("node_id") == "identity_intercept"
+            ),
+            None,
+        )
+        emit(
+            "identity_disclosure_check",
+            "evaluated",
+            branch="intercepted" if intercepted else "continue",
+            reason=(
+                str((intercept_step or {}).get("reason"))
+                if intercepted
+                else "not_a_disclosure_request"
+            ),
+            evidence=dict((intercept_step or {}).get("evidence") or {}),
+        )
+        if intercepted:
+            emit(
+                "identity_answered",
+                "selected",
+                reason="public_identity_response",
+                evidence=dict((intercept_step or {}).get("evidence") or {}),
+            )
+
+    for step in steps:
+        if not step.get("path"):
+            continue
+        new_id = _OLD_TO_SIMPLE_NODE.get(str(step.get("node_id")))
+        if not new_id:
+            continue
+        if result and result[-1]["node_id"] == new_id:
+            merged = result[-1]
+            merged["status"] = step.get("status", merged["status"])
+            merged["branch"] = step.get("branch") or merged["branch"]
+            merged["reason"] = step.get("reason") or merged["reason"]
+            merged["evidence"] = {
+                **merged["evidence"],
+                **(step.get("evidence") or {}),
+            }
+            continue
+        emit(
+            new_id,
+            step.get("status", "passed"),
+            branch=step.get("branch"),
+            reason=step.get("reason"),
+            evidence=step.get("evidence") or {},
+        )
+    return result
 
 
 def settings_fingerprint(settings: Settings) -> str:
@@ -986,6 +1248,8 @@ class RouteTraceStore:
         review_status: str | None = None,
         search: str | None = None,
         endpoint_ids: tuple[str, ...] | None = None,
+        privacy_decision: str | None = None,
+        auto_models: tuple[str, ...] = ("auto", "siyuan/auto"),
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._list,
@@ -1001,6 +1265,8 @@ class RouteTraceStore:
             review_status,
             search,
             endpoint_ids,
+            privacy_decision,
+            auto_models,
         )
 
     async def add_review(
@@ -1036,6 +1302,60 @@ class RouteTraceStore:
 
     async def cleanup(self) -> int:
         return await asyncio.to_thread(self._cleanup)
+
+    async def save_privacy_assessment(self, value: dict[str, Any]) -> None:
+        await asyncio.to_thread(self._save_privacy_assessment, value)
+
+    def _save_privacy_assessment(self, value: dict[str, Any]) -> None:
+        allowed = {
+            "request_id", "client_id", "mode", "policy_version", "review_model", "backend",
+            "source", "status", "decision", "reason", "valid", "skipped", "elapsed_ms",
+            "review_request_id", "updated_at", "deadline_at",
+        }
+        payload = {key: item for key, item in value.items() if key in allowed}
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO privacy_assessments(request_id, updated_at, result_json)
+                VALUES (?, ?, ?)
+                ON CONFLICT(request_id) DO UPDATE SET
+                    updated_at=excluded.updated_at, result_json=excluded.result_json
+                WHERE excluded.updated_at >= privacy_assessments.updated_at
+                """,
+                (payload["request_id"], payload["updated_at"], json.dumps(payload, ensure_ascii=False)),
+            )
+
+    async def add_privacy_feedback(
+        self, request_id: str, *, decision: str, note: str | None, reviewer_source: str,
+    ) -> dict[str, Any]:
+        if decision not in {"normal", "internal_info", "uncertain"}:
+            raise ValueError("decision must be normal, internal_info, or uncertain")
+        value = {
+            "decision": decision, "note": _optional_text(note, 1000),
+            "reviewer_source": reviewer_source, "created_at": time.time(),
+        }
+        await asyncio.to_thread(self._add_privacy_feedback, request_id, value)
+        return value
+
+    def _add_privacy_feedback(self, request_id: str, value: dict[str, Any]) -> None:
+        with self._connect() as connection:
+            if connection.execute(
+                "SELECT 1 FROM route_traces WHERE request_id=?", (request_id,),
+            ).fetchone() is None:
+                raise KeyError(request_id)
+            connection.execute(
+                "INSERT INTO privacy_feedback(request_id, result_json) VALUES (?, ?)",
+                (request_id, json.dumps(value, ensure_ascii=False)),
+            )
+
+    @staticmethod
+    def _privacy_result(value: str | None) -> dict[str, Any] | None:
+        if not value:
+            return None
+        result = json.loads(value)
+        if result.get("status") == "pending" and result.get("deadline_at", 0) < time.time():
+            result = {**result, "status": "unavailable", "decision": "uncertain", "reason": "expired"}
+        return result
 
     def _initialize(self) -> None:
         with self._connect(initialize=True) as connection:
@@ -1091,6 +1411,19 @@ class RouteTraceStore:
                 );
                 CREATE INDEX IF NOT EXISTS route_reviews_request
                     ON route_reviews(request_id, id DESC);
+
+                CREATE TABLE IF NOT EXISTS privacy_assessments (
+                    request_id TEXT PRIMARY KEY,
+                    updated_at REAL NOT NULL,
+                    result_json TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS privacy_feedback (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL,
+                    result_json TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS privacy_feedback_request
+                    ON privacy_feedback(request_id, id DESC);
                 """
             )
             columns = {
@@ -1205,7 +1538,18 @@ class RouteTraceStore:
                 """,
                 (request_id,),
             ).fetchall()
+            assessment = connection.execute(
+                "SELECT result_json FROM privacy_assessments WHERE request_id=?", (request_id,),
+            ).fetchone()
+            feedback = connection.execute(
+                "SELECT result_json FROM privacy_feedback WHERE request_id=? ORDER BY id DESC",
+                (request_id,),
+            ).fetchall()
         payload = json.loads(row["payload_json"])
+        for item in payload.get("attempts", []):
+            item["simple_steps"] = remap_attempt_steps(payload, item)
+        payload["privacy_assessment"] = self._privacy_result(assessment["result_json"] if assessment else None)
+        payload["privacy_feedback"] = [json.loads(item["result_json"]) for item in feedback]
         payload["review_status"] = row["review_status"]
         payload["reviews"] = [dict(item) for item in reviews]
         payload["current_review"] = (
@@ -1227,14 +1571,26 @@ class RouteTraceStore:
         review_status: str | None,
         search: str | None,
         endpoint_ids: tuple[str, ...] | None,
+        privacy_decision: str | None = None,
+        auto_models: tuple[str, ...] = ("auto", "siyuan/auto"),
     ) -> dict[str, Any]:
         limit = max(1, min(100, int(limit)))
         base_where: list[str] = []
         base_values: list[Any] = []
-        if request_mode == "auto":
-            base_where.append("t.requested_model = 'auto'")
-        elif request_mode == "explicit":
-            base_where.append("t.requested_model <> 'auto'")
+        if privacy_decision:
+            if privacy_decision == "reviewed":
+                base_where.append("EXISTS (SELECT 1 FROM privacy_assessments p WHERE p.request_id=t.request_id)")
+            else:
+                base_where.append("""EXISTS (SELECT 1 FROM privacy_assessments p
+                    WHERE p.request_id=t.request_id AND json_extract(p.result_json, '$.status')='completed'
+                    AND json_extract(p.result_json, '$.decision')=?)""")
+                base_values.append(privacy_decision)
+        if request_mode in {"auto", "explicit"}:
+            models = tuple(dict.fromkeys(("auto", *auto_models)))
+            placeholders = ", ".join("?" for _ in models)
+            operator = "IN" if request_mode == "auto" else "NOT IN"
+            base_where.append(f"t.requested_model {operator} ({placeholders})")
+            base_values.extend(models)
         if client_id:
             base_where.append("t.client_id = ?")
             base_values.append(client_id)
@@ -1293,13 +1649,14 @@ class RouteTraceStore:
         )
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         query = f"""
-            SELECT t.*,
+            SELECT t.*, p.result_json AS privacy_result,
                    r.verdict AS review_verdict,
                    r.expected_task AS review_expected_task,
                    r.expected_model AS review_expected_model,
                    r.note AS review_note,
                    r.created_at AS reviewed_at
             FROM route_traces t
+            LEFT JOIN privacy_assessments p ON p.request_id = t.request_id
             LEFT JOIN route_reviews r ON r.id = (
                 SELECT MAX(latest.id)
                 FROM route_reviews latest
@@ -1336,6 +1693,8 @@ class RouteTraceStore:
         has_more = len(rows) > limit
         rows = rows[:limit]
         items = [self._summary(row) for row in rows]
+        for item, row in zip(items, rows):
+            item["privacy_assessment"] = self._privacy_result(row["privacy_result"])
         next_cursor = None
         if has_more and rows:
             next_cursor = _encode_cursor(
@@ -1738,6 +2097,16 @@ class RouteTraceStore:
                     "DELETE FROM route_reviews WHERE request_id = ?",
                     ((item,) for item in request_ids),
                 )
+                for table in ("privacy_assessments", "privacy_feedback"):
+                    connection.executemany(
+                        f"DELETE FROM {table} WHERE request_id = ?",
+                        ((item,) for item in request_ids),
+                    )
+            connection.execute(
+                """DELETE FROM privacy_assessments WHERE updated_at < ?
+                   AND NOT EXISTS (SELECT 1 FROM route_traces t WHERE t.request_id=privacy_assessments.request_id)""",
+                (cutoff,),
+            )
             cursor = connection.execute(
                 "DELETE FROM route_traces WHERE started_at < ?",
                 (cutoff,),

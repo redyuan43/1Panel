@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>媒体任务 · SIYUAN</title>
+  <link rel="stylesheet" href="/assets/media.css">
+</head>
+<body>
+  <header>
+    <a href="/" class="brand">SIYUAN</a><h1>媒体任务</h1>
+    <form id="login"><label>Admin Key <input id="key" type="password" autocomplete="off"></label><button>连接</button></form>
+  </header>
+  <nav aria-label="媒体视图">
+    <button data-view="images" aria-selected="true">图片</button>
+    <button data-view="videos" aria-selected="false">视频</button>
+    <button data-view="settings" aria-selected="false">设置与授权</button>
+    <a href="/">返回控制台</a>
+    <button id="refresh" title="刷新" aria-label="刷新">↻</button>
+  </nav>
+  <p id="notice" role="status"></p>
+  <main>
+    <section id="images" class="view">
+      <div class="workspace">
+        <form id="image-form" class="editor">
+          <h2>图片生成</h2>
+          <label>操作 <select name="operation"><option value="generations">生成</option><option value="edits">编辑</option></select></label>
+          <label>模型 <select name="model"><option>siyuan-image</option><option>qwen-image-3.0-pro</option></select></label>
+          <label>用途 <select name="use_case"><option value="photo">照片</option><option value="product">产品</option><option value="ui">界面</option><option value="infographic">信息图</option><option value="illustration">插画</option><option value="logo">标志</option></select></label>
+          <div class="pair">
+            <label>画幅 <select name="aspect_ratio"><option value="auto">自动</option><option value="square">方形</option><option value="landscape">横向</option><option value="portrait">纵向</option></select></label>
+            <label>背景 <select name="background"><option value="auto">自动</option><option value="transparent">透明</option><option value="opaque">不透明</option></select></label>
+          </div>
+          <label>提示词 <textarea name="prompt" rows="7" maxlength="16000" required></textarea></label>
+          <label id="image-upload" hidden>参考图（1–5 张）<input name="image" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+          <div id="reference-previews" class="reference-previews"></div>
+          <button type="submit" class="primary">生成图片</button>
+        </form>
+        <div class="history"><h2>图片历史</h2><div id="image-list" class="task-list"></div><button id="image-more" hidden>加载更多</button></div>
+      </div>
+    </section>
+    <section id="videos" class="view" hidden>
+      <div class="workspace">
+        <form id="video-form" class="editor">
+          <h2>新建视频</h2>
+          <label>名称 <input name="name" maxlength="200" value="Video"></label>
+          <label>提示词 <textarea name="prompt" rows="5" maxlength="16000" required></textarea></label>
+          <div class="pair">
+            <label>模式 <select name="mode"><option value="t2v">文生视频</option><option value="i2v">首帧</option><option value="l2v">尾帧</option><option value="fl2v">首尾帧</option><option value="reference">参考素材</option><option value="hybrid">混合</option></select></label>
+            <label>策略 <select name="strategy"><option value="fast">快速</option><option value="safe">质量验证</option><option value="cloud">云端</option></select></label>
+          </div>
+          <div class="pair">
+            <label>时长（秒）<input name="duration" type="number" min="4" max="15" value="4" required></label>
+            <label>种子 <input name="seed" type="number" value="-1" required></label>
+          </div>
+          <label>音频 <select name="audio_policy"><option value="native">原生</option><option value="reference">参考音频</option><option value="lock_source">锁定源音频</option></select></label>
+          <div class="assets">
+            <label>首帧 <input name="first_frame" type="file" accept="image/*"></label>
+            <label>尾帧 <input name="last_frame" type="file" accept="image/*"></label>
+            <label>参考图 <input name="reference_image" type="file" accept="image/*"></label>
+            <label>参考视频 <input name="reference_video" type="file" accept="video/mp4,video/webm"></label>
+            <label>参考音频 <input name="reference_audio" type="file" accept="audio/*"></label>
+          </div>
+          <label class="check"><input name="use_embedded_video_audio" type="checkbox">使用参考视频内置音频</label>
+          <label class="check"><input name="watermark" type="checkbox">水印</label>
+          <label class="check"><input id="cloud-consent" type="checkbox" required>确认启动可能计费的 Context IR</label>
+          <button type="submit" class="primary">创建并启动 Context IR</button>
+        </form>
+        <div class="history"><h2>视频任务</h2><div id="video-list" class="task-list"></div><button id="video-more" hidden>加载更多</button></div>
+      </div>
+    </section>
+    <section id="settings" class="view" hidden>
+      <div class="workspace">
+        <form id="settings-form" class="editor">
+          <h2>媒体设置</h2>
+          <div id="settings-fields"></div>
+          <button type="submit" class="primary">保存媒体设置</button>
+        </form>
+        <section class="history"><h2>客户端授权</h2><div id="client-grants"></div></section>
+      </div>
+      <form id="purge-form" class="editor"><h2>归档清理</h2>
+        <label>已删除的任务 ID <input name="job_id" required pattern="(img|vid)_[a-f0-9]{32}"></label>
+        <button type="submit">永久清理该任务的归档文件</button>
+      </form>
+    </section>
+    <section id="detail" hidden>
+      <div class="detail-heading"><h2 id="detail-title"></h2><code id="detail-id"></code><button id="cancel-image" hidden>取消生成</button><button id="delete" title="删除任务" aria-label="删除任务">删除</button></div>
+      <div id="detail-meta"></div><div id="detail-output"></div><div id="stages"></div>
+      <details id="versions"><summary>历史产物</summary><div id="version-list"></div></details>
+    </section>
+  </main>
+  <script src="/assets/media.js"></script>
+</body>
+</html>

@@ -387,6 +387,7 @@ class ClientPolicy:
     max_parallel_requests: int
     allow_compaction: bool = False
     disclosure_mode: str = "internal"
+    media_models: tuple[str, ...] = ()
 
 
 @dataclass

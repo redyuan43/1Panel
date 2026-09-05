@@ -46,6 +46,7 @@ from .identity import (
     sanitize_value,
 )
 from .media import inspect_image_inputs, normalize_ai_images
+from .media_service.gateway import model_descriptors as media_model_descriptors, router as media_router
 from .policy import updated_conversation_state
 from .protocol import normalize_llama_tool_schemas, normalize_request
 from .public_protocol import private_history_items
@@ -106,6 +107,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         redoc_url=None,
         lifespan=lifespan,
     )
+    app.include_router(media_router())
 
     @app.exception_handler(RouterError)
     async def router_error_handler(
@@ -217,6 +219,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 ):
                     continue
                 values.append(await _model_descriptor(current, model))
+        values.extend(media_model_descriptors(client.policy))
         return JSONResponse(
             {"object": "list", "data": values},
             headers={
@@ -2177,11 +2180,16 @@ async def _acquire_route_capacity(
             and not history_precompacted
         ):
             carried_capsule = capsule
-            body = routed_body
             prompt_tokens = decision.prompt_tokens
-            requested_context_tokens = (
-                decision.prompt_tokens + output_reserve_tokens
-            )
+            if "tools" in body and routed_body.get("tools") != body["tools"]:
+                # Re-selection must start with backend-neutral tool definitions.
+                routed_body = {**routed_body, "tools": body["tools"]}
+                prompt_tokens = current.token_counter.count_request(
+                    identity.inject(routed_body, api_kind),
+                    api_kind,
+                )
+            body = routed_body
+            requested_context_tokens = prompt_tokens + output_reserve_tokens
             conversation = None
             history_precompacted = True
             await lease.release_deployment()
@@ -2558,11 +2566,21 @@ async def _send_upstream(
         headers["X-1Panel-Conversation-ID"] = conversation_id
     if request.headers.get("x-litellm-session-id"):
         headers["x-litellm-session-id"] = request.headers["x-litellm-session-id"]
+    timeout = current.internal_client.timeout
+    read_timeout = decision.endpoint.metadata.get("upstream_read_timeout_seconds")
+    if read_timeout is not None:
+        timeout = httpx.Timeout(
+            connect=timeout.connect,
+            read=float(read_timeout),
+            write=timeout.write,
+            pool=timeout.pool,
+        )
     upstream_request = current.internal_client.build_request(
         "POST",
         url,
         headers=headers,
         json=payload,
+        timeout=timeout,
     )
     return await current.internal_client.send(upstream_request, stream=True)
 

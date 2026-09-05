@@ -1,0 +1,7 @@
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+USER root
+RUN pip install --no-cache-dir python-multipart==0.0.27
+COPY ai_router /app/ai_router
+RUN chmod -R a+rX /app/ai_router
+USER router

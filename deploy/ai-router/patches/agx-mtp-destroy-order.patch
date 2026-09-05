@@ -1,0 +1,19 @@
+diff --git a/tools/server/server-context.cpp b/tools/server/server-context.cpp
+--- a/tools/server/server-context.cpp
++++ b/tools/server/server-context.cpp
+@@ -702,13 +702,13 @@
+     void destroy() {
+-        llama_init.reset();
+-
+         for (server_slot & slot : slots) {
+             if (slot.can_speculate()) {
+                 slot.spec.reset();
+             }
+         }
+ 
++        llama_init.reset();
++
+         ctx = nullptr;
+         model = nullptr;
+ 
+         mtmd_free(mctx);

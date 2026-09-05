@@ -33,6 +33,15 @@ Agent 与第三方调用示例见
 - 图片和音频二进制数据不按 Base64 文本计入 TPM；媒体使用独立保守 Token
   估算，请求体大小由 32 MiB 上限单独保护
 
+## 生图与分阶段视频
+
+媒体能力由独立的 `media-adapter.service` 提供，不进入文字智能路由或会话压缩。
+`siyuan-image` 通过已有 ChatGPT 登录的 Codex App Server 生图、改图；
+`siyuan-video` 连接 H3，每个阶段的产物经 Router 返回，批准与下一阶段启动分离。
+控制台入口为 `/media`，现有客户端需显式配置 `media_models`，不会自动扩权。
+源码默认关闭；接口、部署和当前真实验收状态分别见
+[Media API](docs/media-api.md) 和 [2026-09-04 验收记录](docs/media-live-acceptance-2026-09-04.md)。
+
 ## 客户端账号与 API Key
 
 控制台的“客户端账号”页用于给 WorkBuddy、HA、Checkboard、AI Agent 和第三方
@@ -69,19 +78,35 @@ POST  /api/clients/{client_id}/keys/{key_id}/revoke
 控制台一级导航“路由审计”展示认证后请求的真实决策轨迹。页面默认筛选
 `model=auto` 与未审核请求，可按客户端、会话、画像、实际模型、结果和审核
 状态过滤。流程图由项目内置 Mermaid 渲染，不依赖公网 CDN；多次故障回退按
-attempt 分段展示。主图使用横向布局，只呈现候选资格、会话亲和、Provider
-优先级、评分、容量和最终模型等智能路由核心；认证或请求校验等外围结果作为
-结构化证据展示，不伪装成路由失败。节点可展开候选快照、拒绝原因、容量、
-上下文和评分证据。
+attempt 分段展示。
+
+流程图默认使用**简明视图**（12 个节点）：会话链路解析（新建/续接/压缩
+重置）→ 身份询问拦截判断 → 任务评估 → 候选资格筛选 → 会话亲和 →
+（legacy_v1 Provider 优先 / intelligent_v2 本地优先与云端分流）→ 选定模型 →
+部署与容量核验 → 最终路由模型或身份直答。身份询问拦截命中时也会显示完整
+流程图，终点是“身份直答”而不是某个具体模型。流程图控件左侧的“简明 / 详细”
+切换可展开原有的 17 节点详细视图（候选资格子原因、容量、历史预检、协议
+准备等机械细节），两者按需懒加载并各自缓存，切换不丢失当前高亮。
+
+选中一条属于某个会话的请求后，流程图上方会显示该会话的**逐轮时间线**：
+横向卡片按时间顺序列出这个会话目前留存的每一轮请求，标注请求模型、实际
+路由模型、链路关系（新建/续接/压缩重置）、状态与隐私旁路徽标；点击某张
+卡片即可切换到那一轮的完整轨迹与流程图高亮，不必逐条从左侧列表里翻找。
+时间线每批读取 100 轮，超过时可加载更早轮次；计数区分已加载与留存总数，
+后台刷新不会收回已加载的旧轮次。隔离浏览器验收见
+[`docs/control-ui-validation.md`](docs/control-ui-validation.md)。
 
 控制面接口均使用 `AI_ROUTER_ADMIN_KEY`：
 
 ```text
-GET  /api/route-graph
+GET  /api/route-graph?mode=simple|detailed
 GET  /api/route-traces
 GET  /api/route-traces/{request_id}
 POST /api/route-traces/{request_id}/reviews
 ```
+
+`GET /api/route-graph` 的 `mode` 默认为 `simple`；`detailed` 返回原有的
+17 节点调试视图。
 
 `GET /api/route-traces` 使用游标分页，支持 `node`、`status`、客户端、会话、
 画像、模型和 ID 搜索等服务端过滤，并返回过滤结果的 `total_count`。控制台

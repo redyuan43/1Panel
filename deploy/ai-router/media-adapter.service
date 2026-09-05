@@ -1,0 +1,20 @@
+[Unit]
+Description=SIYUAN Media Adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ai/.local/share/ai-router-media/current
+EnvironmentFile=/home/ai/.config/ai-router-media/service.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PATH=/home/ai/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/ai/.local/share/ai-router-media/venv/bin/python -m uvicorn ai_router.media_service.app:app --host 127.0.0.1 --port 14020 --no-server-header --no-access-log
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

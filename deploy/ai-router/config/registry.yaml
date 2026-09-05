@@ -248,6 +248,63 @@ endpoints:
       vision_projector: mmproj-F16.gguf
       image_min_tokens: 1024
 
+  - id: agx-qwen36-cerebellum-256k
+    public_model: deucebucket/Qwen3.6-35B-A3B-Cerebellum-Q3_K_M
+    provider_model: Cerebellum-v1-Q3_K_M.gguf
+    api_base: http://agx.taild500c8.ts.net:8080/v1
+    node: agx
+    role: responder
+    tier: local-general
+    tier_rank: 20
+    modalities:
+      - text
+      - image
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 262144
+    configured_context_tokens: 262144
+    max_concurrency: 1
+    backend_type: llama_cpp
+    health_url: http://agx.taild500c8.ts.net:8080/health
+    load_url: http://agx.taild500c8.ts.net:8080/slots
+    backend_api_key_env: AI_ROUTER_AGX_BACKEND_KEY
+    enabled: true
+    auto_candidate: false
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      tool_choice_modes:
+        - auto
+        - none
+        - required
+        - function
+      structured_output:
+        - json_schema
+      streaming: true
+      validation_status: live-validated-chat-responses-tools-json-schema
+      validated_at: "2026-09-04"
+    quality: {}
+    metadata:
+      context_status: live-261493-token-cold-retrieval-validated-2026-09-04
+      upstream_read_timeout_seconds: 1800
+      quality_status: unbenchmarked
+      acceptance_report: /home/ai/.local/state/ai-router-acceptance/20260904-agx256k
+      service_unit: agx-cerebellum.service
+      model_artifact: /data/models/Cerebellum-v1-Q3_K_M.gguf
+      quantization: Q3_K_M-mixed-precision
+      kv_cache: q8_0/q8_0
+      speculative_method: none
+      topology: Jetson-AGX-Orin-single-integrated-GPU
+      vision_status: user-enabled-live-validation-pending
+      vision_context_status: unverified
+      vision_projector: /data/models/Cerebellum-mmproj-BF16.gguf
+      json_object_status: failed-markdown-fence-2026-09-04
+
   - id: codex-pro-gpt-5.6-sol
     public_model: codex-pro/gpt-5.6-sol
     provider_model: gpt-5.6-sol

@@ -194,6 +194,12 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
     missing = sorted(required - set(value))
     if missing:
         raise ValueError(f"registry endpoint is missing: {', '.join(missing)}")
+    metadata_value = value.get("metadata", {}) or {}
+    if not isinstance(metadata_value, dict):
+        raise ValueError("endpoint metadata must be an object")
+    read_timeout = metadata_value.get("upstream_read_timeout_seconds")
+    if read_timeout is not None and not 1 <= float(read_timeout) <= 3600:
+        raise ValueError("endpoint upstream_read_timeout_seconds must be between 1 and 3600")
     capabilities_value = value.get("capabilities", {}) or {}
     if not isinstance(capabilities_value, dict):
         raise ValueError("endpoint capabilities must be an object")
@@ -293,7 +299,7 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
         ),
         deployment_profiles=deployment_profiles,
         quality={str(key): float(score) for key, score in (value.get("quality", {}) or {}).items()},
-        metadata=copy.deepcopy(value.get("metadata", {}) or {}),
+        metadata=copy.deepcopy(metadata_value),
     )
 
 

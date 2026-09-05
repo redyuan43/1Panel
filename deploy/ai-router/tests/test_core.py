@@ -79,6 +79,7 @@ from ai_router.route_trace import (
     RouteTraceStore,
     graph_document,
     registry_fingerprint,
+    remap_attempt_steps,
     request_excerpt,
     settings_fingerprint,
 )
@@ -379,7 +380,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 7
+    assert len(registry.endpoints) == 8
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
@@ -3410,19 +3411,26 @@ def test_evaluator_capacity_acquisition_does_not_wait(
 
 def test_validated_vision_endpoints_are_registered_for_images() -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
-    expected = {
+    validated = {
         "ai-qwen38-27b",
         "ivan-qwen38-flash-128k",
         "amd-qwen38-rocmfpx-128k",
         "codex-pro-gpt-5.6-sol",
         "zhipu-glm-5.3-flash",
     }
+    pending_validation = {
+        "agx-qwen36-cerebellum-256k": "user-enabled-live-validation-pending",
+    }
     actual = {
         endpoint.id
         for endpoint in registry.endpoints
         if "image" in endpoint.modalities
     }
-    assert actual == expected
+    assert actual == validated | pending_validation.keys()
+    assert {
+        endpoint_id: registry.by_id(endpoint_id).metadata["vision_status"]
+        for endpoint_id in pending_validation
+    } == pending_validation
 
 
 def test_models_endpoint_reports_vision_capabilities(
@@ -6730,8 +6738,87 @@ def test_control_api_rejects_invalid_runtime_settings(
             headers={"Authorization": "Bearer admin-key"},
             json=payload,
         )
+
+        reordered = client.get(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+        ).json()["settings"]
+        general_order = reordered["routing"]["remote_fallback_order"]["general"]
+        reordered["routing"]["remote_fallback_order"]["general"] = list(
+            reversed(general_order)
+        )
+        fallback_saved = client.put(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+            json=reordered,
+        )
+        fallback_reloaded = client.get(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+
+        review_payload = fallback_reloaded.json()["settings"]
+        review_payload["identity"]["review"] = {
+            **review_payload["identity"]["review"],
+            "mode": "shadow",
+            "requests_per_minute": 2,
+        }
+        review_saved = client.put(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+            json=review_payload,
+        )
+        review_reloaded = client.get(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+        )
+
+        bad_rpm_payload = review_reloaded.json()["settings"]
+        bad_rpm_payload["identity"]["review"]["requests_per_minute"] = 5
+        bad_rpm = client.put(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+            json=bad_rpm_payload,
+        )
+
+        bad_url_payload = review_reloaded.json()["settings"]
+        bad_url_payload["identity"]["review"]["requests_per_minute"] = 2
+        bad_url_payload["identity"]["review"]["base_url"] = (
+            "https://example.com"
+        )
+        bad_url = client.put(
+            "/api/settings",
+            headers={"Authorization": "Bearer admin-key"},
+            json=bad_url_payload,
+        )
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "invalid_settings"
+    assert fallback_saved.status_code == 200
+    assert (
+        fallback_saved.json()["settings"]["routing"]["remote_fallback_order"][
+            "general"
+        ]
+        == list(reversed(general_order))
+    )
+    assert (
+        fallback_reloaded.json()["settings"]["routing"][
+            "remote_fallback_order"
+        ]["general"]
+        == list(reversed(general_order))
+    )
+    assert review_saved.status_code == 200
+    assert (
+        review_saved.json()["settings"]["identity"]["review"]["mode"]
+        == "shadow"
+    )
+    assert (
+        review_reloaded.json()["settings"]["identity"]["review"]["mode"]
+        == "shadow"
+    )
+    assert bad_rpm.status_code == 400
+    assert bad_rpm.json()["error"]["code"] == "invalid_settings"
+    assert bad_url.status_code == 400
+    assert bad_url.json()["error"]["code"] == "invalid_settings"
 
 
 def test_legacy_client_key_import_and_revocation_survive_restart(
@@ -8022,7 +8109,7 @@ def test_control_dashboard_aggregates_runtime_state(
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["summary"]["healthy_endpoints"] == 7
+    assert payload["summary"]["healthy_endpoints"] == len(registry.endpoints)
     assert payload["summary"]["ready_workers"] == 2
     assert payload["summary"]["active_requests"] == 1
     assert payload["summary"]["success_rate"] == 1
@@ -8523,6 +8610,16 @@ def test_control_route_trace_api_and_review_validation(
             "/api/route-graph",
             headers={"Authorization": "Bearer admin-key"},
         )
+        graph_detailed = client.get(
+            "/api/route-graph",
+            headers={"Authorization": "Bearer admin-key"},
+            params={"mode": "detailed"},
+        )
+        graph_invalid_mode = client.get(
+            "/api/route-graph",
+            headers={"Authorization": "Bearer admin-key"},
+            params={"mode": "bogus"},
+        )
         listing = client.get(
             "/api/route-traces",
             headers={"Authorization": "Bearer admin-key"},
@@ -8564,14 +8661,22 @@ def test_control_route_trace_api_and_review_validation(
     assert "mermaid" in mermaid_asset.text[:1000].lower()
     assert graph.status_code == 200
     assert graph.json()["graph_version"] == 3
+    assert graph.json()["mode"] == "simple"
     assert "flowchart LR" in graph.json()["mermaid"]
     assert "direction LR" in graph.json()["mermaid"]
     assert "flowchart TD" not in graph.json()["mermaid"]
-    assert len(graph.json()["nodes"]) == 17
+    assert len(graph.json()["nodes"]) == 12
     assert "智能路由核心" in graph.json()["mermaid"]
     assert "upstream_request" not in {
         item["id"] for item in graph.json()["nodes"]
     }
+    assert graph_detailed.status_code == 200
+    assert graph_detailed.json()["mode"] == "detailed"
+    assert len(graph_detailed.json()["nodes"]) == 17
+    assert "upstream_request" not in {
+        item["id"] for item in graph_detailed.json()["nodes"]
+    }
+    assert graph_invalid_mode.status_code == 400
     assert listing.status_code == 200
     assert listing.json()["items"][0]["request_id"] == "control-trace-1"
     assert listing.json()["total_count"] == 1
@@ -8584,10 +8689,172 @@ def test_control_route_trace_api_and_review_validation(
     assert missing_node_listing.json()["items"] == []
     assert missing_node_listing.json()["total_count"] == 0
     assert detail.status_code == 200
+    assert "simple_steps" in detail.json()["trace"]["attempts"][0]
     assert invalid.status_code == 400
     assert reviewed.status_code == 200
     assert reviewed.json()["review"]["verdict"] == "incorrect"
     run(runtime.close())
+
+
+def test_remap_attempt_steps_covers_core_scenarios() -> None:
+    intelligent_v2 = DecisionTrace(
+        request_id="remap-1",
+        client_id="1panel",
+        key_id="key-1",
+        protocol="chat",
+        requested_model="auto",
+        excerpt={"text": "hello", "tool_names": []},
+        instance_id="router-1",
+        boot_id="boot-1",
+        settings_hash="settings-hash",
+        registry_hash="registry-hash",
+    )
+    intelligent_v2.set_request_context(
+        conversation_id="conversation-1",
+        branch_id="branch-1",
+        lineage_relation="new",
+    )
+    intelligent_v2.set_evaluation(Evaluation("general", None, 1, "test"))
+    intelligent_v2.record(
+        1, "candidate_scope", "passed", branch="auto",
+        reason="candidate_scope", evidence={},
+    )
+    intelligent_v2.record(
+        1, "conversation_affinity", "evaluated", branch="intelligent_v2",
+        reason="no_bound_conversation", evidence={},
+    )
+    intelligent_v2.record(
+        1, "local_sufficiency", "passed", branch="local_sufficient",
+        reason="local_candidates_available", evidence={},
+    )
+    intelligent_v2.record(
+        1, "score_candidates", "passed", reason="scored", evidence={},
+    )
+    intelligent_v2.record(
+        1, "deployment_binding", "passed", reason="bound", evidence={},
+    )
+    intelligent_v2.record(
+        1, "capacity_check", "passed",
+        reason="capacity_acquired", evidence={},
+    )
+    intelligent_v2.set_selection(
+        attempt=1,
+        selected_model="huihui/Qwen3.8-27B-Q4-DFlash2",
+        endpoint_id="ai-qwen38-27b",
+        deployment_id="deployment-1",
+        task="general",
+        reason="local_sufficient",
+        affinity="new",
+    )
+    intelligent_v2.confirm_selection(attempt=1)
+    v2_attempt = intelligent_v2.payload["attempts"][0]
+    v2_simple = remap_attempt_steps(intelligent_v2.payload, v2_attempt)
+    assert [item["node_id"] for item in v2_simple] == [
+        "lineage_resolution",
+        "identity_disclosure_check",
+        "intake_evaluation",
+        "candidate_scope",
+        "conversation_affinity",
+        "intelligent_v2_dispatch",
+        "select_endpoint",
+        "deployment_and_capacity",
+        "route_selected",
+    ]
+    assert v2_simple[0]["branch"] == "new"
+    assert v2_simple[1]["branch"] == "continue"
+    assert all(item["path"] for item in v2_simple)
+
+    intercepted = DecisionTrace(
+        request_id="remap-2",
+        client_id="1panel",
+        key_id="key-1",
+        protocol="chat",
+        requested_model="auto",
+        excerpt={"text": "who are you", "tool_names": []},
+        instance_id="router-1",
+        boot_id="boot-1",
+        settings_hash="settings-hash",
+        registry_hash="registry-hash",
+    )
+    intercepted.set_request_context(
+        conversation_id="conversation-2",
+        branch_id="branch-2",
+        lineage_relation="continuation",
+    )
+    intercepted.finish_identity_intercept(
+        status_code=200, input_tokens=10, output_tokens=20,
+    )
+    intercepted_attempt = intercepted.payload["attempts"][0]
+    intercepted_simple = remap_attempt_steps(
+        intercepted.payload, intercepted_attempt,
+    )
+    assert [item["node_id"] for item in intercepted_simple] == [
+        "lineage_resolution",
+        "identity_disclosure_check",
+        "identity_answered",
+    ]
+    assert intercepted_simple[0]["branch"] == "continuation"
+    assert intercepted_simple[1]["branch"] == "intercepted"
+
+    explicit = DecisionTrace(
+        request_id="remap-3",
+        client_id="1panel",
+        key_id="key-1",
+        protocol="chat",
+        requested_model="huihui/Qwen3.8-27B-Q4-DFlash2",
+        excerpt={"text": "hello", "tool_names": []},
+        instance_id="router-1",
+        boot_id="boot-1",
+        settings_hash="settings-hash",
+        registry_hash="registry-hash",
+    )
+    explicit.set_request_context(
+        conversation_id="conversation-3",
+        branch_id="branch-3",
+        lineage_relation="new",
+    )
+    explicit.set_evaluation(Evaluation("general", None, 1, "test"))
+    explicit.record(
+        1, "candidate_scope", "passed", branch="explicit",
+        reason="candidate_scope", evidence={},
+    )
+    explicit.record(
+        1, "conversation_affinity", "evaluated", branch="legacy_v1",
+        reason="no_bound_conversation", evidence={},
+    )
+    explicit.record(
+        1, "explicit_selection", "passed",
+        reason="explicit_model", evidence={},
+    )
+    explicit.record(
+        1, "deployment_binding", "passed", reason="bound", evidence={},
+    )
+    explicit.set_selection(
+        attempt=1,
+        selected_model="huihui/Qwen3.8-27B-Q4-DFlash2",
+        endpoint_id="ai-qwen38-27b",
+        deployment_id="deployment-1",
+        task="general",
+        reason="explicit_model",
+        affinity="new",
+        strategy_version="legacy_v1",
+    )
+    explicit.confirm_selection(attempt=1)
+    explicit_attempt = explicit.payload["attempts"][0]
+    explicit_simple = remap_attempt_steps(explicit.payload, explicit_attempt)
+    assert [item["node_id"] for item in explicit_simple] == [
+        "lineage_resolution",
+        "identity_disclosure_check",
+        "intake_evaluation",
+        "candidate_scope",
+        "conversation_affinity",
+        "select_endpoint",
+        "deployment_and_capacity",
+        "route_selected",
+    ]
+
+    empty_payload = {"lineage_relation": None, "identity_intercepted": False}
+    assert remap_attempt_steps(empty_payload, {"steps": []}) == []
 
 
 def test_router_persists_real_decision_trace_without_changing_route(

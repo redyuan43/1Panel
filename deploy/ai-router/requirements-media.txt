@@ -1,0 +1,8 @@
+fastapi==0.124.4
+httpx==0.28.1
+Pillow==11.3.0
+python-multipart==0.0.27
+tomli==2.2.1; python_version < "3.11"
+async-timeout==5.0.1; python_version < "3.11"
+uvicorn==0.33.0
+websockets==15.0.1

@@ -4,6 +4,8 @@ const state = {
   dashboard: null,
   clients: [],
   routeGraph: null,
+  routeGraphMode: "simple",
+  routeGraphCache: {},
   routeTraces: [],
   routeTraceCursor: null,
   requestTraces: [],
@@ -34,6 +36,15 @@ const viewTitles = {
   clients: "客户端账号",
   settings: "策略设置",
 };
+
+const FALLBACK_PROFILES = [
+  ["general", "通用对话"],
+  ["agent_text", "Agent 文本"],
+  ["code", "代码"],
+  ["complex_code", "复杂代码"],
+  ["multimodal", "多模态"],
+  ["multimodal_complex_code", "多模态复杂代码"],
+];
 
 const weightLabels = {
   quality: "质量",
@@ -98,12 +109,14 @@ const reviewLabels = {
 
 const traceNodeLabels = {};
 let traceGraphRenderKey = "";
+let traceSelectionSequence = 0;
 let traceGraphRenderSequence = 0;
 let traceGraphScale = 1;
 let traceGraphNeedsInitialFocus = false;
 let traceSearchTimer = null;
 let requestSearchTimer = null;
 let requestTraceLoadSequence = 0;
+const conversationTurnLoads = new Map();
 const REQUEST_PAGE_SIZE = 30;
 
 const byId = (id) => document.getElementById(id);
@@ -149,6 +162,7 @@ async function connect() {
   notice("正在连接控制面...");
   try {
     await Promise.all([loadDashboard(), loadSettings(), loadClients()]);
+    renderRemoteFallbackOrder();
     setConnected(true);
     notice("");
     startPolling();
@@ -1398,6 +1412,7 @@ function requestRoundRow(item) {
       <td>${formatTime(item.started_at)}</td>
       <td>
         <code class="request-id-full">${escapeHtml(item.request_id || "—")}</code>
+        <button class="privacy-trace-link" type="button" data-privacy-trace="${escapeHtml(item.request_id)}" title="查看隐私审核与纠偏">${privacyBadge(item.privacy_assessment)}</button>
         <span class="table-secondary request-id-full">分支 ${escapeHtml(item.branch_id || "—")}</span>
         <span class="table-secondary request-id-full">父分支 ${escapeHtml(item.parent_branch_id || "—")}</span>
         <span class="table-secondary">${requestLineageLabel(item)}</span>
@@ -1435,6 +1450,20 @@ function requestLineageLabel(item) {
 }
 
 function bindRequestTableActions() {
+  byId("request-table").querySelectorAll("[data-privacy-trace]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      byId("trace-mode-filter").value = "all";
+      byId("trace-review-filter").value = "";
+      byId("trace-privacy-filter").value = "";
+      byId("trace-client-filter").value = "";
+      byId("trace-task-filter").value = "";
+      byId("trace-model-filter").value = "";
+      byId("trace-status-filter").value = "";
+      byId("trace-search").value = button.dataset.privacyTrace;
+      await switchView("audit");
+      await selectRouteTrace(button.dataset.privacyTrace);
+    });
+  });
   byId("request-table").querySelectorAll(
     "[data-request-conversation]",
   ).forEach((button) => {
@@ -1479,10 +1508,32 @@ async function toggleRequestConversation(conversationId) {
   }
 }
 
-async function loadConversationPage(conversationId, cursor = null) {
+async function fetchConversationTurns(conversationId, cursor = null, preserveEarlier = false) {
+  const pending = conversationTurnLoads.get(conversationId);
+  if (pending?.cursor === cursor && pending.preserveEarlier === preserveEarlier) {
+    return pending.promise;
+  }
+  // Serialize refresh and pagination for this conversation; other conversations stay independent.
+  const promise = (pending?.promise || Promise.resolve()).then(
+    () => fetchConversationTurnsPage(conversationId, cursor, preserveEarlier),
+  );
+  const load = {cursor, preserveEarlier, promise};
+  conversationTurnLoads.set(conversationId, load);
+  try {
+    await promise;
+  } finally {
+    if (conversationTurnLoads.get(conversationId) === load) {
+      conversationTurnLoads.delete(conversationId);
+    }
+  }
+}
+
+async function fetchConversationTurnsPage(conversationId, cursor, preserveEarlier) {
   const current = state.requestConversationPages.get(conversationId);
   state.requestConversationPages.set(conversationId, {
+    items: [],
     ...(current || {}),
+    loading: true,
     error: null,
   });
   try {
@@ -1493,7 +1544,13 @@ async function loadConversationPage(conversationId, cursor = null) {
         limit: 100,
       })}`,
     );
-    const combined = cursor
+    const fresh = payload.items || [];
+    const previousIds = new Set((current?.items || []).map((item) => item.request_id));
+    const keepEarlier = !cursor && preserveEarlier
+      && (current?.items?.length || 0) > fresh.length
+      && Number(payload.total_count) >= Number(current?.totalCount || 0)
+      && fresh.some((item) => previousIds.has(item.request_id));
+    const combined = cursor || keepEarlier
       ? [...(current?.items || []), ...(payload.items || [])]
       : (payload.items || []);
     const unique = new Map(
@@ -1507,17 +1564,31 @@ async function loadConversationPage(conversationId, cursor = null) {
     );
     state.requestConversationPages.set(conversationId, {
       items,
-      nextCursor: payload.next_cursor || null,
+      nextCursor: keepEarlier ? current.nextCursor : (payload.next_cursor || null),
       totalCount: Number(payload.total_count || items.length),
+      loading: false,
       error: null,
     });
   } catch (error) {
     state.requestConversationPages.set(conversationId, {
+      items: [],
       ...(current || {}),
+      loading: false,
       error: error.message,
     });
   }
+}
+
+async function loadConversationPage(conversationId, cursor = null) {
+  await fetchConversationTurns(conversationId, cursor);
   renderRequestTable();
+}
+
+async function loadTraceTimeline(conversationId, cursor = null) {
+  await fetchConversationTurns(conversationId, cursor, true);
+  if (state.selectedTrace?.conversation_id === conversationId) {
+    renderTraceTimeline();
+  }
 }
 
 async function loadEarlierConversation(conversationId) {
@@ -1563,19 +1634,48 @@ async function loadRouteAudit(silent = false) {
       state.routeGraph ? Promise.resolve() : loadRouteGraph(),
       loadRouteTraces(true),
     ]);
+    if (traceEnteredRouting(state.selectedTrace)) await ensureTraceGraphRendered();
     if (!silent) notice("");
   } catch (error) {
     if (!silent) notice(error.message, true);
   }
 }
 
-async function loadRouteGraph() {
-  state.routeGraph = await api("/api/route-graph");
+async function loadRouteGraph(mode = state.routeGraphMode || "simple") {
+  const graph = await api(`/api/route-graph?mode=${encodeURIComponent(mode)}`);
+  activateTraceGraph(graph, mode);
+}
+
+function activateTraceGraph(graph, mode) {
+  state.routeGraphMode = graph.mode || mode;
+  state.routeGraphCache[state.routeGraphMode] = graph;
+  state.routeGraph = graph;
   Object.keys(traceNodeLabels).forEach((key) => delete traceNodeLabels[key]);
   (state.routeGraph.nodes || []).forEach((node) => {
     traceNodeLabels[node.id] = node.label;
   });
   traceGraphRenderKey = "";
+}
+
+async function setTraceGraphMode(mode) {
+  if (mode === state.routeGraphMode) return;
+  byId("trace-graph-mode-simple").classList.toggle("active", mode === "simple");
+  byId("trace-graph-mode-detailed").classList.toggle("active", mode === "detailed");
+  try {
+    if (state.routeGraphCache[mode]) {
+      activateTraceGraph(state.routeGraphCache[mode], mode);
+    } else {
+      await loadRouteGraph(mode);
+    }
+    traceGraphRenderKey = "";
+    state.selectedTraceNodeId = null;
+    traceGraphNeedsInitialFocus = true;
+    if (state.selectedTrace && traceEnteredRouting(state.selectedTrace)) {
+      await ensureTraceGraphRendered();
+    }
+  } catch (error) {
+    notice(error.message, true);
+  }
 }
 
 function traceFilterQuery(cursor = null) {
@@ -1585,6 +1685,7 @@ function traceFilterQuery(cursor = null) {
   });
   const values = {
     review_status: byId("trace-review-filter").value,
+    privacy_decision: byId("trace-privacy-filter").value,
     client_id: byId("trace-client-filter").value,
     route_profile: byId("trace-task-filter").value,
     selected_model: byId("trace-model-filter").value,
@@ -1617,12 +1718,13 @@ async function loadRouteTraces(silent = false, append = false) {
     const selectedStillVisible = state.routeTraces.some(
       (item) => item.request_id === state.selectedTraceId,
     );
-    if (!append && state.routeTraces.length && !selectedStillVisible) {
+    const keepSelection = silent && state.selectedTrace?.request_id === state.selectedTraceId;
+    if (!append && state.routeTraces.length && !selectedStillVisible && !keepSelection) {
       await selectRouteTrace(state.routeTraces[0].request_id);
-    } else if (!append && !state.routeTraces.length) {
+    } else if (!append && !state.routeTraces.length && !keepSelection) {
       clearTraceDetail();
     } else if (
-      state.selectedTrace?.status === "running" &&
+      !traceReviewInProgress() &&
       state.selectedTraceId
     ) {
       await selectRouteTrace(state.selectedTraceId, true);
@@ -1728,6 +1830,7 @@ function traceListItem(item) {
       <span class="trace-list-tertiary">
         <span title="${escapeHtml(excerpt)}">${escapeHtml(excerpt)}</span>
         ${reviewBadge(item.review_status)}
+        ${privacyBadge(item.privacy_assessment)}
       </span>
     </button>`;
 }
@@ -1743,8 +1846,105 @@ function reviewBadge(value) {
   return `<span class="badge ${tone}"><i></i>${escapeHtml(reviewLabels[value] || value || "未审核")}</span>`;
 }
 
-async function selectRouteTrace(requestId, silent = false) {
+const privacyDecisionLabels = {normal: "正常任务", internal_info: "探询内部信息", uncertain: "无法确定"};
+const privacyReasonLabels = {
+  technical_task: "常规技术任务", internal_identity: "内部身份",
+  internal_infrastructure: "内部架构", ambiguous: "意图不明确",
+  queued: "等待审核", local_busy: "审核器繁忙", shared_busy: "其他实例正在审核",
+  sample_limit: "达到采样限额", view_or_budget: "输入不明确或超出审核预算",
+  review_unavailable: "审核不可用", cancelled: "审核取消", expired: "审核超时或服务重启",
+  backend_busy: "模型繁忙", not_resident: "模型不可用", context_mismatch: "审核上下文不匹配",
+};
+
+const traceReviewFields = {
+  privacy: [
+    ["privacy-feedback-decision", "decision"],
+    ["privacy-feedback-note", "note"],
+  ],
+  routing: [
+    ["trace-review-verdict", "verdict"],
+    ["trace-expected-task", "expected_task"],
+    ["trace-expected-model", "expected_model"],
+    ["trace-review-note", "note"],
+  ],
+};
+
+function traceReviewValues(kind) {
+  return traceReviewFields[kind].map(([id]) => byId(id).value);
+}
+
+function traceReviewHasDraft(kind, trace = state.selectedTrace) {
+  if (!trace) return false;
+  const saved = kind === "privacy" ? trace.privacy_feedback?.[0] : trace.current_review;
+  return traceReviewFields[kind].some(
+    ([id, field]) => byId(id).value !== (saved?.[field] || ""),
+  );
+}
+
+function traceReviewInProgress() {
+  if (byId("privacy-feedback-form").contains(document.activeElement)
+      || byId("trace-review-form").contains(document.activeElement)) return true;
+  return Object.keys(traceReviewFields).some((kind) => traceReviewHasDraft(kind));
+}
+
+function privacyBadge(value) {
+  if (!value) return '<span class="badge neutral">隐私未审核</span>';
+  const label = value.status === "completed"
+    ? privacyDecisionLabels[value.decision] || "无法确定"
+    : {pending: "审核中", skipped: "已跳过", unavailable: "审核不可用"}[value.status] || "未审核";
+  const tone = value.status === "completed" && value.decision === "internal_info" ? "warning" : "neutral";
+  return `<span class="badge ${tone}" title="${escapeHtml(privacyReasonLabels[value.reason] || value.reason || "")}">旁路 · ${escapeHtml(label)}</span>`;
+}
+
+function renderPrivacyAssessment(trace, preserveDraft = false) {
+  const value = trace.privacy_assessment;
+  const fields = value ? [
+    privacyBadge(value),
+    `依据 <strong>${escapeHtml(privacyReasonLabels[value.reason] || value.reason)}</strong>`,
+    `审核模型 <code>${escapeHtml(value.review_model || "—")}</code>`,
+    `策略 <code>${escapeHtml(value.policy_version || "—")}</code>`,
+    `耗时 <strong>${value.elapsed_ms == null ? "—" : formatDuration(value.elapsed_ms)}</strong>`,
+    `输入来源 <code>${escapeHtml(value.source || "—")}</code>`,
+    `审核时间 <strong>${formatTime(value.updated_at)}</strong>`,
+    ...(value.review_request_id ? [`审核请求 <code>${escapeHtml(value.review_request_id)}</code>`] : []),
+  ] : [privacyBadge(null)];
+  byId("trace-privacy-result").innerHTML = fields.map((field) => `<span>${field}</span>`).join("");
+  const feedback = trace.privacy_feedback || [];
+  if (!preserveDraft) {
+    byId("privacy-feedback-decision").value = feedback[0]?.decision || "";
+    byId("privacy-feedback-note").value = feedback[0]?.note || "";
+  }
+  byId("privacy-feedback-history").innerHTML = feedback.map((item) =>
+    `<span>${formatTime(item.created_at)} · 人工：${escapeHtml(privacyDecisionLabels[item.decision])} · ${escapeHtml(item.note || "无备注")}</span>`
+  ).join("");
+}
+
+async function submitPrivacyFeedback(event) {
+  event.preventDefault();
+  const requestId = state.selectedTraceId;
   if (!requestId) return;
+  const submittedReview = {kind: "privacy", values: traceReviewValues("privacy")};
+  const button = byId("privacy-feedback-submit");
+  button.disabled = true;
+  try {
+    await api(`/api/route-traces/${encodeURIComponent(requestId)}/privacy-feedback`, {
+      method: "POST", body: JSON.stringify({
+        decision: byId("privacy-feedback-decision").value,
+        note: byId("privacy-feedback-note").value.trim() || null,
+      }),
+    });
+    notice("隐私复核已保存。");
+    if (state.selectedTraceId === requestId) await selectRouteTrace(requestId, true, submittedReview);
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function selectRouteTrace(requestId, silent = false, submittedReview = null) {
+  if (!requestId) return;
+  const sequence = ++traceSelectionSequence;
   const changed = state.selectedTraceId !== requestId;
   state.selectedTraceId = requestId;
   if (changed) {
@@ -1754,14 +1954,26 @@ async function selectRouteTrace(requestId, silent = false) {
   renderTraceList();
   try {
     const payload = await api(`/api/route-traces/${encodeURIComponent(requestId)}`);
+    if (sequence !== traceSelectionSequence || state.selectedTraceId !== requestId) return;
+    const sameRequest = state.selectedTrace?.request_id === requestId;
+    const preserveReviews = {};
+    for (const kind of Object.keys(traceReviewFields)) {
+      const unchangedSubmission = submittedReview?.kind === kind
+        && JSON.stringify(traceReviewValues(kind)) === JSON.stringify(submittedReview.values);
+      preserveReviews[kind] = sameRequest && traceReviewHasDraft(kind) && !unchangedSubmission;
+    }
     state.selectedTrace = payload.trace;
     const attempts = state.selectedTrace.attempts || [];
     const attemptNumbers = attempts.map((item) => Number(item.number));
     if (!attemptNumbers.includes(state.selectedTraceAttempt)) {
       state.selectedTraceAttempt = Math.max(...attemptNumbers, 1);
+      state.selectedTraceNodeId = null;
     }
-    state.selectedTraceNodeId = null;
-    renderTraceDetail();
+    if (!sameRequest) state.selectedTraceNodeId = null;
+    renderTraceDetail(preserveReviews);
+    if (state.selectedTrace.conversation_id) {
+      void loadTraceTimeline(state.selectedTrace.conversation_id);
+    }
     if (traceEnteredRouting(state.selectedTrace)) {
       await ensureTraceGraphRendered();
     }
@@ -1771,6 +1983,7 @@ async function selectRouteTrace(requestId, silent = false) {
 }
 
 function clearTraceDetail() {
+  traceSelectionSequence += 1;
   state.selectedTraceId = null;
   state.selectedTrace = null;
   state.selectedTraceNodeId = null;
@@ -1778,7 +1991,7 @@ function clearTraceDetail() {
   byId("trace-detail-empty").hidden = false;
 }
 
-function renderTraceDetail() {
+function renderTraceDetail(preserveReviews = {}) {
   const trace = state.selectedTrace;
   if (!trace) {
     clearTraceDetail();
@@ -1814,8 +2027,74 @@ function renderTraceDetail() {
     `注册表 <code>${escapeHtml(trace.registry_fingerprint || "—")}</code>`,
   ].map((item) => `<span>${item}</span>`).join("");
   renderTraceRoutingState(trace);
+  renderTraceTimeline();
+  renderPrivacyAssessment(trace, preserveReviews.privacy);
   renderTraceAttempts();
-  renderTraceCurrentReview();
+  renderTraceCurrentReview(preserveReviews.routing);
+}
+
+function renderTraceTimeline() {
+  const section = byId("trace-timeline-section");
+  const conversationId = state.selectedTrace?.conversation_id;
+  if (!conversationId) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  const page = state.requestConversationPages.get(conversationId);
+  byId("trace-timeline-earlier").hidden = !page?.nextCursor;
+  const stateLabel = byId("trace-timeline-state");
+  const target = byId("trace-timeline");
+  if (!page || (page.loading && !page.items?.length)) {
+    stateLabel.textContent = "正在加载";
+    target.innerHTML = "";
+    return;
+  }
+  if (page.error) {
+    stateLabel.textContent = "加载失败";
+    target.innerHTML = `<p class="empty">${escapeHtml(page.error)}</p>`;
+    return;
+  }
+  const items = page.items || [];
+  const total = Math.max(items.length, page.totalCount || 0);
+  stateLabel.textContent = `已加载 ${items.length} / ${total} 轮`;
+  target.innerHTML = items.map(
+    (item, index) => traceTimelineCard(item, total - items.length + index + 1),
+  ).join("");
+  bindTraceTimeline();
+}
+
+function traceTimelineCard(item, turnIndex) {
+  const selected = item.request_id === state.selectedTraceId;
+  return `
+    <button class="trace-timeline-card${selected ? " selected" : ""}" type="button"
+      data-trace-id="${escapeHtml(item.request_id)}">
+      <span class="trace-timeline-index">#${turnIndex}</span>
+      ${statusBadge(
+        item.status,
+        item.status_code,
+        item.error?.code,
+        Boolean(item.task || item.selected_model),
+      )}
+      <span class="trace-timeline-route">
+        <strong title="${escapeHtml(item.requested_model || "auto")}">${escapeHtml(shortModel(item.requested_model || "auto"))}</strong>
+        <span aria-hidden="true">→</span>
+        <strong title="${escapeHtml(item.selected_model || "")}">${escapeHtml(item.identity_intercepted ? "身份直答" : shortModel(item.selected_model || "—"))}</strong>
+      </span>
+      <span class="trace-timeline-meta">
+        <span>${escapeHtml(requestLineageLabel(item))}</span>
+        ${privacyBadge(item.privacy_assessment)}
+      </span>
+      <span class="trace-timeline-time">${formatTime(item.started_at)}</span>
+    </button>`;
+}
+
+function bindTraceTimeline() {
+  byId("trace-timeline").querySelectorAll("[data-trace-id]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void selectRouteTrace(button.dataset.traceId);
+    });
+  });
 }
 
 function renderTraceRoutingState(trace) {
@@ -1828,6 +2107,12 @@ function renderTraceRoutingState(trace) {
     byId("trace-node-inspector").hidden = true;
   }
   if (!beforeRouting) {
+    if (trace.identity_intercepted) {
+      target.className = "trace-routing-state info";
+      target.innerHTML = `<strong>身份直答</strong><span>公共身份请求已由 Router 直接完成，未调用 evaluator 或底层模型；下方流程图展示的是拦截判断本身，终点为"身份直答"而非某个具体模型。</span>`;
+      target.hidden = false;
+      return;
+    }
     target.hidden = true;
     target.textContent = "";
     return;
@@ -1840,19 +2125,14 @@ function renderTraceRoutingState(trace) {
     : (client?.models || []);
   const accessDenied = trace.error?.code === "invalid_api_key";
   target.className = "trace-routing-state warning";
-  target.innerHTML = trace.identity_intercepted
-    ? `<strong>身份直答</strong><span>公共身份请求已由 Router 直接完成，未调用 evaluator 或底层模型。</span>`
-    : accessDenied
-      ? `<strong>未进入智能路由</strong><span>客户端 ${escapeHtml(trace.client_id)} 未授权 ${escapeHtml(trace.requested_model)}；当前允许：${escapeHtml(allowedModels.join(", ") || "未配置")}</span>`
-      : `<strong>未进入智能路由</strong><span>${escapeHtml(trace.error?.message || "请求在选模前被拒绝")}</span>`;
+  target.innerHTML = accessDenied
+    ? `<strong>未进入智能路由</strong><span>客户端 ${escapeHtml(trace.client_id)} 未授权 ${escapeHtml(trace.requested_model)}；当前允许：${escapeHtml(allowedModels.join(", ") || "未配置")}</span>`
+    : `<strong>未进入智能路由</strong><span>${escapeHtml(trace.error?.message || "请求在选模前被拒绝")}</span>`;
   target.hidden = false;
 }
 
 function traceEnteredRouting(trace) {
-  return Boolean(
-    !trace?.identity_intercepted
-    && (trace?.task || trace?.selected_model),
-  );
+  return Boolean(trace?.identity_intercepted || trace?.task || trace?.selected_model);
 }
 
 function renderTraceAttempts() {
@@ -2006,10 +2286,15 @@ function bindTraceGraph() {
 
 function traceGraphSteps() {
   const attempt = selectedTraceAttempt();
+  const rawSteps = (
+    state.routeGraphMode === "detailed"
+      ? attempt?.steps
+      : attempt?.simple_steps
+  ) || [];
   const graphNodeIds = new Set(
     (state.routeGraph?.nodes || []).map((item) => item.id),
   );
-  const steps = (attempt?.steps || []).filter(
+  const steps = rawSteps.filter(
     (step) => (
       graphNodeIds.has(step.node_id)
       && step.path !== false
@@ -2060,19 +2345,33 @@ function defaultTraceFocusNodeId(steps = traceGraphSteps()) {
     return steps[steps.length - 1]?.node_id || null;
   }
   const requestedModel = state.selectedTrace?.requested_model;
+  const detailed = state.routeGraphMode === "detailed";
   const preferred = requestedModel === "auto"
-    ? [
-        "local_sufficiency",
-        "remote_expert_dispatch",
-        "candidate_scope",
-        "route_selected",
-      ]
-    : [
-        "explicit_model",
-        "explicit_selection",
-        "candidate_scope",
-        "route_selected",
-      ];
+    ? (detailed
+      ? [
+          "local_sufficiency",
+          "remote_expert_dispatch",
+          "candidate_scope",
+          "route_selected",
+        ]
+      : [
+          "intelligent_v2_dispatch",
+          "provider_priority",
+          "candidate_scope",
+          "route_selected",
+        ])
+    : (detailed
+      ? [
+          "explicit_model",
+          "explicit_selection",
+          "candidate_scope",
+          "route_selected",
+        ]
+      : [
+          "select_endpoint",
+          "candidate_scope",
+          "route_selected",
+        ]);
   return preferred.find(
     (nodeId) => steps.some((step) => step.node_id === nodeId),
   ) || steps[steps.length - 1]?.node_id || null;
@@ -2325,25 +2624,29 @@ function renderTraceGraphFallback(message) {
     </div>`;
 }
 
-function renderTraceCurrentReview() {
+function renderTraceCurrentReview(preserveDraft = false) {
   const review = state.selectedTrace?.current_review;
   byId("trace-current-review").textContent = review
     ? `${reviewLabels[review.verdict] || review.verdict} · ${formatTime(review.created_at)}`
     : "尚未审核";
-  byId("trace-review-verdict").value = review?.verdict || "";
-  byId("trace-expected-task").value = review?.expected_task || "";
-  byId("trace-expected-model").value = review?.expected_model || "";
-  byId("trace-review-note").value = review?.note || "";
+  if (!preserveDraft) {
+    byId("trace-review-verdict").value = review?.verdict || "";
+    byId("trace-expected-task").value = review?.expected_task || "";
+    byId("trace-expected-model").value = review?.expected_model || "";
+    byId("trace-review-note").value = review?.note || "";
+  }
 }
 
 async function submitTraceReview(event) {
   event.preventDefault();
-  if (!state.selectedTraceId) return;
+  const requestId = state.selectedTraceId;
+  if (!requestId) return;
+  const submittedReview = {kind: "routing", values: traceReviewValues("routing")};
   const button = byId("trace-review-submit");
   button.disabled = true;
   try {
     await api(
-      `/api/route-traces/${encodeURIComponent(state.selectedTraceId)}/reviews`,
+      `/api/route-traces/${encodeURIComponent(requestId)}/reviews`,
       {
         method: "POST",
         body: JSON.stringify({
@@ -2355,8 +2658,9 @@ async function submitTraceReview(event) {
       },
     );
     notice("路由审核已保存。");
-    await selectRouteTrace(state.selectedTraceId, true);
-    await loadRouteTraces(true);
+    if (state.selectedTraceId === requestId) {
+      await selectRouteTrace(requestId, true, submittedReview);
+    }
   } catch (error) {
     notice(error.message, true);
   } finally {
@@ -2368,10 +2672,7 @@ function applyTraceGraphScale() {
   const svg = byId("trace-graph").querySelector("svg");
   if (!svg) return;
   const viewBoxWidth = Number(svg.viewBox?.baseVal?.width) || 1440;
-  const vertical = state.routeGraph?.mermaid?.includes("flowchart TD");
-  const minimumWidth = vertical ? 320 : 1800;
-  svg.style.width =
-    `${Math.max(minimumWidth, viewBoxWidth * traceGraphScale)}px`;
+  svg.style.width = `${viewBoxWidth * traceGraphScale}px`;
   svg.style.maxWidth = "none";
   svg.style.height = "auto";
 }
@@ -2420,8 +2721,8 @@ function fitTraceGraph(smooth = true) {
   if (!svg || !viewport) return;
   const viewBoxWidth = Number(svg.viewBox?.baseVal?.width) || 1440;
   traceGraphScale = Math.max(
-    0.45,
-    Math.min(1.4, (viewport.clientWidth - 52) / viewBoxWidth),
+    0.01,
+    Math.min(1.4, (viewport.clientWidth - 60) / viewBoxWidth),
   );
   applyTraceGraphScale();
   viewport.scrollTo({
@@ -2488,6 +2789,27 @@ function renderSettings() {
     "identity.identity_response",
     "我是思源（SIYUAN），由思源智能路由服务提供的统一 AI 助手。",
   );
+  byId("review-mode").value = value("identity.review.mode", "off");
+  byId("review-backend").value = value("identity.review.backend", "ollama");
+  byId("review-base-url").value = value(
+    "identity.review.base_url",
+    "http://agx.taild500c8.ts.net:11434",
+  );
+  byId("review-model").value = value(
+    "identity.review.model",
+    "qwen3:4b-instruct",
+  );
+  byId("review-sample-rate").value = value(
+    "identity.review.sample_rate",
+    0.1,
+  );
+  byId("review-rpm").value = String(
+    value("identity.review.requests_per_minute", 2),
+  );
+  byId("review-timeout").value = value(
+    "identity.review.timeout_seconds",
+    15,
+  );
   byId("cloud-enabled").checked = Boolean(value("cloud.enabled", false));
   byId("cloud-auto").checked = Boolean(value("cloud.auto_escalate", false));
   byId("cloud-budget").value = value("cloud.monthly_budget", 0);
@@ -2544,6 +2866,279 @@ function renderSettings() {
     wrapper.append(input);
     weights.append(wrapper);
   });
+  renderRemoteFallbackOrder();
+  updateStrategyBranchVisibility();
+  updateWeightsTotal();
+}
+
+function cloudEndpointIds() {
+  return (state.dashboard?.endpoints || [])
+    .map((item) => item.endpoint)
+    .filter((item) => item.cloud)
+    .map((item) => item.id);
+}
+
+function fallbackOrderList(profile) {
+  const routing = state.settings.routing;
+  if (!Array.isArray(routing.remote_fallback_order?.[profile])) {
+    routing.remote_fallback_order = {
+      ...(routing.remote_fallback_order || {}),
+      [profile]: [],
+    };
+  }
+  return routing.remote_fallback_order[profile];
+}
+
+function moveFallbackEntry(profile, index, delta) {
+  const list = fallbackOrderList(profile);
+  const target = index + delta;
+  if (target < 0 || target >= list.length) return;
+  [list[index], list[target]] = [list[target], list[index]];
+  renderRemoteFallbackOrder();
+}
+
+function removeFallbackEntry(profile, index) {
+  const list = fallbackOrderList(profile);
+  if (list.length <= 1) return;
+  list.splice(index, 1);
+  renderRemoteFallbackOrder();
+}
+
+function addFallbackEntry(profile, endpointId) {
+  const list = fallbackOrderList(profile);
+  if (!endpointId || list.includes(endpointId)) return;
+  list.push(endpointId);
+  renderRemoteFallbackOrder();
+}
+
+function renderRemoteFallbackOrder() {
+  const container = byId("fallback-chain-editor");
+  if (!state.settings) return;
+  container.replaceChildren();
+  const available = cloudEndpointIds();
+  FALLBACK_PROFILES.forEach(([profile, label]) => {
+    const list = fallbackOrderList(profile);
+    const section = document.createElement("div");
+    section.className = "fallback-chain-profile";
+    const heading = document.createElement("h5");
+    heading.innerHTML =
+      `${escapeHtml(profile)} <span class="section-meta">${escapeHtml(label)}</span>`;
+    section.append(heading);
+
+    const ol = document.createElement("ol");
+    ol.className = "fallback-chain-list";
+    list.forEach((endpointId, index) => {
+      const li = document.createElement("li");
+      li.className = "fallback-chain-row";
+      li.innerHTML = `
+        <span class="fallback-chain-position">${index + 1}</span>
+        <span class="fallback-chain-id">${escapeHtml(endpointId)}</span>
+        <span class="fallback-chain-actions">
+          <button type="button" class="secondary compact"
+            data-fallback-up="${escapeHtml(profile)}" data-fallback-index="${index}"
+            title="上移" aria-label="上移 ${escapeHtml(endpointId)}"
+            ${index === 0 ? "disabled" : ""}>↑</button>
+          <button type="button" class="secondary compact"
+            data-fallback-down="${escapeHtml(profile)}" data-fallback-index="${index}"
+            title="下移" aria-label="下移 ${escapeHtml(endpointId)}"
+            ${index === list.length - 1 ? "disabled" : ""}>↓</button>
+          <button type="button" class="secondary compact"
+            data-fallback-remove="${escapeHtml(profile)}" data-fallback-index="${index}"
+            title="移除" aria-label="移除 ${escapeHtml(endpointId)}"
+            ${list.length <= 1 ? "disabled" : ""}>×</button>
+        </span>`;
+      ol.append(li);
+    });
+    section.append(ol);
+
+    const remaining = available.filter((id) => !list.includes(id));
+    const addRow = document.createElement("div");
+    addRow.className = "fallback-chain-add";
+    const select = document.createElement("select");
+    select.dataset.fallbackAddSelect = profile;
+    select.disabled = !remaining.length;
+    (remaining.length ? remaining : ["无可添加的云端端点"]).forEach((id) => {
+      const option = document.createElement("option");
+      option.value = remaining.length ? id : "";
+      option.textContent = id;
+      select.append(option);
+    });
+    const addButton = document.createElement("button");
+    addButton.type = "button";
+    addButton.className = "secondary compact";
+    addButton.textContent = "添加";
+    addButton.disabled = !remaining.length;
+    addButton.dataset.fallbackAdd = profile;
+    addRow.append(select, addButton);
+    section.append(addRow);
+
+    container.append(section);
+  });
+  bindFallbackChainControls();
+  renderFallbackChainWarnings();
+}
+
+function bindFallbackChainControls() {
+  const container = byId("fallback-chain-editor");
+  container.querySelectorAll("[data-fallback-up]").forEach((button) => {
+    button.addEventListener("click", () => {
+      moveFallbackEntry(
+        button.dataset.fallbackUp,
+        Number(button.dataset.fallbackIndex),
+        -1,
+      );
+    });
+  });
+  container.querySelectorAll("[data-fallback-down]").forEach((button) => {
+    button.addEventListener("click", () => {
+      moveFallbackEntry(
+        button.dataset.fallbackDown,
+        Number(button.dataset.fallbackIndex),
+        1,
+      );
+    });
+  });
+  container.querySelectorAll("[data-fallback-remove]").forEach((button) => {
+    button.addEventListener("click", () => {
+      removeFallbackEntry(
+        button.dataset.fallbackRemove,
+        Number(button.dataset.fallbackIndex),
+      );
+    });
+  });
+  container.querySelectorAll("[data-fallback-add]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const profile = button.dataset.fallbackAdd;
+      const select = container.querySelector(
+        `[data-fallback-add-select="${cssEscape(profile)}"]`,
+      );
+      if (select?.value) addFallbackEntry(profile, select.value);
+    });
+  });
+}
+
+function renderFallbackChainWarnings() {
+  const target = byId("fallback-chain-warning");
+  const order = state.settings?.routing?.remote_fallback_order || {};
+  const endpoints = new Map(
+    (state.dashboard?.endpoints || []).map(({endpoint}) => [endpoint.id, endpoint]),
+  );
+  const problems = [];
+  FALLBACK_PROFILES.forEach(([profile]) => {
+    (order[profile] || []).forEach((endpointId) => {
+      const endpoint = endpoints.get(endpointId);
+      if (!endpoint) {
+        problems.push(`${profile}: ${endpointId}（未找到该端点）`);
+      } else if (!endpoint.cloud) {
+        problems.push(`${profile}: ${endpointId}（不是云端端点）`);
+      }
+    });
+  });
+  if (!problems.length) {
+    target.hidden = true;
+    target.innerHTML = "";
+    return;
+  }
+  target.hidden = false;
+  target.innerHTML = `
+    <strong>回退链存在可能失效的条目</strong>
+    <span>${problems.map(escapeHtml).join("；")}；保存不会被阻止，但这些条目在实际路由时会被跳过。</span>`;
+}
+
+function updateStrategyBranchVisibility() {
+  const strategy = byId("routing-strategy").value;
+  byId("branch-legacy_v1").classList.toggle(
+    "dimmed",
+    strategy !== "legacy_v1",
+  );
+  byId("branch-intelligent_v2").classList.toggle(
+    "dimmed",
+    strategy !== "intelligent_v2",
+  );
+}
+
+function updateWeightsTotal() {
+  const total = [...document.querySelectorAll("[data-weight]")].reduce(
+    (sum, input) => sum + (Number(input.value) || 0),
+    0,
+  );
+  const label = byId("weights-total");
+  label.textContent = `总和 ${total.toFixed(2)}`;
+  label.classList.toggle("invalid", Math.abs(total - 1) > 0.001);
+}
+
+function validateReviewBaseUrl(rawUrl, backend) {
+  let parsed;
+  try {
+    parsed = new URL(String(rawUrl || ""));
+  } catch {
+    return "隐私旁路 base_url 不是合法的 URL";
+  }
+  const routerEndpoint = backend === "router"
+    && String(rawUrl).replace(/\/$/, "") === "http://127.0.0.1:4000";
+  if (backend === "router" && !routerEndpoint) {
+    return "backend 为 router 时，base_url 必须是 http://127.0.0.1:4000";
+  }
+  const hostnameOk = parsed.hostname.endsWith(".taild500c8.ts.net")
+    || ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  const portBlocked = ["4000", "4001"].includes(parsed.port) && !routerEndpoint;
+  if (
+    !["http:", "https:"].includes(parsed.protocol)
+    || !hostnameOk
+    || parsed.username || parsed.password || parsed.search || parsed.hash
+    || !["", "/"].includes(parsed.pathname)
+    || portBlocked
+  ) {
+    return "隐私旁路 base_url 必须是私网直连地址（详见字段说明）";
+  }
+  return null;
+}
+
+function validateSettingsDraft(draft) {
+  const errors = [];
+  const weightTotal = Object.values(draft.routing.weights || {}).reduce(
+    (sum, item) => sum + (Number(item) || 0),
+    0,
+  );
+  if (Math.abs(weightTotal - 1) > 0.001) {
+    errors.push(`路由权重总和须为 1.00，当前为 ${weightTotal.toFixed(2)}`);
+  }
+  const order = draft.routing.remote_fallback_order || {};
+  if (draft.routing.strategy === "intelligent_v2") {
+    const missing = FALLBACK_PROFILES
+      .map(([profile]) => profile)
+      .filter((profile) => !order[profile]?.length);
+    if (missing.length) {
+      errors.push(`云端回退顺序缺少画像：${missing.join("、")}`);
+    }
+  }
+  const review = draft.identity.review || {};
+  if (!["off", "shadow"].includes(review.mode)) {
+    errors.push("隐私旁路模式必须是 off 或 shadow");
+  }
+  const backend = review.backend || "ollama";
+  if (!["ollama", "llamacpp", "router"].includes(backend)) {
+    errors.push("隐私旁路后端类型不合法");
+  }
+  const baseUrlError = validateReviewBaseUrl(review.base_url, backend);
+  if (baseUrlError) errors.push(baseUrlError);
+  const model = String(review.model || "").trim();
+  if (!model || ["auto", "siyuan/auto"].includes(model.toLowerCase())) {
+    errors.push("隐私旁路审核模型不能为空，也不能是 auto 或 siyuan/auto");
+  }
+  const sampleRate = Number(review.sample_rate);
+  if (!Number.isFinite(sampleRate) || sampleRate < 0 || sampleRate > 1) {
+    errors.push("隐私旁路采样率须在 0 到 1 之间");
+  }
+  const rpm = Number(review.requests_per_minute);
+  if (![1, 2].includes(rpm)) {
+    errors.push("隐私旁路每分钟请求上限只能是 1 或 2");
+  }
+  const timeout = Number(review.timeout_seconds);
+  if (!Number.isFinite(timeout) || timeout < 1 || timeout > 120) {
+    errors.push("隐私旁路超时须在 1 到 120 秒之间");
+  }
+  return errors;
 }
 
 function collectSettings() {
@@ -2566,6 +3161,16 @@ function collectSettings() {
       provider_name: byId("identity-provider").value.trim(),
       description: byId("identity-description").value.trim(),
       identity_response: byId("identity-response").value.trim(),
+      review: {
+        ...state.settings.identity.review,
+        mode: byId("review-mode").value,
+        backend: byId("review-backend").value,
+        base_url: byId("review-base-url").value.trim(),
+        model: byId("review-model").value.trim(),
+        sample_rate: Number(byId("review-sample-rate").value),
+        requests_per_minute: Number(byId("review-rpm").value),
+        timeout_seconds: Number(byId("review-timeout").value),
+      },
     },
     cloud: {
       ...state.settings.cloud,
@@ -2615,11 +3220,17 @@ function collectSettings() {
 async function saveSettings(event) {
   event.preventDefault();
   const button = event.submitter;
+  const draft = collectSettings();
+  const errors = validateSettingsDraft(draft);
+  if (errors.length) {
+    notice(errors[0], true);
+    return;
+  }
   button.disabled = true;
   try {
     const payload = await api("/api/settings", {
       method: "PUT",
-      body: JSON.stringify(collectSettings()),
+      body: JSON.stringify(draft),
     });
     state.settings = payload.settings;
     renderSettings();
@@ -2642,7 +3253,7 @@ function switchView(view) {
   });
   byId("view-title").textContent = viewTitles[view];
   if (view === "requests") void loadRequestTraces();
-  if (view === "audit") void loadRouteAudit();
+  if (view === "audit") return loadRouteAudit();
   if (view === "clients") loadClients(true);
 }
 
@@ -2888,6 +3499,16 @@ byId("reload").addEventListener("click", async () => {
   }
 });
 byId("settings-form").addEventListener("submit", saveSettings);
+byId("routing-strategy").addEventListener(
+  "change",
+  updateStrategyBranchVisibility,
+);
+byId("weights").addEventListener("input", updateWeightsTotal);
+byId("review-backend").addEventListener("change", () => {
+  if (byId("review-backend").value === "router") {
+    byId("review-base-url").value = "http://127.0.0.1:4000";
+  }
+});
 byId("auto-refresh").addEventListener("change", startPolling);
 ["node-filter", "status-filter"].forEach((id) => {
   byId(id).addEventListener("change", () => {
@@ -2917,6 +3538,7 @@ byId("request-next").addEventListener("click", () => {
 [
   "trace-mode-filter",
   "trace-review-filter",
+  "trace-privacy-filter",
   "trace-client-filter",
   "trace-task-filter",
   "trace-model-filter",
@@ -2932,6 +3554,7 @@ byId("trace-group-conversation").addEventListener("change", renderTraceList);
 byId("trace-filter-reset").addEventListener("click", () => {
   byId("trace-mode-filter").value = "auto";
   byId("trace-review-filter").value = "unreviewed";
+  byId("trace-privacy-filter").value = "";
   byId("trace-client-filter").value = "";
   byId("trace-task-filter").value = "";
   byId("trace-model-filter").value = "";
@@ -2944,6 +3567,25 @@ byId("trace-load-more").addEventListener("click", () => {
   void loadRouteTraces(false, true);
 });
 byId("trace-review-form").addEventListener("submit", submitTraceReview);
+byId("privacy-feedback-form").addEventListener("submit", submitPrivacyFeedback);
+byId("trace-timeline-earlier").addEventListener("click", async () => {
+  const conversationId = state.selectedTrace?.conversation_id;
+  const cursor = state.requestConversationPages.get(conversationId)?.nextCursor;
+  if (!cursor) return;
+  const button = byId("trace-timeline-earlier");
+  button.disabled = true;
+  try {
+    await loadTraceTimeline(conversationId, cursor);
+  } finally {
+    button.disabled = false;
+  }
+});
+byId("trace-graph-mode-simple").addEventListener("click", () => {
+  void setTraceGraphMode("simple");
+});
+byId("trace-graph-mode-detailed").addEventListener("click", () => {
+  void setTraceGraphMode("detailed");
+});
 byId("trace-pan-left").addEventListener("click", () => {
   const viewport = byId("trace-graph-viewport");
   viewport.scrollBy({
@@ -2959,7 +3601,7 @@ byId("trace-pan-right").addEventListener("click", () => {
   });
 });
 byId("trace-zoom-out").addEventListener("click", () => {
-  traceGraphScale = Math.max(0.45, traceGraphScale - 0.1);
+  traceGraphScale = Math.max(0.01, traceGraphScale - 0.1);
   applyTraceGraphScale();
 });
 byId("trace-zoom-in").addEventListener("click", () => {

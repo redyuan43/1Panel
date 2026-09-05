@@ -437,7 +437,7 @@ class RouterRuntime:
             return
         try:
             if self.privacy_reviewer is None:
-                self.privacy_reviewer = PrivacyReviewer(self.store, self.audit)
+                self.privacy_reviewer = PrivacyReviewer(self.store, self.audit, traces=self.route_traces)
             self.privacy_reviewer.submit(
                 body, api_kind, settings, request_id=request_id, client_id=client_id,
             )
@@ -538,7 +538,12 @@ def build_runtime(
             instance_id=resolved_instance_id,
             boot_id=resolved_boot_id,
         ),
-        limiter=ClientLimiter(store),
+        limiter=ClientLimiter(
+            store,
+            request_ttl_seconds=int(
+                settings.section("queue").get("lock_ttl_seconds", 900)
+            ),
+        ),
         budget=CloudBudget(store, settings),
         clients=clients,
         auth=AuthManager(settings, clients),

@@ -1,0 +1,15 @@
+diff --git a/app/main.py b/app/main.py
+--- a/app/main.py
++++ b/app/main.py
+@@ -1593,6 +1593,11 @@ class _NullLock:
+         return False
+ 
+ 
++import sys
++from .router_contract import install as install_router_contract
++install_router_contract(sys.modules[__name__])
++
++
+ app.mount(
+     "/",
+     StaticFiles(directory=SETTINGS.frontend_root, html=True),

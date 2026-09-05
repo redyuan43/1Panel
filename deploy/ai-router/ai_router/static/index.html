@@ -34,6 +34,7 @@
       <button class="tab" type="button" data-view="requests">请求记录</button>
       <button class="tab" type="button" data-view="audit">路由审计</button>
       <button class="tab" type="button" data-view="clients">客户端账号</button>
+      <a class="tab" href="/media">媒体任务</a>
       <button class="tab" type="button" data-view="settings">策略设置</button>
     </nav>
 
@@ -278,6 +279,16 @@
                 </select>
               </label>
               <label>
+                <span>隐私旁路</span>
+                <select id="trace-privacy-filter">
+                  <option value="">全部请求</option>
+                  <option value="reviewed">有审核记录</option>
+                  <option value="normal">正常任务</option>
+                  <option value="internal_info">探询内部信息</option>
+                  <option value="uncertain">无法确定</option>
+                </select>
+              </label>
+              <label>
                 <span>客户端</span>
                 <select id="trace-client-filter">
                   <option value="">全部客户端</option>
@@ -352,6 +363,10 @@
                     <div id="trace-routing-state" class="trace-routing-state" hidden></div>
                   </div>
                   <div class="trace-graph-controls" aria-label="流程图控制">
+                    <div class="trace-graph-mode" role="group" aria-label="流程图详细程度">
+                      <button id="trace-graph-mode-simple" type="button" class="active">简明</button>
+                      <button id="trace-graph-mode-detailed" type="button">详细</button>
+                    </div>
                     <button id="trace-pan-left" class="secondary icon-control" type="button" title="向左查看" aria-label="向左查看">‹</button>
                     <button id="trace-zoom-out" class="secondary icon-control" type="button" title="缩小" aria-label="缩小">−</button>
                     <button id="trace-fit" class="secondary icon-control" type="button" title="适应画布" aria-label="适应画布">↔</button>
@@ -361,6 +376,39 @@
                     <button id="trace-pan-right" class="secondary icon-control" type="button" title="向右查看" aria-label="向右查看">›</button>
                   </div>
                 </div>
+
+                <section id="trace-timeline-section" class="trace-timeline-section" hidden>
+                  <div class="trace-timeline-heading">
+                    <h4>会话时间线</h4>
+                    <span id="trace-timeline-state" class="section-meta"></span>
+                  </div>
+                  <div id="trace-timeline" class="trace-timeline"></div>
+                  <button id="trace-timeline-earlier" class="secondary compact" type="button" hidden>加载更早轮次</button>
+                </section>
+
+                <section class="privacy-assessment-section">
+                  <h4>隐私旁路审核 <span class="badge neutral">仅观察</span></h4>
+                  <div id="trace-privacy-result" class="trace-detail-meta"></div>
+                  <form id="privacy-feedback-form" class="trace-review-form">
+                    <div class="trace-review-grid">
+                      <label><span>人工隐私结论</span>
+                        <select id="privacy-feedback-decision" required>
+                          <option value="">请选择</option>
+                          <option value="normal">正常任务</option>
+                          <option value="internal_info">探询内部信息</option>
+                          <option value="uncertain">无法确定</option>
+                        </select>
+                      </label>
+                      <label class="trace-review-note"><span>纠偏依据</span>
+                        <textarea id="privacy-feedback-note" rows="2" maxlength="1000"></textarea>
+                      </label>
+                    </div>
+                    <div class="trace-review-actions">
+                      <button id="privacy-feedback-submit" type="submit">保存隐私复核</button>
+                    </div>
+                  </form>
+                  <div id="privacy-feedback-history" class="trace-detail-meta"></div>
+                </section>
 
                 <div id="trace-core-heading" class="trace-core-heading">
                   <strong>智能路由核心</strong>
@@ -473,171 +521,286 @@
 
       <section id="settings-view" class="view">
         <form id="settings-form">
-          <section class="settings-band">
-            <div class="settings-title">
-              <h3>公开模型身份</h3>
-              <span>Public identity</span>
-            </div>
-            <div class="control-grid">
-              <label class="toggle-row">
-                <span>启用身份隐藏</span>
-                <input id="identity-enabled" type="checkbox">
-              </label>
-              <label>
-                公开模型 ID
-                <input id="identity-model-id" type="text" maxlength="128">
-              </label>
-              <label>
-                中文名称
-                <input id="identity-name-zh" type="text" maxlength="120">
-              </label>
-              <label>
-                英文名称
-                <input id="identity-name-en" type="text" maxlength="120">
-              </label>
-              <label>
-                公开提供方
-                <input id="identity-provider" type="text" maxlength="120">
-              </label>
-              <label class="wide">
-                公开说明
-                <textarea id="identity-description" maxlength="2000" rows="3"></textarea>
-              </label>
-              <label class="wide">
-                固定身份回答
-                <textarea id="identity-response" maxlength="2000" rows="3"></textarea>
-              </label>
-            </div>
-          </section>
+          <div class="policy-flow">
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>公开模型身份</h3>
+                <span>Public identity</span>
+              </div>
+              <div class="control-grid">
+                <label class="toggle-row">
+                  <span>启用身份隐藏</span>
+                  <input id="identity-enabled" type="checkbox">
+                </label>
+                <label>
+                  公开模型 ID
+                  <input id="identity-model-id" type="text" maxlength="128">
+                </label>
+                <label>
+                  中文名称
+                  <input id="identity-name-zh" type="text" maxlength="120">
+                </label>
+                <label>
+                  英文名称
+                  <input id="identity-name-en" type="text" maxlength="120">
+                </label>
+                <label>
+                  公开提供方
+                  <input id="identity-provider" type="text" maxlength="120">
+                </label>
+                <label class="wide">
+                  公开说明
+                  <textarea id="identity-description" maxlength="2000" rows="3"></textarea>
+                </label>
+                <label class="wide">
+                  固定身份回答
+                  <textarea id="identity-response" maxlength="2000" rows="3"></textarea>
+                </label>
+              </div>
+            </section>
 
-          <section class="settings-band">
-            <div class="settings-title">
-              <h3>云端升级</h3>
-              <span>Cloud escalation</span>
-            </div>
-            <div class="control-grid">
-              <label class="toggle-row">
-                <span>启用云端候选</span>
-                <input id="cloud-enabled" type="checkbox">
-              </label>
-              <label class="toggle-row">
-                <span>允许自动升级</span>
-                <input id="cloud-auto" type="checkbox">
-              </label>
-              <label>
-                月度预算（USD）
-                <input id="cloud-budget" type="number" min="0" step="1">
-              </label>
-              <label>
-                允许的 Provider
-                <input id="cloud-providers" type="text">
-              </label>
-              <label class="wide">
-                允许的模型 ID
-                <input id="cloud-models" type="text">
-              </label>
-            </div>
-          </section>
+            <div class="policy-flow-connector"></div>
 
-          <section class="settings-band">
-            <div class="settings-title">
-              <h3>任务评估</h3>
-              <span>Evaluation and compaction</span>
-            </div>
-            <div class="control-grid">
-              <label class="toggle-row">
-                <span>启用任务评估器</span>
-                <input id="evaluator-enabled" type="checkbox">
-              </label>
-              <label class="toggle-row">
-                <span>启用升级压缩</span>
-                <input id="compaction-enabled" type="checkbox">
-              </label>
-              <label>
-                压缩许可模式
-                <select id="compaction-mode">
-                  <option value="explicit_only">仅客户端显式允许</option>
-                  <option value="automatic">自动压缩</option>
-                  <option value="disabled">禁用压缩</option>
-                </select>
-              </label>
-              <label>
-                评估器模型 ID
-                <input id="evaluator-model" type="text">
-              </label>
-              <label>
-                置信度阈值
-                <input id="evaluator-confidence" type="number" min="0" max="1" step="0.01">
-              </label>
-              <label class="wide">
-                压缩模型 ID
-                <input id="compaction-model" type="text">
-              </label>
-            </div>
-          </section>
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>隐私旁路审核 <span class="badge neutral">仅观察</span></h3>
+                <span>Privacy review sidecar</span>
+              </div>
+              <div class="control-grid">
+                <label>
+                  模式
+                  <select id="review-mode">
+                    <option value="off">关闭</option>
+                    <option value="shadow">shadow（仅观察）</option>
+                  </select>
+                </label>
+                <label>
+                  后端类型
+                  <select id="review-backend">
+                    <option value="ollama">ollama</option>
+                    <option value="llamacpp">llamacpp</option>
+                    <option value="router">router（经本 Router 转发）</option>
+                  </select>
+                </label>
+                <label class="wide">
+                  审核端点 base_url
+                  <input id="review-base-url" type="text" placeholder="http://agx.taild500c8.ts.net:11434">
+                  <small class="field-hint">
+                    仅接受私网直连地址：host 需以 .taild500c8.ts.net 结尾，或为
+                    localhost / 127.0.0.1 / ::1；不能带用户名密码、query、
+                    fragment；path 需为空或 /；端口不能是 4000/4001（backend 为
+                    router 时例外，此时 base_url 固定为
+                    http://127.0.0.1:4000）。
+                  </small>
+                </label>
+                <label>
+                  审核模型
+                  <input id="review-model" type="text" placeholder="qwen3:4b-instruct">
+                  <small class="field-hint">不能为空，也不能是 auto 或 siyuan/auto。</small>
+                </label>
+                <label>
+                  采样率
+                  <input id="review-sample-rate" type="number" min="0" max="1" step="0.01">
+                </label>
+                <label>
+                  每分钟请求上限
+                  <select id="review-rpm">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                  </select>
+                </label>
+                <label>
+                  超时（秒）
+                  <input id="review-timeout" type="number" min="1" max="120" step="1">
+                </label>
+              </div>
+            </section>
 
-          <section class="settings-band">
-            <div class="settings-title">
-              <h3>会话与队列</h3>
-              <span>Affinity and capacity</span>
-            </div>
-            <div class="control-grid">
-              <label>
-                缓存亲和租约（分钟）
-                <input id="affinity-ttl-minutes" type="number" min="5" max="1440" step="1">
-              </label>
-              <label>
-                亲和优先突发上限
-                <input id="affinity-burst" type="number" min="1" step="1">
-              </label>
-              <label>
-                队列超时（秒）
-                <input id="queue-timeout" type="number" min="1" step="1">
-              </label>
-              <label>
-                最大尝试次数
-                <input id="failover-attempts" type="number" min="1" max="3" step="1">
-              </label>
-              <label>
-                会话容量等待（秒）
-                <input id="affinity-capacity-wait" type="number" min="0" step="0.1">
-              </label>
-              <label>
-                新请求容量等待（秒）
-                <input id="new-request-capacity-wait" type="number" min="0" step="0.1">
-              </label>
-              <label>
-                路由策略
-                <select id="routing-strategy">
-                  <option value="legacy_v1">legacy_v1（热回滚）</option>
-                  <option value="intelligent_v2">intelligent_v2</option>
-                </select>
-              </label>
-              <label>
-                Provider 优先级
-                <select id="provider-priority">
-                  <option value="local_first">本地优先</option>
-                  <option value="balanced">均衡评分</option>
-                  <option value="cloud_first">云端优先</option>
-                </select>
-              </label>
-              <label>
-                本地全满策略
-                <select id="all-local-busy-policy">
-                  <option value="cloud_or_429">预算内云端，否则 429</option>
-                  <option value="return_429">直接返回 429</option>
-                </select>
-              </label>
-            </div>
-          </section>
+            <div class="policy-flow-connector"></div>
 
-          <section class="settings-band">
-            <div class="settings-title">
-              <h3>路由权重</h3>
-              <span>总和 1.00</span>
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>云端升级</h3>
+                <span>Cloud escalation</span>
+              </div>
+              <div class="control-grid">
+                <label class="toggle-row">
+                  <span>启用云端候选</span>
+                  <input id="cloud-enabled" type="checkbox">
+                </label>
+                <label class="toggle-row">
+                  <span>允许自动升级</span>
+                  <input id="cloud-auto" type="checkbox">
+                </label>
+                <label>
+                  月度预算（USD）
+                  <input id="cloud-budget" type="number" min="0" step="1">
+                </label>
+                <label>
+                  允许的 Provider
+                  <input id="cloud-providers" type="text">
+                </label>
+                <label class="wide">
+                  允许的模型 ID
+                  <input id="cloud-models" type="text">
+                </label>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>任务评估</h3>
+                <span>Evaluation and compaction</span>
+              </div>
+              <div class="control-grid">
+                <label class="toggle-row">
+                  <span>启用任务评估器</span>
+                  <input id="evaluator-enabled" type="checkbox">
+                </label>
+                <label class="toggle-row">
+                  <span>启用升级压缩</span>
+                  <input id="compaction-enabled" type="checkbox">
+                </label>
+                <label>
+                  压缩许可模式
+                  <select id="compaction-mode">
+                    <option value="explicit_only">仅客户端显式允许</option>
+                    <option value="automatic">自动压缩</option>
+                    <option value="disabled">禁用压缩</option>
+                  </select>
+                </label>
+                <label>
+                  评估器模型 ID
+                  <input id="evaluator-model" type="text">
+                </label>
+                <label>
+                  置信度阈值
+                  <input id="evaluator-confidence" type="number" min="0" max="1" step="0.01">
+                </label>
+                <label class="wide">
+                  压缩模型 ID
+                  <input id="compaction-model" type="text">
+                </label>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>会话与队列容量</h3>
+                <span>Affinity and capacity</span>
+              </div>
+              <div class="control-grid">
+                <label>
+                  缓存亲和租约（分钟）
+                  <input id="affinity-ttl-minutes" type="number" min="5" max="1440" step="1">
+                </label>
+                <label>
+                  亲和优先突发上限
+                  <input id="affinity-burst" type="number" min="1" step="1">
+                </label>
+                <label>
+                  队列超时（秒）
+                  <input id="queue-timeout" type="number" min="1" step="1">
+                </label>
+                <label>
+                  最大尝试次数
+                  <input id="failover-attempts" type="number" min="1" max="3" step="1">
+                </label>
+                <label>
+                  会话容量等待（秒）
+                  <input id="affinity-capacity-wait" type="number" min="0" step="0.1">
+                </label>
+                <label>
+                  新请求容量等待（秒）
+                  <input id="new-request-capacity-wait" type="number" min="0" step="0.1">
+                </label>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section class="settings-band policy-stage-card policy-fork-card">
+              <div class="settings-title">
+                <h3>路由策略选择</h3>
+                <span>Routing strategy</span>
+              </div>
+              <div class="control-grid">
+                <label>
+                  路由策略
+                  <select id="routing-strategy">
+                    <option value="legacy_v1">legacy_v1（热回滚）</option>
+                    <option value="intelligent_v2">intelligent_v2</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+
+            <div class="policy-flow-fork"></div>
+
+            <div class="policy-flow-branches">
+              <section id="branch-legacy_v1" class="settings-band policy-stage-card policy-branch-row">
+                <div class="settings-title">
+                  <h3>legacy_v1：Provider 优先级</h3>
+                  <span>Legacy provider priority</span>
+                </div>
+                <div class="control-grid">
+                  <label>
+                    Provider 优先级
+                    <select id="provider-priority">
+                      <option value="local_first">本地优先</option>
+                      <option value="balanced">均衡评分</option>
+                      <option value="cloud_first">云端优先</option>
+                    </select>
+                  </label>
+                </div>
+              </section>
+
+              <section id="branch-intelligent_v2" class="settings-band policy-stage-card policy-branch-row">
+                <div class="settings-title">
+                  <h3>intelligent_v2：本地优先 + 云端回退链</h3>
+                  <span>Local-first with remote fallback order</span>
+                </div>
+                <p class="field-hint">
+                  本地候选充分时始终优先本地；仅当本地候选不足或全忙时，才按下方
+                  每个任务画像各自的顺序转向云端候选。
+                </p>
+                <div id="fallback-chain-warning" class="fallback-chain-warning" hidden></div>
+                <div id="fallback-chain-editor" class="fallback-chain-editor"></div>
+              </section>
             </div>
-            <div id="weights" class="weight-grid"></div>
-          </section>
+
+            <div class="policy-flow-rejoin"></div>
+
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>路由权重</h3>
+                <span id="weights-total">总和 1.00</span>
+              </div>
+              <div id="weights" class="weight-grid"></div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>容量兜底策略</h3>
+                <span>Capacity fallback</span>
+              </div>
+              <div class="control-grid">
+                <label>
+                  本地全满策略
+                  <select id="all-local-busy-policy">
+                    <option value="cloud_or_429">预算内云端，否则 429</option>
+                    <option value="return_429">直接返回 429</option>
+                  </select>
+                </label>
+              </div>
+            </section>
+          </div>
 
           <div class="settings-actions">
             <button id="reload" type="button" class="secondary">重新加载</button>

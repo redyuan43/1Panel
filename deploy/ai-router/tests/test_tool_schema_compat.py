@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet
 from jsonschema import Draft7Validator, Draft202012Validator
 from starlette.requests import Request
 
-from ai_router.api import _prepare_routed_body, _send_upstream
+from ai_router.api import _acquire_route_capacity, _prepare_routed_body, _send_upstream
 from ai_router.compaction import (
     CapsuleCipher,
     ContextCompactor,
@@ -505,5 +505,74 @@ def test_history_persistence_and_next_turn_keep_original_boundaries(api_kind):
             assert state.branch_id == "branch-test"
             assert next_body == incoming
             assert body == original
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+@pytest.mark.parametrize("next_cloud", [False, True])
+def test_compaction_reselection_keeps_backend_neutral_tools(monkeypatch, api_kind, next_cloud):
+    async def check():
+        body = body_for(api_kind)
+        original = copy.deepcopy(body)
+        prompt_tokens = len(json.dumps(body, sort_keys=True))
+        local = replace(endpoint_for(), safe_context_tokens=prompt_tokens + 16)
+        next_endpoint = replace(
+            endpoint_for("openai" if next_cloud else "llama_cpp", next_cloud),
+            id="next-endpoint",
+            public_model="test/next",
+        )
+        runtime = runtime_for(local)
+        runtime.settings = SimpleNamespace(section=lambda _: {"affinity_capacity_wait_seconds": 0})
+        decisions = [decision_for(local, api_kind), decision_for(next_endpoint, api_kind)]
+        runtime.policy = SimpleNamespace(choose=AsyncMock(side_effect=decisions))
+        runtime.draining_marker = AsyncMock(return_value=None)
+        lease = SimpleNamespace(release_deployment=AsyncMock())
+
+        async def acquire(_lease, ids, **kwargs):
+            return ids[0]
+
+        runtime.scheduler = SimpleNamespace(try_acquire_deployment_candidates=acquire)
+        runtime.budget = SimpleNamespace(reserve=AsyncMock(return_value=None))
+        state = ConversationState(
+            conversation_id="lineage-test", public_model=local.public_model,
+            endpoint_id=local.id, tier_rank=1, task="general", last_seen=1,
+            branch_id="branch-test",
+        )
+        original_state = copy.deepcopy(state)
+        capsule = object()
+        compacted_messages = [{"role": "user", "content": "summary"}]
+
+        async def compact(current, value, **kwargs):
+            assert parameters(value["tools"], api_kind)["properties"]["params"]["additionalProperties"] is True
+            compacted = replace_messages(value, api_kind, compacted_messages)
+            return capsule, compacted, current.token_counter.count_request(compacted, api_kind)
+
+        monkeypatch.setattr("ai_router.api._compact_body_for_target", compact)
+        result = await _acquire_route_capacity(
+            runtime, request_id="compaction-reselection",
+            requested_model="auto", evaluation=None, prompt_tokens=prompt_tokens,
+            output_reserve_tokens=16, requested_context_tokens=prompt_tokens + 16,
+            modalities={"text"}, has_tools=True, required_capabilities=None,
+            conversation=state, body=body, api_kind=api_kind, lease=lease,
+            excluded_endpoints=set(), excluded_deployments=set(),
+            capacity_attempts=0, queue_wait_ms=0,
+            identity=IdentityProfile.from_settings({"enabled": False}),
+            allow_compaction=True,
+        )
+        decision, routed, actual_capsule = result[:3]
+        expected = replace_messages(original, api_kind, compacted_messages)
+        neutral_tokens = runtime.token_counter.count_request(expected, api_kind)
+        if not next_cloud:
+            expected["tools"] = normalize_llama_tool_schemas(expected["tools"], api_kind)
+        assert routed == expected
+        second_choice = runtime.policy.choose.await_args_list[1].kwargs
+        assert second_choice["prompt_tokens"] == neutral_tokens
+        assert second_choice["requested_context_tokens"] == neutral_tokens + 16
+        assert second_choice["conversation"] is None
+        assert decision.prompt_tokens == runtime.token_counter.count_request(expected, api_kind)
+        assert actual_capsule is capsule
+        assert body == original and state == original_state
+        lease.release_deployment.assert_awaited_once()
 
     asyncio.run(check())

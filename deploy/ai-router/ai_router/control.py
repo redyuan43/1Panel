@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .errors import RouterError
 from .identity import IdentityProfile
+from .media_service.gateway import router as media_router
 from .route_trace import graph_document, validate_review
 from .runtime import RouterRuntime, build_runtime
 
@@ -49,6 +50,11 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         lifespan=lifespan,
     )
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
+    app.include_router(media_router(admin=True))
+
+    @app.get("/media")
+    async def media_console() -> FileResponse:
+        return FileResponse(STATIC_DIR / "media.html")
 
     @app.exception_handler(RouterError)
     async def router_error_handler(
@@ -409,9 +415,18 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         return {"key": key}
 
     @app.get("/api/route-graph")
-    async def route_graph(request: Request) -> dict[str, Any]:
+    async def route_graph(
+        request: Request,
+        mode: str = Query(default="simple"),
+    ) -> dict[str, Any]:
         _authorized_runtime(request)
-        return graph_document()
+        if mode not in {"simple", "detailed"}:
+            raise RouterError(
+                "mode must be simple or detailed",
+                status_code=400,
+                code="invalid_graph_mode",
+            )
+        return graph_document(mode=mode)
 
     @app.get("/api/route-traces")
     async def route_traces(
@@ -428,8 +443,11 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         review_status: str | None = None,
         search: str | None = None,
         node: str | None = None,
+        privacy_decision: str | None = None,
     ) -> dict[str, Any]:
         current = _authorized_runtime(request)
+        if privacy_decision not in {None, "", "reviewed", "normal", "internal_info", "uncertain"}:
+            raise RouterError("invalid privacy decision", status_code=400, code="invalid_trace_filter")
         if request_mode not in {"auto", "explicit", "all"}:
             raise RouterError(
                 "request_mode must be auto, explicit, or all",
@@ -463,6 +481,8 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             review_status=_query_text(review_status),
             search=_query_text(search),
             endpoint_ids=endpoint_ids,
+            privacy_decision=privacy_decision,
+            auto_models=("auto", str(current.settings.section("identity").get("public_model_id") or "siyuan/auto")),
         )
         for item in payload["items"]:
             item["node"] = (
@@ -490,6 +510,23 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 code="route_trace_not_found",
             )
         return {"trace": value}
+
+    @app.post("/api/route-traces/{request_id}/privacy-feedback")
+    async def privacy_feedback(request_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        try:
+            feedback = await current.route_traces.add_privacy_feedback(
+                request_id, decision=str(value.get("decision", "")),
+                note=value.get("note"),
+                reviewer_source=request.client.host if request.client else "unknown",
+            )
+        except ValueError as exc:
+            raise RouterError(str(exc), status_code=400, code="invalid_privacy_feedback") from exc
+        except KeyError as exc:
+            raise RouterError("route trace was not found", status_code=404, code="route_trace_not_found") from exc
+        current.audit.write("privacy_feedback", request_id=request_id, **feedback)
+        return {"feedback": feedback}
 
     @app.post("/api/route-traces/{request_id}/reviews")
     async def review_route_trace(

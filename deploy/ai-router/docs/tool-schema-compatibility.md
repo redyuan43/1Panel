@@ -1,6 +1,7 @@
 # Local Tool Schema Compatibility
 
-Date: 2026-09-04. Status: deployed to both Router API instances and live-verified.
+Date: 2026-09-04. Status: base adapter deployed to both Router API instances and
+live-verified; the post-commit compaction re-selection fix below is not deployed.
 
 ## Behavior
 
@@ -52,6 +53,27 @@ with an identity function reproduces the same failure. Neither the registry
 nor that test was changed for this fix; the full suite is not green.
 
 Python compilation and `git diff --check` passed.
+
+## Post-Commit Review
+
+The isolated baseline commit `416aa9ef4` passed all 358 offline tests, excluding
+unrelated concurrent workspace changes described above.
+
+Review found that explicit compaction of a bound local conversation carried
+the normalized tools into model re-selection. A subsequent cloud choice could
+therefore receive the local-only rewrite, and selection used the previous
+backend's tool token count.
+
+The repair restores original tool definitions before re-selection and recounts
+the compacted request when those definitions differ. Compacted messages and the
+existing routing policy remain unchanged. Four regression cases reproduce the
+failure before the fix and pass afterward, covering Chat/Responses and both
+local/cloud re-selection. The compatibility suite now has 103 passing cases.
+The isolated baseline plus this repair passed all 362 tests in 53.91 seconds;
+Python compilation and `git diff --check` also passed.
+
+This review repair remains uncommitted and undeployed. No production inference
+or AGX access was performed during the review.
 
 ## Actual Converter Check
 

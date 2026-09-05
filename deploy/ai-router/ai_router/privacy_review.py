@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import time
 from typing import Any
 from urllib.parse import urlparse
@@ -14,6 +15,7 @@ import httpx
 from .audit import AuditLog
 from .privacy_view import ReviewView, review_view
 from .store import StateStore
+from .route_trace import RouteTraceStore
 
 
 POLICY_VERSION = "internal-disclosure-v1"
@@ -48,19 +50,22 @@ def validate_review_settings(value: dict[str, Any]) -> None:
     if not isinstance(value.get("mode", "off"), str) or value.get("mode", "off") not in {"off", "shadow"}:
         raise ValueError("privacy_review.mode must be off or shadow")
     parsed = urlparse(str(value.get("base_url", "http://agx.taild500c8.ts.net:11434")))
+    backend = value.get("backend", "ollama")
+    router_endpoint = backend == "router" and str(value.get("base_url", "")).rstrip("/") == "http://127.0.0.1:4000"
     if (
         parsed.scheme not in {"http", "https"}
         or not parsed.hostname
         or not (parsed.hostname.endswith(".taild500c8.ts.net") or parsed.hostname in {"localhost", "127.0.0.1", "::1"})
         or parsed.username or parsed.password or parsed.query or parsed.fragment
-        or parsed.path not in {"", "/"} or parsed.port in {4000, 4001}
+        or parsed.path not in {"", "/"} or (parsed.port in {4000, 4001} and not router_endpoint)
+        or (backend == "router" and not router_endpoint)
     ):
         raise ValueError("privacy_review.base_url must be a private, direct model endpoint")
     model = str(value.get("model", "qwen3:4b-instruct")).strip()
     if not model or model.lower() in {"auto", "siyuan/auto"}:
         raise ValueError("privacy_review.model must be an explicit model")
-    if value.get("backend", "ollama") not in {"ollama", "llamacpp"}:
-        raise ValueError("privacy_review.backend must be ollama or llamacpp")
+    if backend not in {"ollama", "llamacpp", "router"}:
+        raise ValueError("privacy_review.backend must be ollama, llamacpp or router")
     for key, default, low, high in (
         ("sample_rate", 0.1, 0, 1), ("timeout_seconds", 15, 1, 120),
         ("requests_per_minute", 2, 1, 2),
@@ -85,7 +90,7 @@ def review_request(view: ReviewView, model: str, backend: str = "ollama") -> dic
     # room for the chat template and 128 output tokens within the resident 4K.
     if len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) > 3000:
         return None
-    if backend == "llamacpp":
+    if backend in {"llamacpp", "router"}:
         return {
             "model": model, "stream": False, "messages": messages,
             "temperature": 0, "max_tokens": 128,
@@ -101,15 +106,31 @@ def review_request(view: ReviewView, model: str, backend: str = "ollama") -> dic
     }
 
 
+def review_headers(settings: dict[str, Any]) -> dict[str, str]:
+    if settings.get("backend") != "router":
+        return {}
+    validate_review_settings(settings)
+    key = os.environ.get("AI_ROUTER_PRIVACY_REVIEW_KEY", "").strip()
+    if not key:
+        raise ValueError("privacy review credential unavailable")
+    headers = {"Authorization": f"Bearer {key}"}
+    if settings.get("_request_id"):
+        headers["X-Request-ID"] = f"privacy-review:{settings['_request_id']}"
+        headers["X-1Panel-Conversation-ID"] = f"privacy-review-{settings['_request_id']}"
+    return headers
+
+
 async def review_availability(client: httpx.AsyncClient, settings: dict[str, Any]) -> str | None:
     """Check a resident, idle backend without loading or reconfiguring models."""
     base_url = str(settings.get("base_url", "http://agx.taild500c8.ts.net:11434")).rstrip("/")
     model = str(settings.get("model", "qwen3:4b-instruct"))
-    if settings.get("backend", "ollama") == "llamacpp":
-        response = await client.get(base_url + "/v1/models", timeout=2, follow_redirects=False)
+    if settings.get("backend", "ollama") in {"llamacpp", "router"}:
+        response = await client.get(base_url + "/v1/models", headers=review_headers(settings), timeout=2, follow_redirects=False)
         response.raise_for_status()
         if not any(item.get("id") == model for item in response.json().get("data", [])):
             return "not_resident"
+        if settings.get("backend") == "router":
+            return None
         response = await client.get(base_url + "/slots", timeout=2, follow_redirects=False)
         response.raise_for_status()
         slots = response.json()
@@ -142,14 +163,15 @@ async def classify(
     async def call():
         response = await client.post(
             str(settings.get("base_url", "http://agx.taild500c8.ts.net:11434")).rstrip("/")
-            + ("/v1/chat/completions" if backend == "llamacpp" else "/api/chat"),
+            + ("/v1/chat/completions" if backend in {"llamacpp", "router"} else "/api/chat"),
             json=request,
+            headers=review_headers(settings),
             timeout=float(settings.get("timeout_seconds", 15)),
             follow_redirects=False,
         )
         response.raise_for_status()
         payload = response.json()
-        if backend == "llamacpp":
+        if backend in {"llamacpp", "router"}:
             choice = payload["choices"][0]
             complete = choice.get("finish_reason") == "stop"
             result = json.loads(choice["message"]["content"])
@@ -164,7 +186,10 @@ async def classify(
             or result["reason"] not in REASONS
         ):
             raise ValueError("invalid classifier response")
-        return {**result, "valid": True, "elapsed_ms": round((time.monotonic() - started) * 1000)}
+        return {
+            **result, "valid": True, "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "review_request_id": response.headers.get("x-request-id") if backend == "router" else None,
+        }
     try:
         return await asyncio.wait_for(call(), float(settings.get("timeout_seconds", 15)))
     except (httpx.HTTPError, asyncio.TimeoutError, ValueError, KeyError, TypeError, IndexError):
@@ -175,17 +200,36 @@ async def classify(
 
 
 class PrivacyReviewer:
-    def __init__(self, store: StateStore, audit: AuditLog, client: httpx.AsyncClient | None = None) -> None:
+    def __init__(self, store: StateStore, audit: AuditLog, client: httpx.AsyncClient | None = None,
+                 *, traces: RouteTraceStore | None = None) -> None:
         self.store = store
         self.audit = audit
         self.client = client or httpx.AsyncClient(trust_env=False, follow_redirects=False)
         self.tasks: set[asyncio.Task] = set()
+        self.records: set[asyncio.Task] = set()
+        self.traces = traces
 
     def _record(self, fields: dict[str, Any], **result: Any) -> None:
+        value = {**fields, **result}
+        value["updated_at"] = time.time()
+        value["status"] = result.get("status") or (
+            "skipped" if result.get("skipped") else "completed" if result.get("valid") else "unavailable"
+        )
         try:
-            self.audit.write("privacy_review", **fields, **result)
+            self.audit.write("privacy_review", **value)
         except Exception:
             # A shadow-audit failure must never affect the customer's task.
+            pass
+        if self.traces is not None:
+            task = asyncio.create_task(self._persist(value))
+            self.records.add(task)
+            task.add_done_callback(self.records.discard)
+
+    async def _persist(self, value: dict[str, Any]) -> None:
+        try:
+            await self.traces.save_privacy_assessment(value)
+        except Exception:
+            # Durable audit storage is also outside the serving dependency chain.
             pass
 
     def submit(self, body: dict[str, Any], api_kind: str, settings: dict[str, Any], *, request_id: str, client_id: str) -> None:
@@ -198,6 +242,8 @@ class PrivacyReviewer:
             "request_id": request_id, "client_id": client_id, "mode": "shadow",
             "policy_version": POLICY_VERSION,
             "review_model": str(settings.get("model", "qwen3:4b-instruct")),
+            "backend": settings.get("backend", "ollama"),
+            "deadline_at": time.time() + float(settings.get("timeout_seconds", 15)) + 10,
         }
         if self.tasks:
             self._record(fields, decision="uncertain", reason="local_busy", skipped=True)
@@ -227,6 +273,8 @@ class PrivacyReviewer:
             if count > int(settings.get("requests_per_minute", 2)):
                 self._record(fields, decision="uncertain", reason="sample_limit", skipped=True)
                 return
+            self._record(fields, status="pending", decision="uncertain", reason="queued")
+            settings["_request_id"] = fields["request_id"]
             unavailable = await review_availability(self.client, settings)
             if unavailable:
                 self._record(fields, decision="uncertain", reason=unavailable, skipped=True)
@@ -253,4 +301,5 @@ class PrivacyReviewer:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*list(self.records), return_exceptions=True)
         await self.client.aclose()
