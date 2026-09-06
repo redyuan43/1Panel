@@ -296,6 +296,22 @@ class HealthMonitor:
             for item in payload.get("workers", [])
             if isinstance(item, dict)
         ]
+        workers = [
+            item
+            for item in workers
+            if (
+                endpoint.provider_model
+                in {
+                    str(model)
+                    for model in item.get("models", [])
+                }
+                or (
+                    not item.get("models")
+                    and str(payload.get("model", ""))
+                    == endpoint.provider_model
+                )
+            )
+        ]
         available = [
             item
             for item in workers
@@ -309,9 +325,15 @@ class HealthMonitor:
             load_headroom=len(available) / max(1, len(ready)),
             latency_score=0.5,
             cache_generation=_generation(
-                str(payload.get("model", "")),
+                endpoint.provider_model,
                 "|".join(
-                    f"{item.get('worker_id')}:{item.get('state')}"
+                    (
+                        f"{item.get('worker_id')}:{item.get('state')}:"
+                        + ",".join(
+                            str(model)
+                            for model in item.get("models", [])
+                        )
+                    )
                     for item in workers
                 ),
             ),
@@ -335,6 +357,10 @@ class HealthMonitor:
                         "api_base": item.get("api_base"),
                         "ready": bool(item.get("ready")),
                         "state": item.get("state"),
+                        "models": [
+                            str(model)
+                            for model in item.get("models", [])
+                        ],
                         "safe_context_tokens": int(
                             item.get("safe_context_tokens", 0)
                         ),

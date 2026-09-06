@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 import os
 from pathlib import Path
 import re
@@ -125,6 +126,10 @@ class Registry:
         self._by_public_model: dict[str, list[Endpoint]] = {}
         for endpoint in self.endpoints:
             self._by_public_model.setdefault(endpoint.public_model, []).append(endpoint)
+        self.model_aliases = _model_aliases_from_dict(
+            raw.get("model_aliases", {}),
+            self.endpoints,
+        )
         self.tier_ranks = {
             str(key): int(value)
             for key, value in (raw.get("tier_ranks", {}) or {}).items()
@@ -144,6 +149,7 @@ class Registry:
                 endpoint.public_model,
                 [],
             ).append(endpoint)
+        value.model_aliases = copy.deepcopy(self.model_aliases)
         value.tier_ranks = dict(self.tier_ranks)
         return value
 
@@ -151,24 +157,141 @@ class Registry:
         return self._by_id.get(endpoint_id)
 
     def by_public_model(self, model: str) -> tuple[Endpoint, ...]:
-        return tuple(self._by_public_model.get(model, ()))
+        direct = self._by_public_model.get(model)
+        if direct is not None:
+            return tuple(direct)
+        alias = self.model_aliases.get(model)
+        if alias is None:
+            return ()
+        result = []
+        for endpoint_id in alias["endpoint_ids"]:
+            endpoint = self._by_id.get(endpoint_id)
+            if endpoint is None:
+                continue
+            metadata = copy.deepcopy(endpoint.metadata)
+            metadata["requested_model_alias"] = model
+            if alias["deployment_profile_ids"]:
+                metadata["allowed_deployment_profile_ids"] = list(
+                    alias["deployment_profile_ids"]
+                )
+            if alias["max_input_tokens"] is not None:
+                metadata["model_alias_max_input_tokens"] = alias[
+                    "max_input_tokens"
+                ]
+            if alias["max_output_tokens"] is not None:
+                metadata["model_alias_max_output_tokens"] = alias[
+                    "max_output_tokens"
+                ]
+            result.append(
+                replace(
+                    endpoint,
+                    public_model=model,
+                    metadata=metadata,
+                )
+            )
+        return tuple(result)
 
     def public_models(self) -> tuple[str, ...]:
-        return tuple(sorted(self._by_public_model))
+        return tuple(
+            sorted(set(self._by_public_model) | set(self.model_aliases))
+        )
 
     def enabled_public_models(self) -> tuple[str, ...]:
         return tuple(
             sorted(
                 {
-                    item.public_model
-                    for item in self.endpoints
-                    if item.enabled
+                    model
+                    for model in self.public_models()
+                    if any(
+                        item.enabled
+                        for item in self.by_public_model(model)
+                    )
                 }
             )
         )
 
     def responders(self) -> tuple[Endpoint, ...]:
         return tuple(item for item in self.endpoints if item.role == "responder")
+
+
+def _model_aliases_from_dict(
+    value: Any,
+    endpoints: tuple[Endpoint, ...],
+) -> dict[str, dict[str, Any]]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError("registry model_aliases must be an object")
+    by_id = {item.id: item for item in endpoints}
+    public_models = {item.public_model for item in endpoints}
+    aliases: dict[str, dict[str, Any]] = {}
+    for raw_model, raw_constraints in value.items():
+        model = str(raw_model).strip()
+        if not model or model == "auto":
+            raise ValueError("model alias must be a non-auto model ID")
+        if model in public_models:
+            raise ValueError(
+                f"model alias conflicts with endpoint public_model: {model}"
+            )
+        if not isinstance(raw_constraints, dict):
+            raise ValueError(f"model alias {model} must be an object")
+        endpoint_ids = tuple(
+            str(item)
+            for item in raw_constraints.get("endpoint_ids", [])
+        )
+        if not endpoint_ids:
+            raise ValueError(f"model alias {model} requires endpoint_ids")
+        unknown_endpoints = sorted(set(endpoint_ids) - set(by_id))
+        if unknown_endpoints:
+            raise ValueError(
+                f"model alias {model} has unknown endpoints: "
+                + ", ".join(unknown_endpoints)
+            )
+        deployment_profile_ids = tuple(
+            str(item)
+            for item in raw_constraints.get(
+                "deployment_profile_ids",
+                [],
+            )
+        )
+        available_profiles = {
+            profile.id
+            for endpoint_id in endpoint_ids
+            for profile in by_id[endpoint_id].deployment_profiles
+        }
+        unknown_profiles = sorted(
+            set(deployment_profile_ids) - available_profiles
+        )
+        if unknown_profiles:
+            raise ValueError(
+                f"model alias {model} has unknown deployment profiles: "
+                + ", ".join(unknown_profiles)
+            )
+        max_input_tokens = raw_constraints.get("max_input_tokens")
+        max_output_tokens = raw_constraints.get("max_output_tokens")
+        if max_input_tokens is not None and int(max_input_tokens) <= 0:
+            raise ValueError(
+                f"model alias {model} max_input_tokens must be positive"
+            )
+        if max_output_tokens is not None and int(max_output_tokens) <= 0:
+            raise ValueError(
+                f"model alias {model} max_output_tokens must be positive"
+            )
+        aliases[model] = {
+            "endpoint_ids": endpoint_ids,
+            "deployment_profile_ids": deployment_profile_ids,
+            "max_input_tokens": (
+                int(max_input_tokens)
+                if max_input_tokens is not None
+                else None
+            ),
+            "max_output_tokens": (
+                int(max_output_tokens)
+                if max_output_tokens is not None
+                else None
+            ),
+        }
+    return aliases
 
 
 def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
@@ -389,6 +512,7 @@ def client_policies(settings: Settings) -> tuple[ClientPolicy, ...]:
 
 
 def validate_settings(value: dict[str, Any]) -> None:
+    from .prompt_directives import validate_prompt_directives
     from .privacy_review import validate_review_settings
 
     validate_review_settings(value.get("identity", {}).get("review", {}))
@@ -462,6 +586,7 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError("evaluator.confidence_threshold must be between 0 and 1")
 
     routing = value.get("routing", {})
+    validate_prompt_directives(routing.get("prompt_directives", {}))
     strategy = str(routing.get("strategy", "legacy_v1"))
     if strategy not in {"legacy_v1", "intelligent_v2"}:
         raise ValueError(

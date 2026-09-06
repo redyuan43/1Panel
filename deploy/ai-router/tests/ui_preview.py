@@ -126,6 +126,9 @@ async def main():
         allowed_write = (
             request.method == "PUT" and path == "/api/settings"
         ) or (
+            request.method == "POST"
+            and path == "/api/prompt-directives/suggest"
+        ) or (
             request.method == "POST" and path.startswith("/api/route-traces/")
             and path.endswith(("/reviews", "/privacy-feedback"))
         )

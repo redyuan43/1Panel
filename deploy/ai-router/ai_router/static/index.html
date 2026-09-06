@@ -651,6 +651,28 @@
 
             <section class="settings-band policy-stage-card">
               <div class="settings-title">
+                <h3>定向暗语</h3>
+                <span>Prompt-directed routing</span>
+              </div>
+              <div class="directive-settings">
+                <div class="directive-toolbar">
+                  <label class="toggle-row">
+                    <span>启用暗语路由</span>
+                    <input id="directive-enabled" type="checkbox">
+                  </label>
+                  <button id="directive-random-all" type="button" class="secondary compact">
+                    全部随机
+                  </button>
+                  <span id="directive-pool-status" class="section-meta">词池载入中</span>
+                </div>
+                <div id="directive-rows" class="directive-rows"></div>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
                 <h3>任务评估</h3>
                 <span>Evaluation and compaction</span>
               </div>

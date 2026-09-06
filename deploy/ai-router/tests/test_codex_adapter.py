@@ -12,6 +12,9 @@ from fastapi.testclient import TestClient
 
 from ai_router.codex_adapter import CodexGateway, create_app
 from ai_router.codex_auth import CodexAccountStore
+from ai_router.config import Registry
+from ai_router.health import HealthMonitor
+from ai_router.store import InMemoryStateStore
 
 
 def _jwt(*, expires_at: int, account_id: str = "acct-test") -> str:
@@ -117,7 +120,11 @@ def test_codex_adapter_catalog_chat_tools_and_state(
                         {
                             "slug": "gpt-5.6-sol",
                             "context_window": 400000,
-                        }
+                        },
+                        {
+                            "slug": "gpt-6-astra",
+                            "context_window": 1050000,
+                        },
                     ]
                 },
             )
@@ -170,6 +177,10 @@ def test_codex_adapter_catalog_chat_tools_and_state(
     with TestClient(app) as client:
         health = client.get("/health")
         assert health.json()["safe_context_tokens"] == 272000
+        models = client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer adapter-key"},
+        )
         response = client.post(
             "/v1/accounts/primary/chat/completions",
             headers={
@@ -199,6 +210,11 @@ def test_codex_adapter_catalog_chat_tools_and_state(
 
     asyncio.run(async_client.aclose())
     assert health.json()["workers"][0]["ready"] is True
+    assert health.json()["models"] == ["gpt-5.6-sol", "gpt-6-astra"]
+    assert [item["id"] for item in models.json()["data"]] == [
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+    ]
     assert response.status_code == 200
     message = response.json()["choices"][0]["message"]
     assert message["content"] == "done"
@@ -210,6 +226,176 @@ def test_codex_adapter_catalog_chat_tools_and_state(
     assert captured[0]["prompt_cache_key"].startswith("pck_")
     assert captured[0]["tools"][0]["name"] != "git.status"
     assert captured[0]["tools"][0]["name"].replace("_", "").isalnum()
+
+
+def test_codex_adapter_routes_astra_with_the_requested_model(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _write_auth(
+        tmp_path,
+        access_token=_jwt(expires_at=int(time.time()) + 3600),
+    )
+    captured = {}
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"models": [{"slug": "gpt-6-astra"}]},
+            )
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp-astra",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "astra"}
+                        ],
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setenv("AI_ROUTER_CODEX_ADAPTER_KEY", "adapter-key")
+    async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    gateway = CodexGateway(
+        accounts=CodexAccountStore(tmp_path / "accounts"),
+        client=async_client,
+    )
+    with TestClient(create_app(gateway)) as client:
+        health = client.get("/health")
+        response = client.post(
+            "/v1/accounts/primary/chat/completions",
+            headers={"Authorization": "Bearer adapter-key"},
+            json={
+                "model": "gpt-6-astra",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+    asyncio.run(async_client.aclose())
+
+    assert health.json()["workers"][0]["models"] == ["gpt-6-astra"]
+    assert response.status_code == 200
+    assert response.headers["x-1panel-codex-model"] == "gpt-6-astra"
+    assert response.json()["model"] == "gpt-6-astra"
+    assert captured["model"] == "gpt-6-astra"
+
+
+def test_codex_adapter_rejects_model_missing_from_selected_account(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _write_auth(
+        tmp_path,
+        access_token=_jwt(expires_at=int(time.time()) + 3600),
+    )
+    methods: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        methods.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(
+                200,
+                json={"models": [{"slug": "gpt-5.6-sol"}]},
+            )
+        return httpx.Response(500, json={"error": "unexpected request"})
+
+    monkeypatch.setenv("AI_ROUTER_CODEX_ADAPTER_KEY", "adapter-key")
+    async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    gateway = CodexGateway(
+        accounts=CodexAccountStore(tmp_path / "accounts"),
+        client=async_client,
+    )
+    with TestClient(create_app(gateway)) as client:
+        health = client.get("/health")
+        response = client.post(
+            "/v1/accounts/primary/chat/completions",
+            headers={"Authorization": "Bearer adapter-key"},
+            json={
+                "model": "gpt-6-astra",
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+    asyncio.run(async_client.aclose())
+
+    assert health.status_code == 200
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "model_not_entitled"
+    assert methods == ["GET"]
+
+
+def test_codex_pool_health_filters_workers_by_endpoint_model() -> None:
+    registry = Registry(
+        Path(__file__).resolve().parents[1] / "config/registry.yaml"
+    )
+    sol = registry.by_id("codex-pro-gpt-5.6-sol")
+    astra = registry.by_id("codex-pro-gpt-6-astra")
+    assert sol is not None and astra is not None
+
+    async def scenario():
+        async def upstream(_request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "models": ["gpt-5.6-sol", "gpt-6-astra"],
+                    "workers": [
+                        {
+                            "worker_id": "codex-primary",
+                            "account_alias": "primary",
+                            "ready": True,
+                            "state": "available",
+                            "safe_context_tokens": 272000,
+                            "models": ["gpt-5.6-sol", "gpt-6-astra"],
+                        },
+                        {
+                            "worker_id": "codex-secondary",
+                            "account_alias": "secondary",
+                            "ready": True,
+                            "state": "available",
+                            "safe_context_tokens": 272000,
+                            "models": ["gpt-5.6-sol"],
+                        },
+                    ],
+                },
+            )
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(upstream)
+        )
+        monitor = HealthMonitor(
+            InMemoryStateStore(),
+            client=client,
+        )
+        try:
+            return (
+                await monitor.status(sol, force_refresh=True),
+                await monitor.status(astra, force_refresh=True),
+            )
+        finally:
+            await client.aclose()
+
+    sol_status, astra_status = asyncio.run(scenario())
+    assert sol_status.detail["available_worker_ids"] == [
+        "codex-primary",
+        "codex-secondary",
+    ]
+    assert astra_status.detail["available_worker_ids"] == [
+        "codex-primary"
+    ]
+    assert astra_status.detail["workers"][0]["models"] == [
+        "gpt-5.6-sol",
+        "gpt-6-astra",
+    ]
 
 
 def test_codex_adapter_streams_chat_and_reasoning_state(

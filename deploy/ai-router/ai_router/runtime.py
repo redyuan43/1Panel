@@ -21,6 +21,7 @@ from .endpoint_config import EndpointConfigManager
 from .health import HealthMonitor
 from .history import history_identities
 from .policy import ConversationRepository, RoutingPolicy
+from .prompt_directives import PromptDirectiveStore, configured_phrases
 from .privacy_review import PrivacyReviewer
 from .route_trace import RouteTraceStore
 from .scheduler import ClientLimiter, Scheduler
@@ -49,6 +50,7 @@ class RouterRuntime:
     policy: RoutingPolicy
     audit: AuditLog
     route_traces: RouteTraceStore
+    prompt_directives: PromptDirectiveStore
     training: TrainingArchive | None
     internal_client: httpx.AsyncClient
     internal_base_url: str
@@ -518,6 +520,17 @@ def build_runtime(
             _required_env("AI_ROUTER_TRAINING_DB_PATH"),
             _required_env("AI_ROUTER_TRAINING_KEY_PATH"),
         )
+    prompt_directive_store = PromptDirectiveStore(
+        os.environ.get(
+            "AI_ROUTER_PROMPT_DIRECTIVE_DB_PATH",
+            str(settings.runtime_path.with_name("prompt-directives.sqlite3")),
+        )
+    )
+    prompt_directive_store.sync_active(
+        configured_phrases(
+            settings.section("routing").get("prompt_directives", {})
+        )
+    )
     return RouterRuntime(
         settings=settings,
         base_registry=registry,
@@ -560,6 +573,7 @@ def build_runtime(
                 )
             ),
         ),
+        prompt_directives=prompt_directive_store,
         training=training,
         internal_client=httpx.AsyncClient(
             timeout=httpx.Timeout(900.0, connect=5.0),

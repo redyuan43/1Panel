@@ -830,6 +830,9 @@ class DecisionTrace:
             "required_tier": evaluation.required_tier,
             "preferred_tier": evaluation.preferred_tier,
             "evidence": dict(evaluation.evidence),
+            "directive_id": evaluation.directive_id,
+            "directive_generation": evaluation.directive_generation,
+            "required_endpoint_id": evaluation.required_endpoint_id,
         }
         self.record(
             attempt,

@@ -1,6 +1,7 @@
 const state = {
   key: sessionStorage.getItem("ai-router-admin-key") || "",
   settings: null,
+  directivePool: null,
   dashboard: null,
   clients: [],
   routeGraph: null,
@@ -44,6 +45,14 @@ const FALLBACK_PROFILES = [
   ["complex_code", "复杂代码"],
   ["multimodal", "多模态"],
   ["multimodal_complex_code", "多模态复杂代码"],
+];
+
+const PROMPT_DIRECTIVES = [
+  ["rilun", "Sol"],
+  ["beichen", "Astra"],
+  ["qinglan", "DeepSeek V4 Pro"],
+  ["yuheng", "GLM 5.3"],
+  ["reset", "恢复常规模式"],
 ];
 
 const weightLabels = {
@@ -2757,8 +2766,12 @@ function value(path, fallback = "") {
 
 async function loadSettings() {
   if (!state.key) return;
-  const payload = await api("/api/settings");
+  const [payload, poolPayload] = await Promise.all([
+    api("/api/settings"),
+    api("/api/prompt-directives/pool"),
+  ]);
   state.settings = payload.settings;
+  state.directivePool = poolPayload.pool;
   renderSettings();
 }
 
@@ -2815,6 +2828,10 @@ function renderSettings() {
   byId("cloud-budget").value = value("cloud.monthly_budget", 0);
   byId("cloud-providers").value = value("cloud.allowed_providers", []).join(", ");
   byId("cloud-models").value = value("cloud.allowed_models", []).join(", ");
+  byId("directive-enabled").checked = Boolean(
+    value("routing.prompt_directives.enabled", false),
+  );
+  renderPromptDirectives();
   byId("evaluator-enabled").checked = Boolean(value("evaluator.enabled", false));
   byId("evaluator-model").value = value("evaluator.model_id");
   byId("evaluator-confidence").value = value("evaluator.confidence_threshold", 0.85);
@@ -2869,6 +2886,114 @@ function renderSettings() {
   renderRemoteFallbackOrder();
   updateStrategyBranchVisibility();
   updateWeightsTotal();
+}
+
+function promptDirectiveSettings() {
+  return state.settings?.routing?.prompt_directives || {};
+}
+
+function promptDirectiveEntry(id) {
+  const settings = promptDirectiveSettings();
+  return id === "reset" ? settings.reset : settings.routes?.[id];
+}
+
+function renderPromptDirectives() {
+  const container = byId("directive-rows");
+  if (!container) return;
+  container.replaceChildren();
+  PROMPT_DIRECTIVES.forEach(([id, label]) => {
+    const entry = promptDirectiveEntry(id) || {};
+    const row = document.createElement("div");
+    row.className = "directive-row";
+    row.innerHTML = `
+      <label for="directive-phrase-${escapeHtml(id)}">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(entry.endpoint_id || "清除会话定向")}</span>
+      </label>
+      <div class="directive-secret">
+        <input id="directive-phrase-${escapeHtml(id)}" type="password"
+          value="${escapeHtml(entry.phrase || "")}"
+          maxlength="120" autocomplete="off" spellcheck="false"
+          data-directive-phrase="${escapeHtml(id)}">
+        <button type="button" class="secondary compact"
+          data-directive-reveal="${escapeHtml(id)}">显示</button>
+        <button type="button" class="secondary compact"
+          data-directive-copy="${escapeHtml(id)}">复制</button>
+        <button type="button" class="secondary compact"
+          data-directive-random="${escapeHtml(id)}">随机</button>
+      </div>`;
+    container.append(row);
+  });
+  bindPromptDirectiveControls();
+  renderPromptDirectivePool();
+}
+
+function renderPromptDirectivePool() {
+  const target = byId("directive-pool-status");
+  const pool = state.directivePool;
+  target.textContent = pool
+    ? `可用 ${pool.available} / ${pool.total}`
+    : "词池不可用";
+}
+
+function bindPromptDirectiveControls() {
+  const container = byId("directive-rows");
+  container.querySelectorAll("[data-directive-reveal]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const input = container.querySelector(
+        `[data-directive-phrase="${cssEscape(button.dataset.directiveReveal)}"]`,
+      );
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      button.textContent = reveal ? "隐藏" : "显示";
+    });
+  });
+  container.querySelectorAll("[data-directive-copy]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const input = container.querySelector(
+        `[data-directive-phrase="${cssEscape(button.dataset.directiveCopy)}"]`,
+      );
+      try {
+        await navigator.clipboard.writeText(input.value);
+        notice("暗语已复制。");
+      } catch {
+        input.select();
+        document.execCommand("copy");
+        notice("暗语已复制。");
+      }
+    });
+  });
+  container.querySelectorAll("[data-directive-random]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void randomizePromptDirectives([button.dataset.directiveRandom]);
+    });
+  });
+}
+
+async function randomizePromptDirectives(ids) {
+  const buttons = document.querySelectorAll(
+    "#directive-random-all, [data-directive-random]",
+  );
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const payload = await api("/api/prompt-directives/suggest", {
+      method: "POST",
+      body: JSON.stringify({directive_ids: ids}),
+    });
+    Object.entries(payload.suggestions || {}).forEach(([id, phrase]) => {
+      const input = document.querySelector(
+        `[data-directive-phrase="${cssEscape(id)}"]`,
+      );
+      if (input) input.value = phrase;
+    });
+    state.directivePool = payload.pool;
+    renderPromptDirectivePool();
+    notice("新暗语已生成，保存后生效。");
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    buttons.forEach((button) => { button.disabled = false; });
+  }
 }
 
 function cloudEndpointIds() {
@@ -3138,6 +3263,16 @@ function validateSettingsDraft(draft) {
   if (!Number.isFinite(timeout) || timeout < 1 || timeout > 120) {
     errors.push("隐私旁路超时须在 1 到 120 秒之间");
   }
+  const directives = draft.routing.prompt_directives || {};
+  const phrases = [
+    ...Object.values(directives.routes || {}).map((item) => item.phrase),
+    directives.reset?.phrase,
+  ].map((item) => String(item || "").normalize("NFKC").trim().toLowerCase());
+  if (phrases.some((item) => !item)) {
+    errors.push("每条定向暗语都不能为空");
+  } else if (new Set(phrases).size !== phrases.length) {
+    errors.push("定向暗语不能重复");
+  }
   return errors;
 }
 
@@ -3146,6 +3281,27 @@ function collectSettings() {
   document.querySelectorAll("[data-weight]").forEach((input) => {
     weights[input.dataset.weight] = Number(input.value);
   });
+  const currentDirectives = promptDirectiveSettings();
+  const directiveRoutes = {};
+  Object.entries(currentDirectives.routes || {}).forEach(([id, route]) => {
+    directiveRoutes[id] = {
+      ...route,
+      phrase: document.querySelector(
+        `[data-directive-phrase="${cssEscape(id)}"]`,
+      )?.value.trim() || "",
+    };
+  });
+  const promptDirectives = {
+    ...currentDirectives,
+    enabled: byId("directive-enabled").checked,
+    routes: directiveRoutes,
+    reset: {
+      ...currentDirectives.reset,
+      phrase: document.querySelector(
+        '[data-directive-phrase="reset"]',
+      )?.value.trim() || "",
+    },
+  };
   return {
     affinity: {
       ...state.settings.affinity,
@@ -3203,6 +3359,7 @@ function collectSettings() {
     },
     routing: {
       ...state.settings.routing,
+      prompt_directives: promptDirectives,
       affinity_capacity_wait_seconds: Number(
         byId("affinity-capacity-wait").value,
       ),
@@ -3224,6 +3381,32 @@ async function saveSettings(event) {
   const errors = validateSettingsDraft(draft);
   if (errors.length) {
     notice(errors[0], true);
+    return;
+  }
+  const current = promptDirectiveSettings();
+  const next = draft.routing.prompt_directives;
+  const changedLabels = PROMPT_DIRECTIVES
+    .filter(([id]) => (
+      String(promptDirectiveEntry(id)?.phrase || "")
+      !== String(
+        id === "reset"
+          ? next.reset?.phrase || ""
+          : next.routes?.[id]?.phrase || ""
+      )
+    ))
+    .map(([, label]) => label);
+  const directiveModeChanged = Boolean(current.enabled) !== Boolean(next.enabled);
+  if (
+    (changedLabels.length || directiveModeChanged)
+    && !window.confirm(
+      `保存后旧暗语和旧会话定向立即失效。变更：${
+        [
+          ...(directiveModeChanged ? ["启用状态"] : []),
+          ...changedLabels,
+        ].join("、")
+      }。确认继续？`,
+    )
+  ) {
     return;
   }
   button.disabled = true;
@@ -3499,6 +3682,9 @@ byId("reload").addEventListener("click", async () => {
   }
 });
 byId("settings-form").addEventListener("submit", saveSettings);
+byId("directive-random-all").addEventListener("click", () => {
+  void randomizePromptDirectives(PROMPT_DIRECTIVES.map(([id]) => id));
+});
 byId("routing-strategy").addEventListener(
   "change",
   updateStrategyBranchVisibility,

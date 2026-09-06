@@ -70,6 +70,24 @@ class NoCompatibleModelError(RouterError):
         )
 
 
+class RouteDirectiveIncompatibleError(RouterError):
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            status_code=422,
+            code="route_directive_incompatible",
+        )
+
+
+class RouteDirectiveUnavailableError(RouterError):
+    def __init__(self, message: str) -> None:
+        super().__init__(
+            message,
+            status_code=503,
+            code="route_directive_unavailable",
+        )
+
+
 class HistoryMigrationRequiredError(RouterError):
     def __init__(
         self,

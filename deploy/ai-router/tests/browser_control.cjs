@@ -255,6 +255,32 @@ async function run() {
       if (request.method() === 'PUT' && request.url().endsWith('/api/settings')) puts++;
     });
     await page.locator('[data-view="settings"]').click();
+    await check('prompt directive random preview and confirmed save', async () => {
+      assert.equal(await page.locator('[data-directive-phrase]').count(), 5);
+      const input = page.locator('[data-directive-phrase="beichen"]');
+      const original = await input.inputValue();
+      const revision = await page.evaluate(() => state.settings.routing.prompt_directives.revision);
+      const generation = await page.evaluate(() => state.settings.routing.prompt_directives.routes.beichen.generation);
+      const before = puts;
+      const suggested = page.waitForResponse(response =>
+        response.url().endsWith('/api/prompt-directives/suggest')
+        && response.request().method() === 'POST');
+      await page.locator('[data-directive-random="beichen"]').click();
+      assert.equal((await suggested).status(), 200);
+      assert.notEqual(await input.inputValue(), original);
+      assert.equal(puts, before);
+      page.once('dialog', async dialog => {
+        assert.match(dialog.message(), /旧暗语和旧会话定向立即失效/);
+        await dialog.accept();
+      });
+      const saved = page.waitForResponse(response =>
+        response.url().endsWith('/api/settings')
+        && response.request().method() === 'PUT');
+      await page.locator('#settings-form button[type="submit"]').click();
+      assert.equal((await saved).status(), 200);
+      assert.equal(await page.evaluate(() => state.settings.routing.prompt_directives.revision), revision + 1);
+      assert.equal(await page.evaluate(() => state.settings.routing.prompt_directives.routes.beichen.generation), generation + 1);
+    });
     await check('strategy branches and fallback-order controls', async () => {
       await page.locator('#routing-strategy').selectOption('legacy_v1');
       assert.equal(await page.locator('#branch-intelligent_v2').evaluate(node => node.classList.contains('dimmed')), true);

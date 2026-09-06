@@ -380,7 +380,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 9
+    assert len(registry.endpoints) == 12
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
@@ -454,14 +454,25 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
         endpoint.capabilities.chat
         and endpoint.capabilities.tools == "parallel"
         for endpoint in registry.endpoints
-        if endpoint.enabled
+        if endpoint.enabled and endpoint.auto_candidate
     )
     assert glm.capabilities.responses == "adapter"
     assert all(
         endpoint.capabilities.responses == "native"
         for endpoint in registry.endpoints
-        if endpoint.enabled and endpoint.id != glm.id
+        if (
+            endpoint.enabled
+            and endpoint.auto_candidate
+            and endpoint.id != glm.id
+        )
     )
+    nx3_shared = registry.by_id("nx3-qwen36-shared-64k")
+    assert nx3_shared is not None
+    assert nx3_shared.enabled is False
+    assert nx3_shared.auto_candidate is False
+    assert nx3_shared.capabilities.chat is True
+    assert nx3_shared.capabilities.tools == "none"
+    assert nx3_shared.capabilities.responses == "none"
 
 
 def test_tail_control_tls_is_isolated_and_installable() -> None:

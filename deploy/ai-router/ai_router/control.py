@@ -13,6 +13,10 @@ from fastapi.staticfiles import StaticFiles
 from .errors import RouterError
 from .identity import IdentityProfile
 from .media_service.gateway import router as media_router
+from .prompt_directives import (
+    configured_phrases,
+    prepare_prompt_directive_update,
+)
 from .route_trace import graph_document, validate_review
 from .runtime import RouterRuntime, build_runtime
 
@@ -93,6 +97,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     @app.put("/api/settings")
     async def put_settings(request: Request) -> dict[str, Any]:
         current = _authorized_runtime(request)
+        current.reload_settings()
         try:
             value = await request.json()
         except Exception as exc:
@@ -108,6 +113,24 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 code="invalid_settings",
             )
         override = _editable(value)
+        current_prompt = current.settings.section("routing").get(
+            "prompt_directives",
+            {},
+        )
+        proposed_prompt = (
+            override.get("routing", {}).get("prompt_directives")
+            if isinstance(override.get("routing"), dict)
+            else None
+        )
+        prompt_changes: list[dict[str, str]] = []
+        if proposed_prompt is not None:
+            prepared_prompt, prompt_changes = (
+                prepare_prompt_directive_update(
+                    current_prompt,
+                    proposed_prompt,
+                )
+            )
+            override["routing"]["prompt_directives"] = prepared_prompt
         try:
             current.settings.write_runtime(override)
         except (TypeError, ValueError) as exc:
@@ -117,15 +140,89 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 code="invalid_settings",
             ) from exc
         current.reload_settings()
+        updated_prompt = current.settings.section("routing").get(
+            "prompt_directives",
+            {},
+        )
+        current.prompt_directives.sync_active(
+            configured_phrases(updated_prompt)
+        )
+        current.prompt_directives.record_changes(
+            int(updated_prompt.get("revision", 1)),
+            prompt_changes,
+            previous=current_prompt,
+            current=updated_prompt,
+            source=request.client.host if request.client else "unknown",
+        )
         current.audit.write(
             "settings_updated",
             sections=sorted(override),
+            prompt_directive_ids=[
+                item["directive_id"] for item in prompt_changes
+            ],
             source=request.client.host if request.client else "unknown",
         )
         return {
             "ok": True,
             "settings": _editable(current.settings.value),
         }
+
+    @app.get("/api/prompt-directives/pool")
+    async def prompt_directive_pool(
+        request: Request,
+    ) -> JSONResponse:
+        current = _authorized_runtime(request)
+        current.reload_settings()
+        return JSONResponse(
+            {"pool": current.prompt_directives.stats()},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/api/prompt-directives/suggest")
+    async def suggest_prompt_directives(
+        request: Request,
+    ) -> JSONResponse:
+        current = _authorized_runtime(request)
+        current.reload_settings()
+        value = await _json_body(request)
+        directive_ids = value.get("directive_ids")
+        if not isinstance(directive_ids, list):
+            raise RouterError(
+                "directive_ids must be an array",
+                status_code=400,
+                code="invalid_route_directive",
+            )
+        prompt_settings = current.settings.section("routing").get(
+            "prompt_directives",
+            {},
+        )
+        valid_ids = {
+            *prompt_settings.get("routes", {}),
+            "reset",
+        }
+        ids = [str(item) for item in directive_ids]
+        if any(item not in valid_ids for item in ids):
+            raise RouterError(
+                "directive_ids contains an unknown directive",
+                status_code=400,
+                code="invalid_route_directive",
+            )
+        suggestions = current.prompt_directives.suggest(
+            ids,
+            excluded=set(configured_phrases(prompt_settings)),
+        )
+        current.audit.write(
+            "prompt_directives_suggested",
+            directive_ids=ids,
+            source=request.client.host if request.client else "unknown",
+        )
+        return JSONResponse(
+            {
+                "suggestions": suggestions,
+                "pool": current.prompt_directives.stats(),
+            },
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.get("/api/endpoints")
     async def endpoints(request: Request) -> dict[str, Any]:

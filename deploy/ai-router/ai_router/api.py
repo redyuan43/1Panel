@@ -48,6 +48,10 @@ from .identity import (
 from .media import inspect_image_inputs, normalize_ai_images
 from .media_service.gateway import model_descriptors as media_model_descriptors, router as media_router
 from .policy import updated_conversation_state
+from .prompt_directives import (
+    resolve_conversation_directive,
+    sanitize_prompt_directives,
+)
 from .protocol import normalize_llama_tool_schemas, normalize_request
 from .public_protocol import private_history_items
 from .privacy_view import review_view
@@ -351,6 +355,9 @@ async def _model_descriptor(
         for endpoint in endpoints
         if endpoint.metadata.get("max_output_tokens") is not None
     ]
+    alias = current.registry.model_aliases.get(model, {})
+    alias_max_input_tokens = alias.get("max_input_tokens")
+    alias_max_output_tokens = alias.get("max_output_tokens")
     if use_auto_limits:
         max_output_tokens = int(
             current.settings.section("routing").get(
@@ -373,14 +380,29 @@ async def _model_descriptor(
             configured_output_limits,
             default=min(65536, max_context_tokens),
         )
+        if alias_max_output_tokens is not None:
+            max_output_tokens = min(
+                max_output_tokens,
+                int(alias_max_output_tokens),
+            )
     max_output_tokens = min(
         max_output_tokens,
         max_context_tokens,
     )
-    descriptor["maxInputTokens"] = max(
+    max_input_tokens = max(
         0,
         max_context_tokens - max_output_tokens,
     )
+    if not use_auto_limits and alias_max_input_tokens is not None:
+        max_input_tokens = min(
+            max_input_tokens,
+            int(alias_max_input_tokens),
+        )
+        max_context_tokens = min(
+            max_context_tokens,
+            max_input_tokens + max_output_tokens,
+        )
+    descriptor["maxInputTokens"] = max_input_tokens
     descriptor["maxOutputTokens"] = max_output_tokens
     descriptor["contextWindow"] = max_context_tokens
     if supports_images:
@@ -477,6 +499,36 @@ def _resolve_requested_model(
     )
 
 
+def _ensure_prompt_directive_access(
+    current: RouterRuntime,
+    authenticated: Any,
+    directive: Any,
+) -> None:
+    if directive is None:
+        return
+    if authenticated.policy.disclosure_mode == "public":
+        raise AuthenticationError(
+            "API key does not permit prompt-directed routing"
+        )
+    endpoint = current.registry.by_id(str(directive.endpoint_id or ""))
+    if endpoint is None:
+        return
+    allowed_models = set(authenticated.policy.models)
+    if "*" in allowed_models or endpoint.public_model in allowed_models:
+        return
+    if any(
+        any(
+            candidate.id == endpoint.id
+            for candidate in current.registry.by_public_model(model)
+        )
+        for model in allowed_models
+    ):
+        return
+    raise AuthenticationError(
+        "API key does not permit the directed model"
+    )
+
+
 def _ensure_public_identity(profile: IdentityProfile) -> None:
     if not profile.enabled or not profile.complete:
         raise PublicIdentityUnavailableError()
@@ -539,8 +591,6 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             status_code=400,
             code="invalid_request",
         )
-    received_body = json.loads(json.dumps(body))
-
     client_requested_model = str(body.get("model", "")).strip()
     if not client_requested_model:
         raise RouterError(
@@ -557,6 +607,17 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         authenticated.policy.disclosure_mode,
     )
     request.state.identity_profile = identity
+    prompt_directive_settings = current.settings.section("routing").get(
+        "prompt_directives",
+        {},
+    )
+    prompt_directive_result = sanitize_prompt_directives(
+        body,
+        api_kind,
+        prompt_directive_settings,
+    )
+    body = prompt_directive_result.body
+    received_body = json.loads(json.dumps(body))
     trace = DecisionTrace(
         request_id=request_id,
         client_id=authenticated.policy.id,
@@ -625,6 +686,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     )
     conversation_id = lineage.lineage_id
     conversation_mode = lineage.mode
+    resolved_directive, clear_directive_affinity = (
+        resolve_conversation_directive(
+            prompt_directive_result.directive,
+            lineage.parent,
+            prompt_directive_settings,
+        )
+    )
+    _ensure_prompt_directive_access(
+        current,
+        authenticated,
+        resolved_directive,
+    )
     trace.set_request_context(
         conversation_id=conversation_id,
         conversation_mode=conversation_mode,
@@ -711,6 +784,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             None
             if (
                 client_compacted
+                or clear_directive_affinity
                 or (
                     stored_conversation is not None
                     and stored_conversation.identity_only
@@ -823,6 +897,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             before_model_call=acquire_evaluator,
             after_model_call=lease.release_deployment,
         )
+        if resolved_directive is not None:
+            evaluation.directive_id = resolved_directive.id
+            evaluation.directive_generation = (
+                resolved_directive.generation
+            )
+            evaluation.required_endpoint_id = (
+                resolved_directive.endpoint_id
+            )
+            evaluation.evidence = {
+                **evaluation.evidence,
+                "route_directive": resolved_directive.id,
+            }
         modalities = request_modalities(effective_body, api_kind)
         image_inputs = inspect_image_inputs(effective_body)
         has_tools = required_capabilities.tools
@@ -898,9 +984,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         excluded_deployments: set[str] = set()
         max_attempts = int(current.settings.section("failover").get("max_attempts", 2))
         # At this point no response bytes or tool calls reached the client.
-        allow_retry = True
+        allow_retry = resolved_directive is None
         attempts = (
-            max(max_attempts, 3)
+            1
+            if resolved_directive is not None
+            else max(max_attempts, 3)
             if requested_model == "auto"
             and (
                 "image" in modalities
@@ -945,6 +1033,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     has_tools=has_tools,
                     required_capabilities=required_capabilities,
                     conversation=routing_conversation,
+                    history_conversation=stored_conversation,
                     body=effective_body,
                     api_kind=api_kind,
                     lease=lease,
@@ -1834,6 +1923,7 @@ async def _acquire_route_capacity(
     has_tools: bool,
     required_capabilities: Any,
     conversation: ConversationState | None,
+    history_conversation: ConversationState | None = None,
     body: dict[str, Any],
     api_kind: str,
     lease: Any,
@@ -1850,6 +1940,8 @@ async def _acquire_route_capacity(
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
     )
+    if history_conversation is None:
+        history_conversation = conversation
     capacity_busy_seen = False
     affinity_spilled = False
     history_incompatible_seen = False
@@ -2127,7 +2219,7 @@ async def _acquire_route_capacity(
                 decision=decision,
                 request_id=request_id,
                 identity=identity,
-                conversation=conversation,
+                conversation=history_conversation,
                 allow_compaction=allow_compaction,
                 history_precompacted=history_precompacted,
             )
@@ -2191,6 +2283,7 @@ async def _acquire_route_capacity(
             body = routed_body
             requested_context_tokens = prompt_tokens + output_reserve_tokens
             conversation = None
+            history_conversation = None
             history_precompacted = True
             await lease.release_deployment()
             continue

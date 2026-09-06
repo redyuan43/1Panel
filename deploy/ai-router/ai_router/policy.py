@@ -10,6 +10,8 @@ from .config import Registry, Settings
 from .errors import (
     NoCompatibleModelError,
     NoEligibleModelError,
+    RouteDirectiveIncompatibleError,
+    RouteDirectiveUnavailableError,
     RouterError,
 )
 from .health import HealthMonitor
@@ -32,7 +34,9 @@ INCOMPATIBLE_REJECTION_REASONS = frozenset(
         "capability",
         "context",
         "deepseek_multimodal_unsupported",
+        "deployment_profile",
         "modality",
+        "output_context",
         "task",
         "tier",
         "tier_downgrade",
@@ -251,11 +255,42 @@ class RoutingPolicy:
             if requested_context_tokens is not None
             else prompt_tokens + output_reserve_tokens
         )
-        endpoints = (
-            list(self.registry.responders())
-            if requested_model == "auto"
-            else list(self.registry.by_public_model(requested_model))
-        )
+        directed = bool(evaluation.required_endpoint_id)
+        if directed:
+            directed_endpoint_id = str(evaluation.required_endpoint_id)
+            requested_endpoints = (
+                ()
+                if requested_model == "auto"
+                else self.registry.by_public_model(requested_model)
+            )
+            target = (
+                self.registry.by_id(directed_endpoint_id)
+                if requested_model == "auto"
+                else next(
+                    (
+                        item
+                        for item in requested_endpoints
+                        if item.id == directed_endpoint_id
+                    ),
+                    None,
+                )
+            )
+            if target is None:
+                if requested_model != "auto":
+                    raise RouteDirectiveIncompatibleError(
+                        "the directed endpoint is outside the requested "
+                        "model scope"
+                    )
+                raise RouteDirectiveUnavailableError(
+                    "the directed model endpoint is not registered"
+                )
+            endpoints = [target]
+        else:
+            endpoints = (
+                list(self.registry.responders())
+                if requested_model == "auto"
+                else list(self.registry.by_public_model(requested_model))
+            )
         if not endpoints:
             if trace:
                 trace.record_candidate_round(
@@ -300,7 +335,7 @@ class RoutingPolicy:
                     modalities=modalities,
                     required_capabilities=required,
                     conversation=conversation,
-                    auto=requested_model == "auto",
+                    auto=requested_model == "auto" and not directed,
                     excluded_deployment_ids=excluded_deployments,
                     image_count=image_count,
                 )
@@ -355,6 +390,13 @@ class RoutingPolicy:
             message = "no eligible model is available: " + ", ".join(
                 rejections
             )
+            if directed:
+                if any(
+                    reason in INCOMPATIBLE_REJECTION_REASONS
+                    for reason in rejection_reasons
+                ):
+                    raise RouteDirectiveIncompatibleError(message)
+                raise RouteDirectiveUnavailableError(message)
             inactive_rejections = {
                 "auto_disabled",
                 "cloud_auto_disabled",
@@ -377,6 +419,68 @@ class RoutingPolicy:
             ):
                 raise NoCompatibleModelError(message)
             raise NoEligibleModelError(message)
+
+        if directed:
+            endpoint = candidates[0]
+            same_endpoint = bool(
+                conversation
+                and endpoint.id == conversation.endpoint_id
+            )
+            migration = bool(conversation and not same_endpoint)
+            decision = RouteDecision(
+                endpoint=endpoint,
+                requested_model=requested_model,
+                task=evaluation.task,
+                prompt_tokens=prompt_tokens,
+                output_reserve_tokens=output_reserve_tokens,
+                reason=(
+                    "route_directive_affinity"
+                    if same_endpoint
+                    else (
+                        "route_directive_change"
+                        if migration
+                        else "route_directive"
+                    )
+                ),
+                affinity=(
+                    "hit"
+                    if same_endpoint
+                    else ("migrated" if migration else "new")
+                ),
+                score=1.0,
+                migration=migration,
+                previous_endpoint_id=(
+                    conversation.endpoint_id
+                    if migration and conversation
+                    else None
+                ),
+                protocol=required.protocol,
+                native_or_adapter=endpoint.capabilities.protocol_mode(
+                    required.protocol
+                ),
+                required_capabilities=required.labels(),
+                candidate_rejections=tuple(rejections),
+                strategy_version=strategy,
+                route_profile=evaluation.route_profile,
+                complexity=evaluation.complexity,
+                context_required=context_required,
+                directive_id=evaluation.directive_id,
+                directive_generation=evaluation.directive_generation,
+                trace=trace,
+            )
+            await self._bind_traced_deployment(
+                decision,
+                statuses[endpoint.id],
+                conversation,
+                prompt_tokens + output_reserve_tokens,
+                excluded_deployments,
+                modalities,
+                image_count,
+                routing_key,
+                trace,
+                trace_attempt,
+            )
+            return decision
 
         if conversation:
             pinned = next(
@@ -913,6 +1017,22 @@ class RoutingPolicy:
     ) -> str | None:
         if not endpoint.enabled:
             return "disabled"
+        alias_max_input = endpoint.metadata.get(
+            "model_alias_max_input_tokens"
+        )
+        if (
+            alias_max_input is not None
+            and prompt_tokens > int(alias_max_input)
+        ):
+            return "context"
+        alias_max_output = endpoint.metadata.get(
+            "model_alias_max_output_tokens"
+        )
+        if (
+            alias_max_output is not None
+            and output_reserve_tokens > int(alias_max_output)
+        ):
+            return "output_context"
         if auto and not endpoint.auto_candidate:
             return "auto_disabled"
         if await self.health.in_cooldown(endpoint.id):
@@ -1468,6 +1588,13 @@ class RoutingPolicy:
         require_available: bool,
     ) -> list[PhysicalDeployment]:
         result: list[PhysicalDeployment] = []
+        allowed_profiles = {
+            str(item)
+            for item in endpoint.metadata.get(
+                "allowed_deployment_profile_ids",
+                [],
+            )
+        }
         for value in status.detail.get("workers", []):
             try:
                 item = _physical_deployment_from_status(
@@ -1479,6 +1606,10 @@ class RoutingPolicy:
             if (
                 not item.worker_id
                 or item.worker_id in excluded_deployment_ids
+                or (
+                    allowed_profiles
+                    and item.profile_id not in allowed_profiles
+                )
                 or not item.schedulable
                 or item.safe_context_tokens < required_context
                 or not item.supports_modalities(modalities)
@@ -1511,6 +1642,13 @@ class RoutingPolicy:
     ) -> str | None:
         reasons: set[str] = set()
         found = False
+        allowed_profiles = {
+            str(item)
+            for item in endpoint.metadata.get(
+                "allowed_deployment_profile_ids",
+                [],
+            )
+        }
         for value in status.detail.get("workers", []):
             try:
                 item = _physical_deployment_from_status(
@@ -1521,6 +1659,11 @@ class RoutingPolicy:
                 continue
             found = True
             item_reasons: set[str] = set()
+            if (
+                allowed_profiles
+                and item.profile_id not in allowed_profiles
+            ):
+                item_reasons.add("deployment_profile")
             if item.safe_context_tokens < required_context:
                 item_reasons.add("context")
             if not item.supports_modalities(modalities):
@@ -1702,4 +1845,9 @@ def updated_conversation_state(
             or decision.endpoint.backend_type
         ),
         history_mode=decision.history_mode,
+        directive_id=decision.directive_id,
+        directive_generation=decision.directive_generation,
+        directive_endpoint_id=(
+            decision.endpoint.id if decision.directive_id else None
+        ),
     )

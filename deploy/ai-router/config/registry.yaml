@@ -7,6 +7,27 @@ tier_ranks:
   cloud-frontier: 40
   subscription-frontier: 50
 
+model_aliases:
+  siyuan/agent-fast:
+    endpoint_ids:
+      - ai-qwen38-27b
+    deployment_profile_ids:
+      - p40-qwen38-64k
+    max_input_tokens: 49152
+    max_output_tokens: 8192
+  siyuan/agent-deep:
+    endpoint_ids:
+      - agx-qwen36-cerebellum-256k
+    deployment_profile_ids: []
+    max_input_tokens: 131072
+    max_output_tokens: 16384
+  siyuan/agent-edge:
+    endpoint_ids:
+      - nx3-qwen36-shared-64k
+    deployment_profile_ids: []
+    max_input_tokens: 49152
+    max_output_tokens: 4096
+
 endpoints:
   - id: ai-qwen38-27b
     public_model: huihui/Qwen3.8-27B-Q4-DFlash2
@@ -357,6 +378,50 @@ endpoints:
       experiment_path: /home/ai/github/1Panel/experiments/nx-prefix-cache-lab
       validation_report: /home/ai/github/1Panel/experiments/nx-prefix-cache-lab/docs/validation.md
 
+  - id: nx3-qwen36-shared-64k
+    public_model: prefix-shared/nx3-qwen36
+    provider_model: /home/nx/llama/Qwen_Qwen3.6-35B-A3B-IQ2_S.gguf
+    api_base: http://nx3.taild500c8.ts.net:8081/v1
+    node: nx3
+    role: responder
+    tier: edge-small
+    tier_rank: 10
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+    safe_context_tokens: 65536
+    configured_context_tokens: 65536
+    max_concurrency: 1
+    backend_type: llama_cpp
+    health_url: http://nx3.taild500c8.ts.net:8081/health
+    load_url: http://nx3.taild500c8.ts.net:8081/slots
+    backend_api_key_env: AI_ROUTER_NX3_SHARED_BACKEND_KEY
+    enabled: false
+    auto_candidate: false
+    capabilities:
+      chat: true
+      responses: none
+      tools: none
+      tool_choice: false
+      structured_output: []
+      streaming: true
+      validation_status: tailnet-chat-live-validation-pending
+    quality: {}
+    metadata:
+      context_status: runtime-reported-64k
+      quality_status: unbenchmarked
+      service_unit: nx3-cerebellum-v3.service
+      model_artifact: /home/nx/llama/Qwen_Qwen3.6-35B-A3B-IQ2_S.gguf
+      quantization: IQ2_S
+      kv_cache: q4_0/q4_0
+      speculative_method: none
+      topology: Jetson-Orin-NX-single-integrated-GPU
+      isolation: shared-with-hermes
+      access_scope: tailscale-only-no-application-key
+      prefix_cache_guarantee: none-shared-slot-may-be-replaced
+
   - id: codex-pro-gpt-5.6-sol
     public_model: codex-pro/gpt-5.6-sol
     provider_model: gpt-5.6-sol
@@ -410,6 +475,55 @@ endpoints:
       catalog_context_tokens: 272000
       catalog_max_context_tokens: 872000
       vision_status: live-validated-2026-09-02
+
+  - id: codex-pro-gpt-6-astra
+    public_model: codex-pro/gpt-6-astra
+    provider_model: gpt-6-astra
+    api_base: http://127.0.0.1:14010/v1
+    node: codex-pro
+    role: responder
+    tier: subscription-frontier
+    tier_rank: 60
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 272000
+    configured_context_tokens: 1050000
+    max_concurrency: 2
+    backend_type: codex_pool
+    health_url: http://127.0.0.1:14010/health
+    backend_api_key_env: AI_ROUTER_LITELLM_MASTER_KEY
+    enabled: true
+    auto_candidate: false
+    cloud: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      output_token_limit: false
+      validation_status: catalog-entitlement-required
+      validated_at: ""
+    quality: {}
+    metadata:
+      provider: openai-codex
+      billing_mode: subscription
+      context_status: configured-unvalidated
+      quality_status: unbenchmarked
+      reasoning_effort_default: medium
+      output_limit_status: unsupported-chatgpt-subscription
+      model_catalog_required: true
+      catalog_context_tokens: 272000
+      catalog_max_context_tokens: 1050000
+      vision_status: disabled-pending-live-validation
 
   - id: zhipu-glm-5.3-flash
     public_model: zhipu/glm-5.3-flash
@@ -512,5 +626,51 @@ endpoints:
       pricing_status: official-peak-2026-09-01
       input_cost_per_million_usd: 0.44
       output_cost_per_million_usd: 1.32
+      max_output_tokens: 384000
+      thinking_via_extra_body: true
+
+  - id: cloud-deepseek-v4-pro
+    public_model: deepseek/deepseek-v4-pro
+    provider_model: deepseek-v4-pro
+    api_base: https://api.deepseek.com
+    node: cloud
+    role: responder
+    tier: cloud-frontier
+    tier_rank: 50
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 262144
+    configured_context_tokens: 1000000
+    max_concurrency: 8
+    backend_type: openai
+    health_url: https://api.deepseek.com/models
+    backend_api_key_env: AI_ROUTER_DEEPSEEK_API_KEY
+    enabled: true
+    auto_candidate: false
+    cloud: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      structured_output:
+        - json_object
+        - json_schema
+      streaming: true
+      validation_status: registered-unvalidated
+      validated_at: ""
+    quality: {}
+    metadata:
+      provider: deepseek
+      context_status: configured-unvalidated
+      quality_status: unbenchmarked
+      pricing_status: official-peak-2026-08-16
+      input_cost_per_million_usd: 1.32
+      output_cost_per_million_usd: 3.96
       max_output_tokens: 384000
       thinking_via_extra_body: true

@@ -1233,6 +1233,65 @@ dialog::backdrop {
   line-height: 1.5;
 }
 
+.directive-settings,
+.directive-rows {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.directive-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.directive-toolbar .toggle-row {
+  border-bottom: 0;
+}
+
+.directive-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.45fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.directive-row > label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.directive-row > label strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.directive-row > label span {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.directive-secret {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(3, auto);
+  gap: 8px;
+  min-width: 0;
+}
+
+.directive-secret input {
+  min-width: 0;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
 .policy-flow {
   display: flex;
   flex-direction: column;
@@ -2293,6 +2352,15 @@ button.icon-control {
   .trace-review-grid,
   .trace-evidence-grid {
     grid-template-columns: 1fr;
+  }
+
+  .directive-toolbar,
+  .directive-row {
+    grid-template-columns: 1fr;
+  }
+
+  .directive-secret {
+    grid-template-columns: minmax(0, 1fr) repeat(3, auto);
   }
 
   .audit-toolbar-actions {

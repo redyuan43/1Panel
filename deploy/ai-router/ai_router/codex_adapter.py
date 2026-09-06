@@ -23,7 +23,7 @@ from .codex_auth import (
 )
 
 
-MODEL_ID = "gpt-5.6-sol"
+DEFAULT_MODEL_IDS = ("gpt-5.6-sol", "gpt-6-astra")
 SAFE_CONTEXT_TOKENS = 272000
 CATALOG_TTL_SECONDS = 300
 ACCOUNT_HEADER = "x-1panel-codex-account"
@@ -36,6 +36,7 @@ class CodexGateway:
         accounts: CodexAccountStore | None = None,
         client: httpx.AsyncClient | None = None,
         account_max_concurrency: int | None = None,
+        model_ids: tuple[str, ...] | None = None,
     ) -> None:
         accounts_dir = os.environ.get(
             "AI_ROUTER_CODEX_ACCOUNTS_DIR",
@@ -48,6 +49,20 @@ class CodexGateway:
         self._owned_client = client is None
         self._catalog_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
         self._locks: dict[str, asyncio.Semaphore] = {}
+        configured_models = (
+            model_ids
+            or tuple(
+                item.strip()
+                for item in os.environ.get(
+                    "AI_ROUTER_CODEX_MODEL_IDS",
+                    ",".join(DEFAULT_MODEL_IDS),
+                ).split(",")
+                if item.strip()
+            )
+        )
+        self.model_ids = tuple(dict.fromkeys(configured_models))
+        if not self.model_ids:
+            raise ValueError("at least one Codex model ID is required")
         self.account_max_concurrency = max(
             1,
             int(
@@ -69,11 +84,19 @@ class CodexGateway:
         for alias in self.accounts.aliases():
             ready = False
             models: list[dict[str, Any]] = []
+            entitled_models: list[str] = []
             error_code = None
             if self.accounts.available(alias):
                 try:
                     models = await self.catalog(alias)
-                    ready = any(item.get("slug") == MODEL_ID for item in models)
+                    entitled_models = sorted(
+                        {
+                            str(item.get("slug"))
+                            for item in models
+                            if item.get("slug") in self.model_ids
+                        }
+                    )
+                    ready = bool(entitled_models)
                     if not ready:
                         error_code = "model_not_entitled"
                 except CodexAuthError as exc:
@@ -99,9 +122,7 @@ class CodexGateway:
                         f"/v1/accounts/{alias}"
                     ),
                     "models": [
-                        item.get("slug")
-                        for item in models
-                        if isinstance(item.get("slug"), str)
+                        model_id for model_id in entitled_models
                     ],
                     "error_code": error_code,
                     "cooldown_until": float(
@@ -114,18 +135,27 @@ class CodexGateway:
                     "max_concurrency": self.account_max_concurrency,
                 }
             )
+        available_models = sorted(
+            {
+                model_id
+                for worker in workers
+                if worker["ready"]
+                for model_id in worker["models"]
+            }
+        )
         return {
             "ok": any(item["ready"] for item in workers),
-            "model": MODEL_ID,
+            "model": available_models[0] if available_models else "",
+            "models": available_models,
             "safe_context_tokens": SAFE_CONTEXT_TOKENS,
             "max_concurrency": self.account_max_concurrency,
             "workers": workers,
         }
 
     async def catalog(self, alias: str) -> list[dict[str, Any]]:
-        cached = self._catalog_cache.get(alias)
-        if cached and time.monotonic() - cached[0] < CATALOG_TTL_SECONDS:
-            return cached[1]
+        cached = self._cached_catalog(alias)
+        if cached is not None:
+            return cached
         credentials = await asyncio.to_thread(
             self.accounts.credentials,
             alias,
@@ -164,6 +194,18 @@ class CodexGateway:
         self.accounts.mark_available(alias)
         return models
 
+    def _cached_catalog(
+        self,
+        alias: str,
+    ) -> list[dict[str, Any]] | None:
+        cached = self._catalog_cache.get(alias)
+        if (
+            cached is None
+            or time.monotonic() - cached[0] >= CATALOG_TTL_SECONDS
+        ):
+            return None
+        return cached[1]
+
     async def proxy(
         self,
         request: Request,
@@ -178,11 +220,12 @@ class CodexGateway:
             return _error(400, "invalid_json", "request body must be valid JSON")
         if not isinstance(body, dict):
             return _error(400, "invalid_request", "request body must be an object")
-        if str(body.get("model", "")).strip() != MODEL_ID:
+        model_id = str(body.get("model", "")).strip()
+        if model_id not in self.model_ids:
             return _error(404, "model_not_found", f"unknown model: {body.get('model')}")
         selected_alias = alias or request.headers.get(ACCOUNT_HEADER, "").strip()
         if not selected_alias:
-            selected_alias = await self._first_available_account()
+            selected_alias = await self._first_available_account(model_id)
         if not selected_alias:
             return _error(
                 503,
@@ -195,6 +238,16 @@ class CodexGateway:
                 "codex_account_cooldown",
                 "the selected Codex Pro account is temporarily unavailable",
                 headers={"Retry-After": "1"},
+            )
+        account_models = self._cached_catalog(selected_alias)
+        if account_models is not None and not any(
+            item.get("slug") == model_id
+            for item in account_models
+        ):
+            return _error(
+                404,
+                "model_not_entitled",
+                "the selected Codex Pro account does not provide this model",
             )
 
         semaphore = self._locks.setdefault(
@@ -221,12 +274,14 @@ class CodexGateway:
                     body,
                     request,
                     original_to_wire,
+                    model_id,
                 )
                 if api_kind == "chat"
                 else _responses_payload(
                     body,
                     request,
                     original_to_wire,
+                    model_id,
                 )
             )
             upstream_body["stream"] = True
@@ -254,7 +309,7 @@ class CodexGateway:
 
         response_headers = {
             "X-1Panel-Codex-Account": selected_alias,
-            "X-1Panel-Codex-Model": MODEL_ID,
+            "X-1Panel-Codex-Model": model_id,
         }
         if upstream.status_code >= 400:
             payload = await upstream.aread()
@@ -273,6 +328,7 @@ class CodexGateway:
                     upstream,
                     semaphore,
                     wire_to_original,
+                    model_id,
                 )
                 if api_kind == "chat"
                 else _responses_stream(
@@ -301,7 +357,7 @@ class CodexGateway:
         _restore_response_tool_names(value, wire_to_original)
         if api_kind == "chat":
             try:
-                value = _responses_to_chat(value)
+                value = _responses_to_chat(value, model_id)
                 payload = json.dumps(
                     value,
                     ensure_ascii=False,
@@ -366,10 +422,13 @@ class CodexGateway:
             self.accounts.mark_available(alias)
         return response
 
-    async def _first_available_account(self) -> str | None:
+    async def _first_available_account(
+        self,
+        model_id: str,
+    ) -> str | None:
         status = await self.status()
         for worker in status["workers"]:
-            if worker["ready"]:
+            if worker["ready"] and model_id in worker["models"]:
                 return str(worker["account_alias"])
         return None
 
@@ -441,22 +500,18 @@ def create_app(gateway: CodexGateway | None = None) -> FastAPI:
     async def models(request: Request) -> JSONResponse:
         request.app.state.gateway._authorize(request)
         status = await request.app.state.gateway.status()
-        available = any(item["ready"] for item in status["workers"])
         return JSONResponse(
             {
                 "object": "list",
-                "data": (
-                    [
-                        {
-                            "id": MODEL_ID,
-                            "object": "model",
-                            "created": 0,
-                            "owned_by": "openai-codex-subscription",
-                        }
-                    ]
-                    if available
-                    else []
-                ),
+                "data": [
+                    {
+                        "id": model_id,
+                        "object": "model",
+                        "created": 0,
+                        "owned_by": "openai-codex-subscription",
+                    }
+                    for model_id in status["models"]
+                ],
             }
         )
 
@@ -499,6 +554,7 @@ def _responses_payload(
     body: dict[str, Any],
     request: Request,
     original_to_wire: dict[str, str],
+    model_id: str,
 ) -> dict[str, Any]:
     result = json.loads(json.dumps(body))
     if isinstance(result.get("input"), str):
@@ -508,7 +564,7 @@ def _responses_payload(
                 "content": result["input"],
             }
         ]
-    result["model"] = MODEL_ID
+    result["model"] = model_id
     result.setdefault("store", False)
     result.setdefault("reasoning", {"effort": "medium", "summary": "auto"})
     result.setdefault("include", ["reasoning.encrypted_content"])
@@ -544,6 +600,7 @@ def _chat_to_responses(
     body: dict[str, Any],
     request: Request,
     original_to_wire: dict[str, str],
+    model_id: str,
 ) -> dict[str, Any]:
     messages = body.get("messages", [])
     instructions = []
@@ -632,7 +689,7 @@ def _chat_to_responses(
             )
 
     result: dict[str, Any] = {
-        "model": MODEL_ID,
+        "model": model_id,
         "input": input_items,
         "store": False,
         "stream": bool(body.get("stream")),
@@ -725,7 +782,10 @@ def _responses_tools(
     return result
 
 
-def _responses_to_chat(value: dict[str, Any]) -> dict[str, Any]:
+def _responses_to_chat(
+    value: dict[str, Any],
+    model_id: str,
+) -> dict[str, Any]:
     content = []
     tool_calls = []
     for item in value.get("output", []) or []:
@@ -765,7 +825,7 @@ def _responses_to_chat(value: dict[str, Any]) -> dict[str, Any]:
         "id": str(value.get("id") or f"chatcmpl-{uuid4().hex}"),
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": MODEL_ID,
+        "model": model_id,
         "choices": [
             {
                 "index": 0,
@@ -859,12 +919,17 @@ async def _chat_stream(
     upstream: httpx.Response,
     semaphore: asyncio.Semaphore,
     wire_to_original: dict[str, str],
+    model_id: str,
 ) -> AsyncIterator[bytes]:
     response_id = f"chatcmpl-{uuid4().hex}"
     buffer = ""
     tool_indexes: dict[str, int] = {}
     completed_items: dict[int, dict[str, Any]] = {}
-    yield _chat_chunk(response_id, {"role": "assistant", "content": ""})
+    yield _chat_chunk(
+        response_id,
+        {"role": "assistant", "content": ""},
+        model_id=model_id,
+    )
     try:
         async for chunk in upstream.aiter_text():
             buffer += chunk
@@ -892,6 +957,7 @@ async def _chat_stream(
                     yield _chat_chunk(
                         response_id,
                         {"content": str(event.get("delta", ""))},
+                        model_id=model_id,
                     )
                 elif event_type == "response.output_item.added":
                     item = event.get("item", {})
@@ -927,6 +993,7 @@ async def _chat_stream(
                                     }
                                 ]
                             },
+                            model_id=model_id,
                         )
                 elif event_type == "response.function_call_arguments.delta":
                     item_id = str(
@@ -949,6 +1016,7 @@ async def _chat_stream(
                                 }
                             ]
                         },
+                        model_id=model_id,
                     )
                 elif event_type == "response.output_item.done":
                     item = event.get("item")
@@ -986,6 +1054,7 @@ async def _chat_stream(
                     yield _chat_chunk(
                         response_id,
                         delta,
+                        model_id=model_id,
                         finish_reason=finish,
                         usage=usage,
                     )
@@ -999,6 +1068,7 @@ def _chat_chunk(
     response_id: str,
     delta: dict[str, Any],
     *,
+    model_id: str,
     finish_reason: str | None = None,
     usage: dict[str, Any] | None = None,
 ) -> bytes:
@@ -1006,7 +1076,7 @@ def _chat_chunk(
         "id": response_id,
         "object": "chat.completion.chunk",
         "created": int(time.time()),
-        "model": MODEL_ID,
+        "model": model_id,
         "choices": [
             {
                 "index": 0,

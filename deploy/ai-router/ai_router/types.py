@@ -253,6 +253,9 @@ class ConversationState:
     provider_family: str = ""
     history_mode: str = "native"
     identity_only: bool = False
+    directive_id: str | None = None
+    directive_generation: int = 0
+    directive_endpoint_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -264,6 +267,9 @@ class ConversationState:
         fields.setdefault("parent_branch_id", None)
         fields.setdefault("lineage_relation", "legacy")
         fields.setdefault("identity_only", False)
+        fields.setdefault("directive_id", None)
+        fields.setdefault("directive_generation", 0)
+        fields.setdefault("directive_endpoint_id", None)
         return cls(**fields)
 
 
@@ -324,6 +330,8 @@ class RouteDecision:
     lineage_relation: str | None = None
     context_compacted: bool = False
     context_compaction_source: str | None = None
+    directive_id: str | None = None
+    directive_generation: int = 0
     trace: Any | None = field(default=None, repr=False, compare=False)
 
     def response_headers(self, request_id: str) -> dict[str, str]:
@@ -400,6 +408,9 @@ class Evaluation:
     route_profile: str = "general"
     complexity: str = "standard"
     evidence: dict[str, Any] = field(default_factory=dict)
+    directive_id: str | None = None
+    directive_generation: int = 0
+    required_endpoint_id: str | None = None
 
 
 @dataclass(frozen=True)

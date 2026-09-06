@@ -29,6 +29,33 @@ routing:
   strategy: intelligent_v2
   default_output_reserve_tokens: 4096
   provider_priority: local_first
+  prompt_directives:
+    enabled: false
+    revision: 1
+    match: latest_user_contains
+    persistence: conversation
+    fallback: error
+    retired_phrases: []
+    reset:
+      phrase: 恢复常规模式
+      generation: 1
+    routes:
+      rilun:
+        phrase: 按日轮协议处理
+        endpoint_id: codex-pro-gpt-5.6-sol
+        generation: 1
+      beichen:
+        phrase: 按北辰协议处理
+        endpoint_id: codex-pro-gpt-6-astra
+        generation: 1
+      qinglan:
+        phrase: 按青岚协议处理
+        endpoint_id: cloud-deepseek-v4-pro
+        generation: 1
+      yuheng:
+        phrase: 按玉衡协议处理
+        endpoint_id: zhipu-glm-5.3-flash
+        generation: 1
   affinity_capacity_wait_seconds: 120
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
