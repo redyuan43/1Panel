@@ -16,11 +16,16 @@ from .budget import CloudBudget
 from .client_accounts import ClientAccountManager
 from .compaction import CapsuleCipher, ContextCompactor
 from .config import Registry, Settings
+from .conversation_control import ConversationControlManager
 from .evaluator import TaskEvaluator
 from .endpoint_config import EndpointConfigManager
 from .health import HealthMonitor
 from .history import history_identities
 from .policy import ConversationRepository, RoutingPolicy
+from .policy_config import (
+    PolicyConfigManager,
+    default_policy_database_path,
+)
 from .prefix_affinity import PrefixAffinityRepository
 from .prefix_prewarm import PrefixPrewarmer
 from .cache_audit import TelemetryCollector
@@ -55,6 +60,8 @@ class RouterRuntime:
     audit: AuditLog
     route_traces: RouteTraceStore
     prompt_directives: PromptDirectiveStore
+    conversation_controls: ConversationControlManager
+    policy_config: PolicyConfigManager
     training: TrainingArchive | None
     internal_client: httpx.AsyncClient
     internal_base_url: str
@@ -92,6 +99,20 @@ class RouterRuntime:
 
     def reload_settings(self) -> None:
         self.settings.reload()
+        health = self.settings.section("health")
+        configure_health = getattr(self.health, "configure", None)
+        if configure_health is not None:
+            configure_health(
+                refresh_seconds=float(
+                    health.get("refresh_seconds", 5)
+                ),
+                stale_after_seconds=float(
+                    health.get("stale_after_seconds", 15)
+                ),
+                probe_timeout_seconds=float(
+                    health.get("probe_timeout_seconds", 3)
+                ),
+            )
         self.evaluator.settings = self.settings.section("evaluator")
         self.compactor.model_id = str(
             self.settings.section("compaction").get("model_id", "")
@@ -506,6 +527,9 @@ def build_runtime(
         store,
         refresh_seconds=float(health_settings.get("refresh_seconds", 5)),
         stale_after_seconds=float(health_settings.get("stale_after_seconds", 15)),
+        probe_timeout_seconds=float(
+            health_settings.get("probe_timeout_seconds", 3)
+        ),
     )
     evaluator = TaskEvaluator(
         settings.section("evaluator"),
@@ -604,6 +628,11 @@ def build_runtime(
             ),
         ),
         prompt_directives=prompt_directive_store,
+        conversation_controls=ConversationControlManager(store),
+        policy_config=PolicyConfigManager(
+            default_policy_database_path(settings),
+            settings,
+        ),
         training=training,
         internal_client=httpx.AsyncClient(
             timeout=httpx.Timeout(900.0, connect=5.0),

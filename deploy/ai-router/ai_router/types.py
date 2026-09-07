@@ -260,6 +260,9 @@ class ConversationState:
     directive_id: str | None = None
     directive_generation: int = 0
     directive_endpoint_id: str | None = None
+    recovery_endpoint_id: str | None = None
+    recovery_tier_rank: int | None = None
+    last_migration_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -274,6 +277,9 @@ class ConversationState:
         fields.setdefault("directive_id", None)
         fields.setdefault("directive_generation", 0)
         fields.setdefault("directive_endpoint_id", None)
+        fields.setdefault("recovery_endpoint_id", None)
+        fields.setdefault("recovery_tier_rank", None)
+        fields.setdefault("last_migration_reason", None)
         return cls(**fields)
 
 

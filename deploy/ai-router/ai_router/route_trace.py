@@ -1237,6 +1237,30 @@ class RouteTraceStore:
     async def get(self, request_id: str) -> dict[str, Any] | None:
         return await asyncio.to_thread(self._get, request_id)
 
+    async def conversation(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self._conversation,
+            conversation_id,
+            limit,
+        )
+
+    async def recent_auto(
+        self,
+        *,
+        limit: int = 100,
+        auto_models: tuple[str, ...] = ("auto", "siyuan/auto"),
+    ) -> list[dict[str, Any]]:
+        return await asyncio.to_thread(
+            self._recent_auto,
+            limit,
+            auto_models,
+        )
+
     async def list(
         self,
         *,
@@ -1561,6 +1585,48 @@ class RouteTraceStore:
             dict(reviews[0]) if reviews else None
         )
         return payload
+
+    def _conversation(
+        self,
+        conversation_id: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT payload_json
+                FROM (
+                    SELECT payload_json, started_at, request_id
+                    FROM route_traces
+                    WHERE conversation_id=?
+                    ORDER BY started_at DESC, request_id DESC
+                    LIMIT ?
+                )
+                ORDER BY started_at ASC, request_id ASC
+                """,
+                (conversation_id, max(1, min(500, int(limit)))),
+            ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
+
+    def _recent_auto(
+        self,
+        limit: int,
+        auto_models: tuple[str, ...],
+    ) -> list[dict[str, Any]]:
+        models = tuple(dict.fromkeys(("auto", *auto_models)))
+        placeholders = ", ".join("?" for _ in models)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT payload_json
+                FROM route_traces
+                WHERE requested_model IN ({placeholders})
+                ORDER BY started_at DESC, request_id DESC
+                LIMIT ?
+                """,
+                (*models, max(1, min(500, int(limit)))),
+            ).fetchall()
+        return [json.loads(row["payload_json"]) for row in rows]
 
     def _list(
         self,

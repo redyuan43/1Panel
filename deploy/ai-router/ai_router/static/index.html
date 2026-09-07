@@ -404,6 +404,55 @@
                   <div id="cache-content" hidden></div>
                 </section>
 
+                <section id="trace-diagnosis-section" class="route-diagnosis-section">
+                  <div class="route-diagnosis-heading">
+                    <div>
+                      <h4>路由诊断 <span class="badge neutral">确定性规则</span></h4>
+                      <p id="trace-diagnosis-verdict">正在分析实际路由证据。</p>
+                    </div>
+                    <span id="trace-diagnosis-version" class="section-meta"></span>
+                  </div>
+                  <div class="route-diagnosis-grid">
+                    <div>
+                      <h5>实际因果链</h5>
+                      <ol id="trace-diagnosis-chain" class="diagnosis-list"></ol>
+                    </div>
+                    <div>
+                      <h5>明确的非原因</h5>
+                      <div id="trace-diagnosis-non-causes" class="diagnosis-facts"></div>
+                    </div>
+                  </div>
+                  <div>
+                    <h5>候选端点证据</h5>
+                    <div id="trace-diagnosis-alternatives" class="diagnosis-alternatives"></div>
+                  </div>
+                  <div>
+                    <h5>会话端点阶段</h5>
+                    <div id="trace-diagnosis-phases" class="diagnosis-phases"></div>
+                  </div>
+                  <div class="diagnosis-actions">
+                    <div id="trace-policy-refs" class="diagnosis-policy-refs"></div>
+                    <label>
+                      操作理由
+                      <input id="conversation-action-reason" type="text" maxlength="500" value="根据路由诊断调整下一轮">
+                    </label>
+                    <label>
+                      固定时长
+                      <select id="conversation-pin-ttl">
+                        <option value="900">15 分钟</option>
+                        <option value="3600" selected>1 小时</option>
+                        <option value="21600">6 小时</option>
+                        <option value="86400">24 小时</option>
+                      </select>
+                    </label>
+                    <label>
+                      指定端点
+                      <select id="conversation-pin-endpoint"></select>
+                    </label>
+                    <div id="trace-conversation-actions" class="trace-review-actions"></div>
+                  </div>
+                </section>
+
                 <details class="audit-fold"><summary>隐私旁路审核</summary>
                 <section class="privacy-assessment-section">
                   <h4>隐私旁路审核 <span class="badge neutral">仅观察</span></h4>
@@ -559,6 +608,19 @@
 
       <section id="settings-view" class="view">
         <form id="settings-form">
+          <div class="policy-workflow-bar">
+            <div>
+              <strong id="policy-revision-state">正在读取策略版本</strong>
+              <span id="policy-fingerprint-state" class="section-meta"></span>
+            </div>
+            <div class="policy-node-nav" aria-label="策略流程节点">
+              <button type="button" data-policy-section="conversation-stability">会话稳定</button>
+              <button type="button" data-policy-section="health-advanced">健康探测</button>
+              <button type="button" data-policy-section="policy-routing-strategy">路由选择</button>
+              <button type="button" data-policy-section="capacity-fallback">容量兜底</button>
+            </div>
+          </div>
+          <div id="policy-impact-report" class="policy-impact-report" hidden></div>
           <div class="policy-flow">
             <section class="settings-band policy-stage-card">
               <div class="settings-title">
@@ -748,6 +810,79 @@
 
             <div class="policy-flow-connector"></div>
 
+            <section id="conversation-stability" class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>会话稳定策略</h3>
+                <span>Conversation stability</span>
+              </div>
+              <div class="control-grid">
+                <label class="toggle-row">
+                  <span>启用健康复检后迁移</span>
+                  <input id="stability-enabled" type="checkbox">
+                </label>
+                <label class="toggle-row">
+                  <span>迁移后保持等级</span>
+                  <input id="stability-preserve-tier" type="checkbox">
+                </label>
+                <label>
+                  连续健康失败阈值
+                  <input id="stability-failure-threshold" type="number" min="1" max="5" step="1">
+                </label>
+                <label>
+                  复检间隔（秒）
+                  <input id="stability-recheck-interval" type="number" min="0" max="60" step="1">
+                </label>
+                <label class="wide">
+                  迁移后恢复方式
+                  <select id="stability-recovery-mode">
+                    <option value="manual">管理员手动恢复</option>
+                    <option value="next_turn">下一轮尝试回原端点</option>
+                    <option value="when_idle">原端点空闲后尝试恢复</option>
+                  </select>
+                </label>
+                <p class="wide field-hint">
+                  仅健康异常进入复检；上下文、模态、授权、协议和工具能力不兼容仍立即迁移。
+                </p>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section id="health-advanced" class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>健康探测高级设置</h3>
+                <span>Controlled health timing</span>
+              </div>
+              <div class="control-grid">
+                <label>
+                  缓存刷新间隔（秒）
+                  <input id="health-refresh-seconds" type="number" min="1" max="60" step="1">
+                </label>
+                <label>
+                  状态过期时间（秒）
+                  <input id="health-stale-seconds" type="number" min="1" max="300" step="1">
+                </label>
+                <label>
+                  单次探测超时（秒）
+                  <input id="health-probe-timeout" type="number" min="1" max="60" step="1">
+                </label>
+                <p class="wide field-hint">
+                  硬约束保持只读且不可绕过；这里只控制健康缓存与探测时序。
+                </p>
+                <div class="wide hard-constraint-list" aria-label="不可绕过的硬约束">
+                  <strong>固定硬约束</strong>
+                  <span>模型授权</span>
+                  <span>上下文容量</span>
+                  <span>输入模态</span>
+                  <span>请求协议</span>
+                  <span>工具能力</span>
+                  <span>端点启用与健康</span>
+                </div>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
             <section class="settings-band policy-stage-card">
               <div class="settings-title">
                 <h3>会话与队列容量</h3>
@@ -818,7 +953,7 @@
 
             <div class="policy-flow-connector"></div>
 
-            <section class="settings-band policy-stage-card policy-fork-card">
+            <section id="policy-routing-strategy" class="settings-band policy-stage-card policy-fork-card">
               <div class="settings-title">
                 <h3>路由策略选择</h3>
                 <span>Routing strategy</span>
@@ -870,7 +1005,7 @@
 
             <div class="policy-flow-rejoin"></div>
 
-            <section class="settings-band policy-stage-card">
+            <section id="capacity-fallback" class="settings-band policy-stage-card">
               <div class="settings-title">
                 <h3>路由权重</h3>
                 <span id="weights-total">总和 1.00</span>
@@ -899,7 +1034,14 @@
 
           <div class="settings-actions">
             <button id="reload" type="button" class="secondary">重新加载</button>
-            <button type="submit">保存设置</button>
+            <label class="revision-rollback">
+              <span>历史版本</span>
+              <select id="policy-rollback-revision"></select>
+            </label>
+            <button id="policy-rollback" type="button" class="secondary">创建回滚草稿</button>
+            <button type="submit">保存草稿</button>
+            <button id="policy-validate" type="button" class="secondary">离线验证</button>
+            <button id="policy-activate" type="button">激活策略</button>
           </div>
         </form>
       </section>

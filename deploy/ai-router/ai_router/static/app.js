@@ -1,6 +1,7 @@
 const state = {
   key: sessionStorage.getItem("ai-router-admin-key") || "",
   settings: null,
+  policy: null,
   directivePool: null,
   dashboard: null,
   clients: [],
@@ -20,6 +21,8 @@ const state = {
   requestConversationPages: new Map(),
   selectedTraceId: null,
   selectedTrace: null,
+  routeDiagnosis: null,
+  conversationControl: null,
   selectedTraceAttempt: 1,
   selectedTraceNodeId: null,
   editingEndpointId: null,
@@ -1751,6 +1754,7 @@ async function loadRouteTraces(silent = false, append = false) {
   const listState = byId("trace-list-state");
   if (!silent) listState.textContent = "正在加载";
   const cursor = append ? state.routeTraceCursor : null;
+  const selectedAtStart = state.selectedTraceId;
   try {
     const payload = await api(`/api/route-traces?${traceFilterQuery(cursor)}`);
     state.routeTraces = append
@@ -1765,12 +1769,16 @@ async function loadRouteTraces(silent = false, append = false) {
     const selectedStillVisible = state.routeTraces.some(
       (item) => item.request_id === state.selectedTraceId,
     );
-    const keepSelection = silent && state.selectedTrace?.request_id === state.selectedTraceId;
+    const selectionChanged = state.selectedTraceId !== selectedAtStart;
+    const keepSelection = selectionChanged
+      || (silent && state.selectedTrace?.request_id === state.selectedTraceId);
     if (!append && state.routeTraces.length && !selectedStillVisible && !keepSelection) {
       await selectRouteTrace(state.routeTraces[0].request_id);
     } else if (!append && !state.routeTraces.length && !keepSelection) {
       clearTraceDetail();
     } else if (
+      !selectionChanged
+      &&
       !traceReviewInProgress() &&
       state.selectedTraceId
     ) {
@@ -2009,7 +2017,38 @@ async function selectRouteTrace(requestId, silent = false, submittedReview = nul
         && JSON.stringify(traceReviewValues(kind)) === JSON.stringify(submittedReview.values);
       preserveReviews[kind] = sameRequest && traceReviewHasDraft(kind) && !unchangedSubmission;
     }
-    state.selectedTrace = payload.trace;
+    const selectedTrace = payload.trace;
+    const detailRequests = [
+      api(`/api/route-traces/${encodeURIComponent(requestId)}/diagnosis`),
+    ];
+    if (
+      selectedTrace.conversation_id
+      && selectedTrace.client_id
+    ) {
+      detailRequests.push(
+        api(
+          `/api/conversations/${
+            encodeURIComponent(selectedTrace.conversation_id)
+          }/control?client_id=${
+            encodeURIComponent(selectedTrace.client_id)
+          }`,
+        ),
+      );
+    }
+    const detailResults = await Promise.allSettled(detailRequests);
+    if (
+      sequence !== traceSelectionSequence
+      || state.selectedTraceId !== requestId
+    ) return;
+    state.selectedTrace = selectedTrace;
+    state.routeDiagnosis = null;
+    state.conversationControl = null;
+    if (detailResults[0]?.status === "fulfilled") {
+      state.routeDiagnosis = detailResults[0].value.diagnosis;
+    }
+    if (detailResults[1]?.status === "fulfilled") {
+      state.conversationControl = detailResults[1].value.control;
+    }
     const attempts = state.selectedTrace.attempts || [];
     const attemptNumbers = attempts.map((item) => Number(item.number));
     if (!attemptNumbers.includes(state.selectedTraceAttempt)) {
@@ -2033,6 +2072,8 @@ function clearTraceDetail() {
   traceSelectionSequence += 1;
   state.selectedTraceId = null;
   state.selectedTrace = null;
+  state.routeDiagnosis = null;
+  state.conversationControl = null;
   state.selectedTraceNodeId = null;
   byId("trace-detail").hidden = true;
   byId("trace-detail-empty").hidden = false;
@@ -2075,10 +2116,170 @@ function renderTraceDetail(preserveReviews = {}) {
   ].map((item) => `<span>${item}</span>`).join("");
   renderTraceRoutingState(trace);
   renderTraceTimeline();
+  renderRouteDiagnosis();
   renderPrivacyAssessment(trace, preserveReviews.privacy);
   renderTraceAttempts();
   renderTraceCurrentReview(preserveReviews.routing);
   renderUnifiedAudit();
+}
+
+function renderRouteDiagnosis() {
+  const diagnosis = state.routeDiagnosis;
+  const trace = state.selectedTrace;
+  byId("trace-diagnosis-version").textContent = diagnosis
+    ? `规则版本 ${diagnosis.diagnosis_version}`
+    : "诊断不可用";
+  byId("trace-diagnosis-verdict").textContent = diagnosis?.verdict
+    || "当前轨迹没有足够证据生成诊断。";
+  byId("trace-diagnosis-chain").innerHTML = (diagnosis?.causal_chain || [])
+    .map((item) => `
+      <li>
+        <strong>${escapeHtml(item.title)}</strong>
+        <span>${escapeHtml(item.detail)}</span>
+      </li>`)
+    .join("");
+  byId("trace-diagnosis-non-causes").innerHTML = (
+    diagnosis?.non_causes || []
+  ).map((item) => `
+    <div>
+      <strong>${escapeHtml(item.label)}</strong>
+      <code>${escapeHtml(item.evidence)}</code>
+    </div>`).join("") || '<span class="section-meta">没有可明确排除的因素</span>';
+  byId("trace-diagnosis-alternatives").innerHTML = (
+    diagnosis?.alternatives || []
+  ).map((item) => `
+    <div class="diagnosis-alternative ${item.eligible ? "eligible" : "rejected"}">
+      <strong>${escapeHtml(item.endpoint_id || "—")}</strong>
+      <span>${escapeHtml(item.node || "—")} · ${escapeHtml(item.tier || "—")}</span>
+      <span>${item.eligible ? "合格" : escapeHtml(item.rejection_label)}</span>
+      <span>容量 ${formatTokens(item.required_context_tokens)} / ${formatTokens(item.safe_context_tokens)}</span>
+      <span>负载余量 ${item.load_headroom == null ? "—" : formatPercent(Number(item.load_headroom))}</span>
+    </div>`).join("") || '<span class="section-meta">未记录候选快照</span>';
+  byId("trace-diagnosis-phases").innerHTML = (
+    diagnosis?.conversation_phases || []
+  ).map((item, index) => `
+    <div class="diagnosis-phase">
+      <span>${index + 1}</span>
+      <strong>${escapeHtml(item.endpoint_id)}</strong>
+      <small>${item.request_count} 轮 · ${escapeHtml((item.flags || []).join(" / ") || "稳定")}</small>
+    </div>`).join("") || '<span class="section-meta">当前仅有单轮证据</span>';
+  byId("trace-policy-refs").innerHTML = (
+    diagnosis?.policy_refs || []
+  ).map((item) => `
+    <button type="button" class="secondary compact"
+      data-policy-ref="${escapeHtml(item.section)}">
+      ${escapeHtml(item.label)}
+      <code>${escapeHtml(item.field)}</code>
+    </button>`).join("");
+
+  const actions = diagnosis?.actions || [];
+  const pins = actions.filter((item) => item.id === "pin_endpoint");
+  const pin = state.conversationControl?.pin;
+  const endpointSelect = byId("conversation-pin-endpoint");
+  const endpointIds = (state.dashboard?.endpoints || [])
+    .map((item) => item.endpoint)
+    .filter((item) => item.enabled && item.role === "responder")
+    .map((item) => item.id);
+  endpointSelect.innerHTML = endpointIds.length
+    ? endpointIds.map((endpointId) => `
+      <option value="${escapeHtml(endpointId)}">
+        ${escapeHtml(endpointId)}
+      </option>`).join("")
+    : '<option value="">没有已启用端点</option>';
+  endpointSelect.value = (
+    pin?.endpoint_id
+    || pins[0]?.endpoint_id
+    || endpointIds[0]
+    || ""
+  );
+  byId("trace-conversation-actions").innerHTML = [
+    `<button type="button" class="secondary" data-conversation-action="reset">重置下一轮亲和</button>`,
+    ...pins.map((item) => `
+      <button type="button" class="secondary"
+        data-conversation-action="pin"
+        data-endpoint-id="${escapeHtml(item.endpoint_id)}">
+        固定 ${escapeHtml(item.endpoint_id)}
+      </button>`),
+    `<button type="button" class="secondary"
+      data-conversation-action="pin-selected"
+      ${endpointIds.length ? "" : "disabled"}>
+      固定选择端点
+    </button>`,
+    ...(pin
+      ? [
+        `<button type="button" class="secondary" data-conversation-action="unpin">
+          解除固定 ${escapeHtml(pin.endpoint_id)}
+        </button>`,
+      ]
+      : []),
+  ].join("");
+
+  document.querySelectorAll("[data-policy-ref]").forEach((button) => {
+    button.addEventListener("click", () => {
+      switchView("settings");
+      requestAnimationFrame(() => {
+        byId(button.dataset.policyRef)?.scrollIntoView({
+          behavior: "smooth",
+          block: "center",
+        });
+      });
+    });
+  });
+  byId("trace-conversation-actions")
+    .querySelectorAll("[data-conversation-action]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        void performConversationAction(
+          button.dataset.conversationAction === "pin-selected"
+            ? "pin"
+            : button.dataset.conversationAction,
+          button.dataset.conversationAction === "pin-selected"
+            ? byId("conversation-pin-endpoint").value
+            : button.dataset.endpointId,
+        );
+      });
+    });
+  if (!trace?.conversation_id || !trace?.client_id) {
+    byId("trace-conversation-actions").innerHTML =
+      '<span class="section-meta">此请求没有可控制的会话标识</span>';
+  }
+}
+
+async function performConversationAction(action, endpointId = null) {
+  const trace = state.selectedTrace;
+  if (!trace?.conversation_id || !trace?.client_id) return;
+  const actionLabel = {
+    reset: "重置下一轮路由亲和",
+    pin: `临时固定到 ${endpointId}`,
+    unpin: "提前解除当前固定",
+  }[action];
+  if (!window.confirm(`${actionLabel}？操作只影响下一轮请求。`)) return;
+  const container = byId("trace-conversation-actions");
+  container.querySelectorAll("button").forEach((button) => {
+    button.disabled = true;
+  });
+  try {
+    const payload = await api(
+      `/api/conversations/${
+        encodeURIComponent(trace.conversation_id)
+      }/actions/${encodeURIComponent(action)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          client_id: trace.client_id,
+          endpoint_id: endpointId,
+          ttl_seconds: Number(byId("conversation-pin-ttl").value),
+          reason: byId("conversation-action-reason").value.trim(),
+        }),
+      },
+    );
+    state.conversationControl = payload.control;
+    renderRouteDiagnosis();
+    notice(`${actionLabel}已记录。`);
+  } catch (error) {
+    notice(error.message, true);
+    renderRouteDiagnosis();
+  }
 }
 
 function renderTraceTimeline() {
@@ -2803,13 +3004,35 @@ function value(path, fallback = "") {
   return current ?? fallback;
 }
 
+function mergeObjects(base, override) {
+  if (
+    !base || typeof base !== "object" || Array.isArray(base)
+    || !override || typeof override !== "object" || Array.isArray(override)
+  ) return structuredClone(override ?? base);
+  const result = structuredClone(base);
+  Object.entries(override).forEach(([key, item]) => {
+    result[key] = (
+      item && typeof item === "object" && !Array.isArray(item)
+      && result[key] && typeof result[key] === "object"
+      && !Array.isArray(result[key])
+    )
+      ? mergeObjects(result[key], item)
+      : structuredClone(item);
+  });
+  return result;
+}
+
 async function loadSettings() {
   if (!state.key) return;
   const [payload, poolPayload] = await Promise.all([
-    api("/api/settings"),
+    api("/api/policy"),
     api("/api/prompt-directives/pool"),
   ]);
-  state.settings = payload.settings;
+  state.policy = payload.policy;
+  const selected = state.policy?.draft?.settings
+    || state.policy?.active?.settings
+    || {};
+  state.settings = mergeObjects(payload.effective_settings, selected);
   state.directivePool = poolPayload.pool;
   renderSettings();
 }
@@ -2894,6 +3117,39 @@ function renderSettings() {
     "routing.new_request_capacity_wait_seconds",
     0,
   );
+  byId("stability-enabled").checked = Boolean(
+    value("routing.conversation_stability.enabled", false),
+  );
+  byId("stability-failure-threshold").value = value(
+    "routing.conversation_stability.health_failure_threshold",
+    2,
+  );
+  byId("stability-recheck-interval").value = value(
+    "routing.conversation_stability.health_recheck_interval_seconds",
+    10,
+  );
+  byId("stability-recovery-mode").value = value(
+    "routing.conversation_stability.recovery_mode",
+    "manual",
+  );
+  byId("stability-preserve-tier").checked = Boolean(
+    value(
+      "routing.conversation_stability.preserve_tier_after_migration",
+      true,
+    ),
+  );
+  byId("health-refresh-seconds").value = value(
+    "health.refresh_seconds",
+    5,
+  );
+  byId("health-stale-seconds").value = value(
+    "health.stale_after_seconds",
+    15,
+  );
+  byId("health-probe-timeout").value = value(
+    "health.probe_timeout_seconds",
+    3,
+  );
   byId("lmcache-enabled").checked = Boolean(
     value("lmcache.enabled", false),
   );
@@ -2938,6 +3194,49 @@ function renderSettings() {
   renderLmcacheRuntimeStatus();
   updateStrategyBranchVisibility();
   updateWeightsTotal();
+  renderPolicyState();
+}
+
+function renderPolicyState() {
+  const active = state.policy?.active;
+  const draft = state.policy?.draft;
+  byId("policy-revision-state").textContent = draft
+    ? `草稿 r${draft.revision} · ${draft.status === "validated" ? "已验证" : "待验证"}`
+    : `当前激活 r${active?.revision || "—"} · 无草稿`;
+  byId("policy-fingerprint-state").textContent = draft
+    ? `基于 r${draft.base_revision || active?.revision || "—"} · ${draft.settings_fingerprint}`
+    : active?.settings_fingerprint || "";
+  const revisions = state.policy?.revisions || [];
+  const select = byId("policy-rollback-revision");
+  select.innerHTML = revisions.length
+    ? revisions.map((item) => `
+      <option value="${item.revision}">
+        r${item.revision} · ${formatTime(item.activated_at || item.updated_at)}
+      </option>`).join("")
+    : '<option value="">暂无历史版本</option>';
+  byId("policy-rollback").disabled = !revisions.length;
+  byId("policy-validate").disabled = !draft;
+  byId("policy-activate").disabled = draft?.status !== "validated";
+  renderPolicyImpact(draft?.validation?.impact);
+}
+
+function renderPolicyImpact(impact) {
+  const target = byId("policy-impact-report");
+  if (!impact) {
+    target.hidden = true;
+    target.innerHTML = "";
+    return;
+  }
+  target.hidden = false;
+  target.innerHTML = `
+    <strong>离线回放 ${Number(impact.evaluated_requests || 0)} 条 Auto 请求</strong>
+    <span>健康复检候选 ${Number(impact.health_recheck_candidates || 0)}</span>
+    <span>潜在迁移变化 ${Number(impact.route_changes || 0)}</span>
+    <span>历史云端切换 ${Number(impact.cloud_switches || 0)}</span>
+    <span>历史 429 ${Number(impact.observed_429 || 0)}</span>
+    <span>不可路由 ${Number(impact.unroutable_requests || 0)}</span>
+    <span>受影响客户端 ${escapeHtml((impact.affected_clients || []).join("、") || "无")}</span>
+    <small>仅离线计算，不调用任何生产模型；最终是否保持原端点取决于下一次实时复检。</small>`;
 }
 
 function lmcacheRuntime() {
@@ -3384,6 +3683,40 @@ function validateSettingsDraft(draft) {
   } else if (new Set(phrases).size !== phrases.length) {
     errors.push("定向暗语不能重复");
   }
+  const stability = draft.routing.conversation_stability || {};
+  if (
+    !Number.isInteger(Number(stability.health_failure_threshold))
+    || Number(stability.health_failure_threshold) < 1
+    || Number(stability.health_failure_threshold) > 5
+  ) {
+    errors.push("连续健康失败阈值须为 1 到 5");
+  }
+  const recheck = Number(stability.health_recheck_interval_seconds);
+  if (!Number.isFinite(recheck) || recheck < 0 || recheck > 60) {
+    errors.push("健康复检间隔须在 0 到 60 秒之间");
+  }
+  if (!["manual", "next_turn", "when_idle"].includes(stability.recovery_mode)) {
+    errors.push("迁移恢复方式不合法");
+  }
+  const health = draft.health || {};
+  if (
+    Number(health.refresh_seconds) < 1
+    || Number(health.refresh_seconds) > 60
+  ) {
+    errors.push("健康刷新间隔须在 1 到 60 秒之间");
+  }
+  if (
+    Number(health.stale_after_seconds) < Number(health.refresh_seconds)
+    || Number(health.stale_after_seconds) > 300
+  ) {
+    errors.push("健康过期时间须不小于刷新间隔且不超过 300 秒");
+  }
+  if (
+    Number(health.probe_timeout_seconds) < 1
+    || Number(health.probe_timeout_seconds) > 60
+  ) {
+    errors.push("健康探测超时须在 1 到 60 秒之间");
+  }
   return errors;
 }
 
@@ -3463,7 +3796,12 @@ function collectSettings() {
       ...state.settings.failover,
       max_attempts: Number(byId("failover-attempts").value),
     },
-    health: state.settings.health,
+    health: {
+      ...state.settings.health,
+      refresh_seconds: Number(byId("health-refresh-seconds").value),
+      stale_after_seconds: Number(byId("health-stale-seconds").value),
+      probe_timeout_seconds: Number(byId("health-probe-timeout").value),
+    },
     lmcache: {
       ...state.settings.lmcache,
       enabled: byId("lmcache-enabled").checked,
@@ -3476,6 +3814,19 @@ function collectSettings() {
     routing: {
       ...state.settings.routing,
       prompt_directives: promptDirectives,
+      conversation_stability: {
+        ...state.settings.routing.conversation_stability,
+        enabled: byId("stability-enabled").checked,
+        health_failure_threshold: Number(
+          byId("stability-failure-threshold").value,
+        ),
+        health_recheck_interval_seconds: Number(
+          byId("stability-recheck-interval").value,
+        ),
+        recovery_mode: byId("stability-recovery-mode").value,
+        preserve_tier_after_migration:
+          byId("stability-preserve-tier").checked,
+      },
       affinity_capacity_wait_seconds: Number(
         byId("affinity-capacity-wait").value,
       ),
@@ -3499,53 +3850,111 @@ async function saveSettings(event) {
     notice(errors[0], true);
     return;
   }
-  const current = promptDirectiveSettings();
-  const currentLmcache = state.settings.lmcache || {};
-  const lmcacheChanged = (
-    Boolean(currentLmcache.enabled) !== Boolean(draft.lmcache.enabled)
-    || Number(currentLmcache.l1_size_gb)
-      !== Number(draft.lmcache.l1_size_gb)
-  );
-  const next = draft.routing.prompt_directives;
-  const changedLabels = PROMPT_DIRECTIVES
-    .filter(([id]) => (
-      String(promptDirectiveEntry(id)?.phrase || "")
-      !== String(
-        id === "reset"
-          ? next.reset?.phrase || ""
-          : next.routes?.[id]?.phrase || ""
-      )
-    ))
-    .map(([, label]) => label);
-  const directiveModeChanged = Boolean(current.enabled) !== Boolean(next.enabled);
-  if (
-    (changedLabels.length || directiveModeChanged)
-    && !window.confirm(
-      `保存后旧暗语和旧会话定向立即失效。变更：${
-        [
-          ...(directiveModeChanged ? ["启用状态"] : []),
-          ...changedLabels,
-        ].join("、")
-      }。确认继续？`,
-    )
-  ) {
-    return;
-  }
   button.disabled = true;
   try {
-    const payload = await api("/api/settings", {
-      method: "PUT",
-      body: JSON.stringify(draft),
+    const currentDraft = state.policy?.draft;
+    const payload = await api("/api/policy/draft", {
+      method: "PATCH",
+      body: JSON.stringify({
+        changes: draft,
+        expected_revision: currentDraft?.revision
+          || state.policy?.active?.revision,
+        expected_fingerprint: currentDraft?.settings_fingerprint
+          || state.policy?.active?.settings_fingerprint,
+      }),
     });
-    state.settings = payload.settings;
+    state.policy = {
+      ...state.policy,
+      draft: payload.draft,
+    };
+    state.settings = mergeObjects(state.settings, payload.draft.settings);
     renderSettings();
+    notice("策略草稿已保存，尚未影响运行中的新请求。");
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function validatePolicyDraft() {
+  const draft = state.policy?.draft;
+  if (!draft) return;
+  const button = byId("policy-validate");
+  button.disabled = true;
+  try {
+    const payload = await api("/api/policy/draft/validate", {
+      method: "POST",
+      body: JSON.stringify({
+        expected_revision: draft.revision,
+        expected_fingerprint: draft.settings_fingerprint,
+        limit: 100,
+      }),
+    });
+    state.policy = {...state.policy, draft: payload.draft};
+    renderPolicyState();
+    notice("草稿验证通过，影响报告已更新。");
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function activatePolicyDraft() {
+  const draft = state.policy?.draft;
+  if (!draft || draft.status !== "validated") return;
+  if (!window.confirm(
+    `激活策略 r${draft.revision}？变更只作用于之后的新一轮请求。`,
+  )) return;
+  const button = byId("policy-activate");
+  button.disabled = true;
+  try {
+    await api("/api/policy/draft/activate", {
+      method: "POST",
+      body: JSON.stringify({
+        expected_revision: draft.revision,
+        expected_fingerprint: draft.settings_fingerprint,
+      }),
+    });
+    await loadSettings();
     await loadDashboard(true);
-    renderSettings();
     notice(
-      lmcacheChanged || lmcacheRestartRequired()
-        ? "设置已保存；路由设置立即生效，LMCache 配置需要受控重启缓存与模型服务。"
-        : "设置已保存，新请求立即生效。",
+      lmcacheRestartRequired()
+        ? "策略已激活；LMCache 目标变化仍需另行受控重启模型服务。"
+        : "策略已激活，新请求将使用该版本。",
     );
+  } catch (error) {
+    notice(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function rollbackPolicyRevision() {
+  const revision = Number(byId("policy-rollback-revision").value);
+  if (!revision) return;
+  const button = byId("policy-rollback");
+  button.disabled = true;
+  try {
+    const payload = await api(
+      `/api/policy/revisions/${revision}/rollback`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          expected_active_revision: state.policy?.active?.revision,
+          expected_active_fingerprint:
+            state.policy?.active?.settings_fingerprint,
+        }),
+      },
+    );
+    state.policy = {...state.policy, draft: payload.draft};
+    state.settings = mergeObjects(
+      state.settings,
+      payload.draft.settings,
+    );
+    renderSettings();
+    notice(`已从 r${revision} 创建回滚草稿，请重新验证后激活。`);
   } catch (error) {
     notice(error.message, true);
   } finally {
@@ -3812,6 +4221,23 @@ byId("reload").addEventListener("click", async () => {
   }
 });
 byId("settings-form").addEventListener("submit", saveSettings);
+byId("policy-validate").addEventListener("click", () => {
+  void validatePolicyDraft();
+});
+byId("policy-activate").addEventListener("click", () => {
+  void activatePolicyDraft();
+});
+byId("policy-rollback").addEventListener("click", () => {
+  void rollbackPolicyRevision();
+});
+document.querySelectorAll("[data-policy-section]").forEach((button) => {
+  button.addEventListener("click", () => {
+    byId(button.dataset.policySection)?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+  });
+});
 byId("directive-random-all").addEventListener("click", () => {
   void randomizePromptDirectives(PROMPT_DIRECTIVES.map(([id]) => id));
 });

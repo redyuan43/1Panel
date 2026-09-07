@@ -1168,6 +1168,58 @@ dialog::backdrop {
   padding: 28px 0;
 }
 
+.policy-workflow-bar {
+  position: sticky;
+  z-index: 4;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  border-bottom: 1px solid var(--line);
+  padding: 14px 0;
+  background: #090d12;
+}
+
+.policy-workflow-bar > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.policy-node-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.policy-node-nav button {
+  min-height: 32px;
+  border-color: #33404c;
+  background: #111820;
+  color: #c9d3dc;
+  font-size: 10px;
+}
+
+.policy-impact-report {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  border-bottom: 1px solid var(--line);
+  padding: 14px 0;
+  color: #b9c4ce;
+  font-size: 11px;
+}
+
+.policy-impact-report strong {
+  color: var(--cyan);
+}
+
+.policy-impact-report small {
+  flex-basis: 100%;
+  color: var(--muted);
+}
+
 .settings-title h3,
 .settings-title span {
   display: block;
@@ -1231,6 +1283,20 @@ dialog::backdrop {
   color: var(--muted);
   font-size: 10px;
   line-height: 1.5;
+}
+
+.hard-constraint-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.hard-constraint-list strong {
+  color: var(--text);
 }
 
 .directive-settings,
@@ -1540,10 +1606,20 @@ dialog::backdrop {
 
 .settings-actions {
   display: flex;
+  align-items: end;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
   border-top: 1px solid var(--line);
   padding-top: 22px;
+}
+
+.revision-rollback {
+  display: grid;
+  min-width: 190px;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
 }
 
 .audit-section {
@@ -1743,6 +1819,218 @@ dialog::backdrop {
   color: #b9c4ce;
   font-size: 12px;
   line-height: 1.55;
+}
+
+.route-diagnosis-section {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+  margin-top: 18px;
+  border-top: 1px solid var(--cyan);
+  border-bottom: 1px solid var(--line);
+  padding: 18px 0;
+}
+
+.route-diagnosis-section > div,
+.route-diagnosis-grid > div,
+.diagnosis-list,
+.diagnosis-list li,
+.diagnosis-alternatives {
+  min-width: 0;
+}
+
+.route-diagnosis-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.route-diagnosis-heading h4,
+.route-diagnosis-section h5 {
+  margin: 0;
+}
+
+.route-diagnosis-heading h4 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.route-diagnosis-heading p {
+  margin: 8px 0 0;
+  color: #dce5ec;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.route-diagnosis-section h5 {
+  margin-bottom: 9px;
+  color: var(--muted);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.route-diagnosis-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(240px, 0.65fr);
+  gap: 26px;
+}
+
+.diagnosis-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 22px;
+}
+
+.diagnosis-list li {
+  padding-left: 4px;
+  color: #c8d2db;
+  font-size: 11px;
+}
+
+.diagnosis-list li strong,
+.diagnosis-list li span {
+  display: block;
+}
+
+.diagnosis-list li span {
+  margin-top: 3px;
+  color: var(--muted);
+}
+
+.diagnosis-facts {
+  display: grid;
+  gap: 8px;
+}
+
+.diagnosis-facts > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-left: 2px solid var(--green);
+  padding: 7px 10px;
+  background: #0f1718;
+  font-size: 10px;
+}
+
+.diagnosis-facts code {
+  overflow-wrap: anywhere;
+}
+
+.diagnosis-alternatives {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+}
+
+.diagnosis-alternative {
+  display: grid;
+  grid-template-columns:
+    minmax(190px, 1.2fr)
+    minmax(100px, 0.7fr)
+    minmax(120px, 0.8fr)
+    minmax(150px, 0.9fr)
+    minmax(100px, 0.6fr);
+  gap: 10px;
+  align-items: center;
+  padding: 9px 10px;
+  background: #0b1015;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.diagnosis-alternative strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.diagnosis-alternative.eligible {
+  box-shadow: inset 2px 0 var(--green);
+}
+
+.diagnosis-alternative.rejected {
+  box-shadow: inset 2px 0 var(--amber);
+}
+
+.diagnosis-phases {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+  gap: 1px;
+  overflow-x: auto;
+  background: var(--line);
+}
+
+.diagnosis-phase {
+  display: grid;
+  min-width: 220px;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 3px 8px;
+  padding: 10px;
+  background: #0b1015;
+  overflow: hidden;
+}
+
+.diagnosis-phase > span {
+  grid-row: span 2;
+  color: var(--cyan);
+  font-weight: 700;
+}
+
+.diagnosis-phase strong {
+  min-width: 0;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+}
+
+.diagnosis-phase small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.diagnosis-actions {
+  display: grid;
+  grid-template-columns:
+    minmax(0, 1fr)
+    minmax(180px, 0.55fr)
+    130px
+    minmax(180px, 0.55fr);
+  gap: 12px;
+  align-items: end;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.diagnosis-actions > label {
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.diagnosis-policy-refs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.diagnosis-policy-refs button {
+  display: grid;
+  gap: 2px;
+  text-align: left;
+}
+
+.diagnosis-policy-refs code {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.diagnosis-actions .trace-review-actions {
+  grid-column: 1 / -1;
 }
 
 .trace-detail-meta {
@@ -2267,9 +2555,26 @@ button.icon-control {
   }
 
   .audit-toolbar,
-  .trace-detail-head {
+  .trace-detail-head,
+  .policy-workflow-bar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .policy-node-nav {
+    justify-content: flex-start;
+  }
+
+  .route-diagnosis-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .diagnosis-actions {
+    grid-template-columns: minmax(0, 1fr) 140px;
+  }
+
+  .diagnosis-policy-refs {
+    grid-column: 1 / -1;
   }
 
   .audit-layout {
@@ -2352,6 +2657,38 @@ button.icon-control {
   .trace-review-grid,
   .trace-evidence-grid {
     grid-template-columns: 1fr;
+  }
+
+  .diagnosis-alternative,
+  .diagnosis-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .route-diagnosis-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .diagnosis-facts > div {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .diagnosis-policy-refs,
+  .diagnosis-actions .trace-review-actions {
+    grid-column: auto;
+  }
+
+  .diagnosis-alternative {
+    gap: 4px;
+  }
+
+  .settings-actions {
+    align-items: stretch;
+  }
+
+  .revision-rollback {
+    min-width: 100%;
   }
 
   .directive-toolbar,

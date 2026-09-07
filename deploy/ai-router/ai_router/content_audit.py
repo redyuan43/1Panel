@@ -24,11 +24,13 @@ class ContentObservation:
         self.bodies = {}
         self.checks = []
 
-    def capture(self, stage, body):
+    def capture(self, stage, body, *, archive_body=True):
         raw = encoded(body)
         digest = hashlib.sha256(raw).hexdigest()
-        self.bodies.setdefault(digest, json.loads(raw))
+        if archive_body:
+            self.bodies.setdefault(digest, json.loads(raw))
         self.stages.append({"stage": stage, "sha256": digest, "bytes": len(raw),
+                            "archived": archive_body,
                             "last_role": (body.get("messages") or [{}])[-1].get("role") if isinstance(body.get("messages"), list) and all(isinstance(m,dict) for m in body["messages"]) else None,
                             "offset_ms": round((time.monotonic()-self.started)*1000, 3)})
 
@@ -117,7 +119,8 @@ class ArchiveReader:
         result = {"request_id": request_id, "stages": pipeline["stages"], "checks": pipeline.get("checks", []), "legacy": not bool(payload.get("pipeline"))}
         if stage:
             selected = next((x for x in reversed(pipeline["stages"]) if x["stage"] == stage), None)
-            if selected is None: raise KeyError(stage)
+            if selected is None or selected.get("archived") is False:
+                raise KeyError(stage)
             body = pipeline["bodies"][selected["sha256"]]
             text = json.dumps(body, ensure_ascii=False, indent=2)
             result.update(stage=stage, text=text[offset:offset+limit], offset=offset, total_chars=len(text), next_offset=offset+limit if offset+limit < len(text) else None)

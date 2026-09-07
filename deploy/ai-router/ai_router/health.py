@@ -80,12 +80,39 @@ class HealthMonitor:
         *,
         refresh_seconds: float = 5.0,
         stale_after_seconds: float = 15.0,
+        probe_timeout_seconds: float = 3.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self.store = store
         self.refresh_seconds = refresh_seconds
         self.stale_after_seconds = stale_after_seconds
-        self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(3.0, connect=2.0))
+        self.probe_timeout_seconds = probe_timeout_seconds
+        self._owns_client = client is None
+        self.client = client or self._new_client()
+
+    def configure(
+        self,
+        *,
+        refresh_seconds: float,
+        stale_after_seconds: float,
+        probe_timeout_seconds: float,
+    ) -> None:
+        self.refresh_seconds = refresh_seconds
+        self.stale_after_seconds = stale_after_seconds
+        if probe_timeout_seconds == self.probe_timeout_seconds:
+            return
+        self.probe_timeout_seconds = probe_timeout_seconds
+        if self._owns_client:
+            self.client.timeout = self._timeout()
+
+    def _new_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(timeout=self._timeout())
+
+    def _timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            self.probe_timeout_seconds,
+            connect=min(2.0, self.probe_timeout_seconds),
+        )
 
     async def statuses(
         self,

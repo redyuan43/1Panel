@@ -674,6 +674,48 @@ def validate_settings(value: dict[str, Any]) -> None:
 
     routing = value.get("routing", {})
     validate_prompt_directives(routing.get("prompt_directives", {}))
+    stability = routing.get("conversation_stability", {})
+    if not isinstance(stability, dict):
+        raise ValueError(
+            "routing.conversation_stability must be an object"
+        )
+    if not isinstance(stability.get("enabled"), bool):
+        raise ValueError(
+            "routing.conversation_stability.enabled must be a boolean"
+        )
+    failure_threshold = int(
+        stability.get("health_failure_threshold", 0)
+    )
+    if not 1 <= failure_threshold <= 5:
+        raise ValueError(
+            "routing.conversation_stability.health_failure_threshold "
+            "must be between 1 and 5"
+        )
+    recheck_interval = float(
+        stability.get("health_recheck_interval_seconds", 0)
+    )
+    if not 0 <= recheck_interval <= 60:
+        raise ValueError(
+            "routing.conversation_stability."
+            "health_recheck_interval_seconds must be between 0 and 60"
+        )
+    if stability.get("recovery_mode") not in {
+        "manual",
+        "next_turn",
+        "when_idle",
+    }:
+        raise ValueError(
+            "routing.conversation_stability.recovery_mode must be "
+            "manual, next_turn, or when_idle"
+        )
+    if not isinstance(
+        stability.get("preserve_tier_after_migration"),
+        bool,
+    ):
+        raise ValueError(
+            "routing.conversation_stability."
+            "preserve_tier_after_migration must be a boolean"
+        )
     pins = routing.get("client_deployment_pins", [])
     if not isinstance(pins, list):
         raise ValueError("routing.client_deployment_pins must be an array")
@@ -815,6 +857,28 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError("queue.timeout_seconds must be positive")
     if int(queue.get("lock_ttl_seconds", 0)) <= 0:
         raise ValueError("queue.lock_ttl_seconds must be positive")
+
+    health = value.get("health", {})
+    refresh_seconds = float(health.get("refresh_seconds", 0))
+    stale_after_seconds = float(
+        health.get("stale_after_seconds", 0)
+    )
+    probe_timeout_seconds = float(
+        health.get("probe_timeout_seconds", 0)
+    )
+    if not 1 <= refresh_seconds <= 60:
+        raise ValueError(
+            "health.refresh_seconds must be between 1 and 60"
+        )
+    if not refresh_seconds <= stale_after_seconds <= 300:
+        raise ValueError(
+            "health.stale_after_seconds must be between "
+            "health.refresh_seconds and 300"
+        )
+    if not 1 <= probe_timeout_seconds <= 60:
+        raise ValueError(
+            "health.probe_timeout_seconds must be between 1 and 60"
+        )
 
     failover = value.get("failover", {})
     attempts = int(failover.get("max_attempts", 0))

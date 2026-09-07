@@ -20,8 +20,10 @@ Open `http://127.0.0.1:14801` on the preview host. The test-only admin key is
 The fixture clears inherited `AI_ROUTER_*` environment settings in its own process,
 uses an in-memory state store and a separate SQLite/YAML directory, substitutes
 synthetic health results, and disables model HTTP clients. Settings and review
-writes affect only the preview. Other management writes, including endpoint reset
-actions, are rejected. Do not select a production directory for `--state-dir`.
+writes affect only the preview. Policy drafts, offline replay, activation and
+conversation controls are also confined to that directory and in-memory store.
+Other management writes, including endpoint reset actions, are rejected. Do not
+select a production directory for `--state-dir`.
 
 Stop this preview by its own process ID or terminal interrupt. Do not use broad
 `pkill -f uvicorn` patterns.
@@ -35,6 +37,15 @@ PLAYWRIGHT_MODULE="/absolute/path/to/playwright-core" \
 PLAYWRIGHT_CHROMIUM_EXECUTABLE="/absolute/path/to/chrome" \
 UI_TEST_OUTPUT="$HOME/.local/state/ai-router-ui-browser-results" \
 node tests/browser_control.cjs
+```
+
+The route diagnosis and policy workflow checks can be run separately:
+
+```bash
+UI_PREVIEW_URL="http://127.0.0.1:24001" \
+PLAYWRIGHT_MODULE="/absolute/path/to/playwright" \
+PLAYWRIGHT_CHROMIUM_EXECUTABLE="/usr/bin/google-chrome" \
+node tests/browser_route_diagnosis.cjs
 ```
 
 `PLAYWRIGHT_MODULE` defaults to the Node `playwright` package. The executable

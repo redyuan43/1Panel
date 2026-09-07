@@ -1,0 +1,171 @@
+{
+  "conversation_id": "lineage-e34e5fa424014588a80d735758a39c1a",
+  "traces": [
+    {
+      "request_id": "fixture-before-switch",
+      "client_id": "fixture-client",
+      "conversation_id": "lineage-e34e5fa424014588a80d735758a39c1a",
+      "requested_model": "auto",
+      "endpoint_id": "ai-qwen38-27b",
+      "started_at": 1788780100,
+      "status": "succeeded",
+      "request": {
+        "prompt_tokens": 95000,
+        "output_reserve_tokens": 16384,
+        "required_context_tokens": 111384,
+        "modalities": ["text"]
+      },
+      "attempts": [
+        {
+          "selection": {
+            "endpoint_id": "ai-qwen38-27b",
+            "reason": "conversation_affinity",
+            "affinity": "hit"
+          },
+          "steps": []
+        }
+      ]
+    },
+    {
+      "request_id": "2de4d089f0e84f24aebd203e56e1693e",
+      "client_id": "fixture-client",
+      "conversation_id": "lineage-e34e5fa424014588a80d735758a39c1a",
+      "requested_model": "auto",
+      "endpoint_id": "amd-qwen38-rocmfpx-128k",
+      "started_at": 1788780227,
+      "status": "succeeded",
+      "request": {
+        "prompt_tokens": 98774,
+        "output_reserve_tokens": 16384,
+        "required_context_tokens": 115158,
+        "modalities": ["text"]
+      },
+      "attempts": [
+        {
+          "selection": {
+            "endpoint_id": "amd-qwen38-rocmfpx-128k",
+            "reason": "monotonic_upgrade",
+            "affinity": "migrated"
+          },
+          "steps": [
+            {
+              "node_id": "candidate_scope",
+              "reason": "candidate_scope",
+              "evidence": {
+                "candidates": [
+                  {
+                    "endpoint_id": "ai-qwen38-27b",
+                    "node": "ai",
+                    "tier": "local-standard",
+                    "healthy": false,
+                    "fresh": false,
+                    "load_headroom": 1.0,
+                    "quality_score": 0.82,
+                    "required_context_tokens": 115158,
+                    "safe_context_tokens": 196608,
+                    "rejection_reason": "unhealthy_or_stale",
+                    "cloud": false
+                  },
+                  {
+                    "endpoint_id": "edge-qwen38-flash",
+                    "node": "edge",
+                    "tier": "local-standard",
+                    "healthy": true,
+                    "fresh": true,
+                    "load_headroom": 0.0,
+                    "quality_score": 0.76,
+                    "required_context_tokens": 115158,
+                    "safe_context_tokens": 500000,
+                    "rejection_reason": null,
+                    "cloud": false
+                  },
+                  {
+                    "endpoint_id": "amd-qwen38-rocmfpx-128k",
+                    "node": "amd",
+                    "tier": "local-premium",
+                    "healthy": true,
+                    "fresh": true,
+                    "load_headroom": 1.0,
+                    "quality_score": 0.91,
+                    "required_context_tokens": 115158,
+                    "safe_context_tokens": 131072,
+                    "rejection_reason": null,
+                    "cloud": false
+                  }
+                ]
+              }
+            },
+            {
+              "node_id": "conversation_affinity",
+              "reason": "conversation_endpoint_ineligible",
+              "evidence": {
+                "previous_endpoint_id": "ai-qwen38-27b"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "request_id": "fixture-after-switch",
+      "client_id": "fixture-client",
+      "conversation_id": "lineage-e34e5fa424014588a80d735758a39c1a",
+      "requested_model": "auto",
+      "endpoint_id": "amd-qwen38-rocmfpx-128k",
+      "started_at": 1788780300,
+      "status": "succeeded",
+      "request": {
+        "prompt_tokens": 102294,
+        "output_reserve_tokens": 16384,
+        "required_context_tokens": 118678,
+        "modalities": ["text"]
+      },
+      "attempts": [
+        {
+          "selection": {
+            "endpoint_id": "amd-qwen38-rocmfpx-128k",
+            "reason": "conversation_affinity",
+            "affinity": "hit"
+          },
+          "steps": [
+            {
+              "node_id": "candidate_scope",
+              "reason": "candidate_scope",
+              "evidence": {
+                "candidates": [
+                  {
+                    "endpoint_id": "ai-qwen38-27b",
+                    "node": "ai",
+                    "healthy": true,
+                    "fresh": true,
+                    "required_context_tokens": 118678,
+                    "safe_context_tokens": 196608,
+                    "rejection_reason": "tier_downgrade",
+                    "cloud": false
+                  },
+                  {
+                    "endpoint_id": "amd-qwen38-rocmfpx-128k",
+                    "node": "amd",
+                    "healthy": true,
+                    "fresh": true,
+                    "required_context_tokens": 118678,
+                    "safe_context_tokens": 131072,
+                    "rejection_reason": null,
+                    "cloud": false
+                  }
+                ]
+              }
+            },
+            {
+              "node_id": "conversation_affinity",
+              "reason": "conversation_affinity",
+              "evidence": {
+                "previous_endpoint_id": "amd-qwen38-rocmfpx-128k"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

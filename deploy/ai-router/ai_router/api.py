@@ -638,7 +638,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     )
     request.state.identity_profile = identity
     observation = ContentObservation()
-    observation.capture("received", body)
+    observation.capture("received", body, archive_body=False)
     request.state.content_observation = observation
     prompt_directive_settings = current.settings.section("routing").get(
         "prompt_directives",
@@ -838,11 +838,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         request_tracked = True
         stored_conversation = lineage.parent
+        conversation_control = (
+            await current.conversation_controls.consume_for_request(
+                authenticated.policy.id,
+                conversation_id,
+            )
+        )
         routing_conversation = (
             None
             if (
                 client_compacted
                 or clear_directive_affinity
+                or conversation_control.get("reset")
                 or (
                     stored_conversation is not None
                     and stored_conversation.identity_only
@@ -850,6 +857,22 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             )
             else stored_conversation
         )
+        if conversation_control.get("reset"):
+            trace.record(
+                1,
+                "conversation_affinity",
+                "evaluated",
+                branch="admin_reset",
+                reason="conversation_admin_reset",
+                evidence={
+                    "conversation_id": conversation_id,
+                    "operator": conversation_control["reset"].get(
+                        "operator"
+                    ),
+                    "reason": conversation_control["reset"].get("reason"),
+                },
+                path=False,
+            )
         effective_body = json.loads(json.dumps(body))
         if (
             not client_compacted
@@ -1157,6 +1180,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     request_id=request_id,
                     requested_model=requested_model,
                     client_id=authenticated.policy.id,
+                    conversation_control=conversation_control,
                     evaluation=evaluation,
                     prompt_tokens=prompt_tokens,
                     output_reserve_tokens=reserve_tokens,
@@ -2139,6 +2163,7 @@ async def _acquire_route_capacity(
     allow_compaction: bool = False,
     history_precompacted: bool = False,
     client_id: str = "",
+    conversation_control: dict[str, Any] | None = None,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -2170,6 +2195,7 @@ async def _acquire_route_capacity(
                 prefix_affinity_key=prefix_affinity_key,
                 routing_key=prefix_affinity_key or request_id,
                 client_id=client_id,
+                conversation_control=conversation_control,
                 trace=trace,
                 trace_attempt=route_attempt,
             )
@@ -2323,6 +2349,7 @@ async def _acquire_route_capacity(
                                 "logical-hit",
                                 "prefix-hit",
                                 "prefix-replica",
+                                "admin-pin",
                             },
                             capacity=decision.endpoint.max_concurrency,
                         )
@@ -2371,12 +2398,18 @@ async def _acquire_route_capacity(
                     "retry_decision",
                     (
                         "passed"
-                        if requested_model == "auto"
+                        if (
+                            requested_model == "auto"
+                            and decision.affinity != "admin-pin"
+                        )
                         else "failed"
                     ),
                     reason="capacity_spillover",
                     evidence={
-                        "allowed": requested_model == "auto",
+                        "allowed": (
+                            requested_model == "auto"
+                            and decision.affinity != "admin-pin"
+                        ),
                         "excluded_endpoint_ids": sorted(
                             excluded_endpoints
                         ),
@@ -2387,6 +2420,8 @@ async def _acquire_route_capacity(
                 )
                 await _save_request_trace(current, trace)
             await lease.release_deployment()
+            if decision.affinity == "admin-pin":
+                raise
             if requested_model != "auto":
                 raise
             continue
@@ -2641,6 +2676,7 @@ def _capacity_wait_seconds(
         "logical-hit",
         "prefix-hit",
         "prefix-replica",
+        "admin-pin",
     }:
         return max(
             0.0,
@@ -2925,12 +2961,13 @@ async def _send_upstream(
             pool=timeout.pool,
         )
     operation_id = uuid4().hex
+    attempt = int(getattr(decision, "attempts", 1) or 1)
     headers["X-1Panel-Operation-ID"] = operation_id
-    headers["X-1Panel-Attempt"] = str(decision.attempts)
+    headers["X-1Panel-Attempt"] = str(attempt)
     headers["X-1Panel-Operation-Kind"] = "foreground"
     observation = getattr(request.state, "content_observation", None)
     if observation:
-        observation.capture("forwarded_" + str(decision.attempts), payload)
+        observation.capture("forwarded_" + str(attempt), payload)
         if decision.trace:
             decision.trace.payload.setdefault("observation", {})["content"] = observation.metadata()
             decision.trace.payload["observation"]["queue_wait_ms"] = decision.queue_wait_ms
@@ -2950,7 +2987,7 @@ async def _send_upstream(
             current.cache_collector = TelemetryCollector(current)
         current.cache_collector.collect(base_url=base_url, key=api_key,
             request_id=headers["X-Request-ID"], operation_id=operation_id,
-            attempt=decision.attempts, deployment_id=decision.deployment_id or decision.endpoint.id)
+            attempt=attempt, deployment_id=decision.deployment_id or decision.endpoint.id)
     return response
 
 

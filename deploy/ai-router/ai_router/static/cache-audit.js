@@ -1,6 +1,6 @@
 /* Shared audit navigation; no prompt content in polling responses or storage. */
 const cacheView = {view: "conversation", stage: null, request: null, offset: 0, next: null, sequence: 0, loading: false, rows: new Map(), contentSequence: 0};
-const cacheStageNames = {received:"入口原文",after_directives:"指令清理后",workbuddy_reordered:"WorkBuddy 重排后",effective:"有效上下文",legacy_after_directives:"旧归档：指令清理后"};
+const cacheStageNames = {received:"入口摘要（正文未归档）",after_directives:"指令清理后",workbuddy_reordered:"WorkBuddy 重排后",effective:"有效上下文",legacy_after_directives:"旧归档：指令清理后"};
 const cacheCheckNames = {workbuddy_reorder:"WorkBuddy 重排",message_order_and_tool_history:"消息顺序与工具历史",user_content_and_images:"用户内容与图片",tool_definitions_and_parameters:"工具定义与参数",dynamic_tool_content_once:"工具动态说明保全",workspace_memory_and_stable_content:"工作区记忆与稳定内容",single_dynamic_block:"动态内容未重复插入"};
 const cacheEventNames = {hot:"内存状态可用",disk:"磁盘恢复",miss_saved:"计算后保存",miss_memory_only:"计算后保留内存",bypass:"未使用快照"};
 const cacheFormat = (value, unit="ms") => value == null ? "未采集" : unit === "ratio" ? `${(value*100).toFixed(1)}%` : unit === "ms" ? `${(value/1000).toFixed(2)} 秒` : `${Number(value).toLocaleString(undefined,{maximumFractionDigits:1})}${unit === "tokens" ? " tokens" : unit}`;
@@ -110,7 +110,7 @@ async function loadContentInspector() {
   try {
     const meta=await api(`/api/route-traces/${encodeURIComponent(rid)}/content`);
     if(seq!==cacheView.contentSequence||rid!==state.selectedTraceId)return;
-    const options=meta.stages.map(s=>`<option value="${escapeHtml(s.stage)}">${escapeHtml(cacheStageNames[s.stage]||s.stage)}</option>`).join("");
+    const options=meta.stages.filter(s=>s.archived!==false).map(s=>`<option value="${escapeHtml(s.stage)}">${escapeHtml(cacheStageNames[s.stage]||s.stage)}</option>`).join("");
     const turns=state.requestConversationPages.get(state.selectedTrace.conversation_id)?.items||[];
     const previous=turns.filter(x=>x.request_id!==rid&&x.started_at<state.selectedTrace.started_at).sort((a,b)=>b.started_at-a.started_at)[0];
     container.innerHTML=`<p class="section-meta">${meta.legacy?"旧归档缺少入口原文或中间阶段，以下仅展示实际保存内容。":"完整内容仅在本次查看时加载。"} 每次加载最多 16,384 字符，差异只针对当前已加载范围。</p><div class="cache-diff-controls"><label>左侧来源<select id="cache-compare-request"><option value="${escapeHtml(rid)}">当前请求</option>${previous?`<option value="${escapeHtml(previous.request_id)}">同会话上一条请求</option>`:""}</select></label><label>左侧阶段<select id="cache-stage-left">${options}</select></label><label>右侧阶段<select id="cache-stage-right">${options}</select></label><button class="secondary" id="cache-compare">查看对比</button></div><p id="cache-diff-state" class="section-meta"></p><div class="cache-diff-grid"><section><strong>左侧原文</strong><pre id="cache-text-left"></pre><button class="secondary" id="cache-more-left" hidden>加载下一段</button></section><section><strong>右侧原文</strong><pre id="cache-text-right"></pre><button class="secondary" id="cache-more-right" hidden>加载下一段</button></section></div><details class="audit-fold"><summary>当前范围的差异片段</summary><pre id="cache-diff-text"></pre></details>`;
@@ -127,7 +127,7 @@ async function loadContentInspector() {
       invalidateComparison();
       const id=byId("cache-compare-request").value;
       byId("cache-compare").disabled=true;
-      try{leftMeta=await api(`/api/route-traces/${encodeURIComponent(id)}/content`);if(seq!==cacheView.contentSequence||byId("cache-compare-request").value!==id)return;byId("cache-stage-left").innerHTML=leftMeta.stages.map(s=>`<option value="${escapeHtml(s.stage)}">${escapeHtml(cacheStageNames[s.stage]||s.stage)}</option>`).join("");}catch(e){if(seq===cacheView.contentSequence)byId("cache-diff-state").textContent=e.message;}finally{if(seq===cacheView.contentSequence&&byId("cache-compare-request").value===id)byId("cache-compare").disabled=false;}
+      try{leftMeta=await api(`/api/route-traces/${encodeURIComponent(id)}/content`);if(seq!==cacheView.contentSequence||byId("cache-compare-request").value!==id)return;byId("cache-stage-left").innerHTML=leftMeta.stages.filter(s=>s.archived!==false).map(s=>`<option value="${escapeHtml(s.stage)}">${escapeHtml(cacheStageNames[s.stage]||s.stage)}</option>`).join("");}catch(e){if(seq===cacheView.contentSequence)byId("cache-diff-state").textContent=e.message;}finally{if(seq===cacheView.contentSequence&&byId("cache-compare-request").value===id)byId("cache-compare").disabled=false;}
     });
     async function loadSide(side, append=false, version=comparison) {
       if(append&&(!loaded[side]||loaded[side].next_offset==null))return;

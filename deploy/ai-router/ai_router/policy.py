@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import time
@@ -257,6 +258,7 @@ class RoutingPolicy:
         prefix_affinity_key: str | None = None,
         routing_key: str = "",
         client_id: str = "",
+        conversation_control: dict[str, Any] | None = None,
         trace: DecisionTrace | None = None,
         trace_attempt: int = 1,
     ) -> RouteDecision:
@@ -364,7 +366,28 @@ class RoutingPolicy:
                 status_code=503,
                 code="endpoint_disabled",
             )
+        control_pin = (conversation_control or {}).get("pin")
         statuses = await self.health.statuses(endpoints)
+        if (
+            requested_model == "auto"
+            and conversation
+            and not (conversation_control or {}).get("pin")
+        ):
+            await self._stabilize_affinity_health(
+                endpoints=endpoints,
+                statuses=statuses,
+                conversation=conversation,
+                evaluation=evaluation,
+                prompt_tokens=prompt_tokens,
+                output_reserve_tokens=output_reserve_tokens,
+                modalities=modalities,
+                required_capabilities=required,
+                excluded_endpoint_ids=excluded,
+                excluded_deployment_ids=excluded_deployments,
+                image_count=image_count,
+                trace=trace,
+                trace_attempt=trace_attempt,
+            )
         candidates: list[Endpoint] = []
         rejections: list[str] = []
         rejection_reasons: list[str] = []
@@ -386,6 +409,11 @@ class RoutingPolicy:
                     auto=requested_model == "auto" and not directed,
                     excluded_deployment_ids=excluded_deployments,
                     image_count=image_count,
+                    allow_tier_downgrade=bool(
+                        control_pin
+                        and endpoint.id
+                        == str(control_pin.get("endpoint_id") or "")
+                    ),
                 )
             )
             if reason:
@@ -416,6 +444,32 @@ class RoutingPolicy:
                     else "explicit"
                 ),
             )
+        if control_pin:
+            pinned_endpoint_id = str(
+                control_pin.get("endpoint_id") or ""
+            )
+            scoped = next(
+                (
+                    item
+                    for item in endpoints
+                    if item.id == pinned_endpoint_id
+                ),
+                None,
+            )
+            rejection = rejection_by_endpoint.get(pinned_endpoint_id)
+            if scoped is None or rejection:
+                raise RouterError(
+                    "the pinned conversation endpoint is outside the "
+                    "request scope or violates a hard constraint",
+                    status_code=409,
+                    code="conversation_pin_incompatible",
+                    details={
+                        "endpoint_id": pinned_endpoint_id,
+                        "rejection_reason": (
+                            rejection or "outside_model_scope"
+                        ),
+                    },
+                )
         if requested_model == "auto" and conversation:
             previous_endpoint = self.registry.by_id(
                 conversation.endpoint_id
@@ -467,6 +521,74 @@ class RoutingPolicy:
             ):
                 raise NoCompatibleModelError(message)
             raise NoEligibleModelError(message)
+
+        if control_pin:
+            endpoint = next(
+                item
+                for item in candidates
+                if item.id == str(control_pin["endpoint_id"])
+            )
+            migration = bool(
+                conversation and endpoint.id != conversation.endpoint_id
+            )
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "conversation_affinity",
+                    "selected",
+                    branch="admin_pin",
+                    reason="conversation_admin_pin",
+                    evidence={
+                        "conversation_id": (
+                            conversation.conversation_id
+                            if conversation
+                            else None
+                        ),
+                        "endpoint_id": endpoint.id,
+                        "expires_at": control_pin.get("expires_at"),
+                    },
+                )
+            decision = RouteDecision(
+                endpoint=endpoint,
+                requested_model=requested_model,
+                task=evaluation.task,
+                prompt_tokens=prompt_tokens,
+                output_reserve_tokens=output_reserve_tokens,
+                reason="conversation_admin_pin",
+                affinity="admin-pin",
+                score=1.0,
+                migration=migration,
+                previous_endpoint_id=(
+                    conversation.endpoint_id
+                    if migration and conversation
+                    else None
+                ),
+                protocol=required.protocol,
+                native_or_adapter=endpoint.capabilities.protocol_mode(
+                    required.protocol
+                ),
+                required_capabilities=required.labels(),
+                candidate_rejections=tuple(rejections),
+                strategy_version=strategy,
+                route_profile=evaluation.route_profile,
+                complexity=evaluation.complexity,
+                context_required=context_required,
+                trace=trace,
+            )
+            await self._bind_traced_deployment(
+                decision,
+                statuses[endpoint.id],
+                conversation,
+                prompt_tokens + output_reserve_tokens,
+                excluded_deployments,
+                modalities,
+                image_count,
+                routing_key,
+                prefix_affinity_key,
+                trace,
+                trace_attempt,
+            )
+            return decision
 
         if directed:
             endpoint = candidates[0]
@@ -532,6 +654,76 @@ class RoutingPolicy:
             return decision
 
         if conversation:
+            stability = self._conversation_stability()
+            recovery = next(
+                (
+                    item
+                    for item in candidates
+                    if item.id == conversation.recovery_endpoint_id
+                ),
+                None,
+            )
+            recovery_mode = str(
+                stability.get("recovery_mode", "manual")
+            )
+            if (
+                recovery
+                and recovery_mode in {"next_turn", "when_idle"}
+                and (
+                    recovery_mode == "next_turn"
+                    or statuses[recovery.id].load_headroom > 0
+                )
+            ):
+                if trace:
+                    trace.record(
+                        trace_attempt,
+                        "conversation_affinity",
+                        "selected",
+                        branch="recovered",
+                        reason="conversation_recovery",
+                        evidence={
+                            "conversation_id": conversation.conversation_id,
+                            "endpoint_id": recovery.id,
+                            "recovery_mode": recovery_mode,
+                        },
+                    )
+                decision = RouteDecision(
+                    endpoint=recovery,
+                    requested_model=requested_model,
+                    task=evaluation.task,
+                    prompt_tokens=prompt_tokens,
+                    output_reserve_tokens=output_reserve_tokens,
+                    reason="conversation_recovery",
+                    affinity="recovered",
+                    score=1.0,
+                    migration=True,
+                    previous_endpoint_id=conversation.endpoint_id,
+                    protocol=required.protocol,
+                    native_or_adapter=recovery.capabilities.protocol_mode(
+                        required.protocol
+                    ),
+                    required_capabilities=required.labels(),
+                    candidate_rejections=tuple(rejections),
+                    strategy_version=strategy,
+                    route_profile=evaluation.route_profile,
+                    complexity=evaluation.complexity,
+                    context_required=context_required,
+                    trace=trace,
+                )
+                await self._bind_traced_deployment(
+                    decision,
+                    statuses[recovery.id],
+                    conversation,
+                    prompt_tokens + output_reserve_tokens,
+                    excluded_deployments,
+                    modalities,
+                    image_count,
+                    routing_key,
+                    prefix_affinity_key,
+                    trace,
+                    trace_attempt,
+                )
+                return decision
             pinned = next(
                 (item for item in candidates if item.id == conversation.endpoint_id),
                 None,
@@ -1064,6 +1256,110 @@ class RoutingPolicy:
             "rejection_reason": rejection_reason,
         }
 
+    def _conversation_stability(self) -> dict[str, Any]:
+        return self.settings.section("routing").get(
+            "conversation_stability",
+            {},
+        )
+
+    async def _stabilize_affinity_health(
+        self,
+        *,
+        endpoints: list[Endpoint],
+        statuses: dict[str, EndpointStatus],
+        conversation: ConversationState,
+        evaluation: Evaluation,
+        prompt_tokens: int,
+        output_reserve_tokens: int,
+        modalities: set[str],
+        required_capabilities: RequestCapabilities,
+        excluded_endpoint_ids: set[str],
+        excluded_deployment_ids: set[str],
+        image_count: int,
+        trace: DecisionTrace | None,
+        trace_attempt: int,
+    ) -> None:
+        stability = self._conversation_stability()
+        if not bool(stability.get("enabled")):
+            return
+        endpoint = next(
+            (
+                item
+                for item in endpoints
+                if item.id == conversation.endpoint_id
+                and item.id not in excluded_endpoint_ids
+            ),
+            None,
+        )
+        if endpoint is None:
+            return
+        reason = await self._ineligible_reason(
+            endpoint,
+            statuses[endpoint.id],
+            evaluation=evaluation,
+            prompt_tokens=prompt_tokens,
+            output_reserve_tokens=output_reserve_tokens,
+            modalities=modalities,
+            required_capabilities=required_capabilities,
+            conversation=conversation,
+            auto=True,
+            excluded_deployment_ids=excluded_deployment_ids,
+            image_count=image_count,
+        )
+        if reason != "unhealthy_or_stale":
+            return
+        threshold = int(
+            stability.get("health_failure_threshold", 2)
+        )
+        interval = float(
+            stability.get("health_recheck_interval_seconds", 10)
+        )
+        for attempt in range(1, threshold + 1):
+            if attempt > 1 and interval > 0:
+                await asyncio.sleep(interval)
+            status = await self.health.status(
+                endpoint,
+                force_refresh=True,
+            )
+            statuses[endpoint.id] = status
+            fresh = status.is_fresh(
+                time.time(),
+                float(
+                    self.settings.section("health").get(
+                        "stale_after_seconds",
+                        15,
+                    )
+                ),
+            )
+            if trace:
+                trace.record(
+                    trace_attempt,
+                    "conversation_affinity",
+                    "passed" if fresh else "blocked",
+                    branch="health_recheck",
+                    reason=(
+                        "affinity_health_recovered"
+                        if fresh
+                        else (
+                            "affinity_health_threshold_reached"
+                            if attempt == threshold
+                            else "affinity_health_recheck_failed"
+                        )
+                    ),
+                    evidence={
+                        "endpoint_id": endpoint.id,
+                        "attempt": attempt,
+                        "threshold": threshold,
+                        "interval_seconds": interval,
+                        "healthy": status.healthy,
+                        "checked_at": status.checked_at,
+                        "detail": status.detail,
+                    },
+                    path=False,
+                )
+            if fresh:
+                return
+
     def _provider_priority_reason(
         self,
         evaluation: Evaluation,
@@ -1184,6 +1480,7 @@ class RoutingPolicy:
         auto: bool,
         excluded_deployment_ids: set[str],
         image_count: int,
+        allow_tier_downgrade: bool = False,
     ) -> str | None:
         if not endpoint.enabled:
             return "disabled"
@@ -1284,6 +1581,18 @@ class RoutingPolicy:
             and conversation
             and endpoint.tier_rank < conversation.tier_rank
             and not self._cloud_to_local_migration(conversation, endpoint)
+            and not allow_tier_downgrade
+            and not (
+                endpoint.id == conversation.recovery_endpoint_id
+                and self._conversation_stability().get("recovery_mode")
+                in {"next_turn", "when_idle"}
+            )
+            and bool(
+                self._conversation_stability().get(
+                    "preserve_tier_after_migration",
+                    True,
+                )
+            )
         ):
             return "tier_downgrade"
         if evaluation.required_tier:
@@ -1379,6 +1688,13 @@ class RoutingPolicy:
         conversation: ConversationState,
         evaluation: Evaluation,
     ) -> tuple[list[Endpoint], str, int | None]:
+        if not bool(
+            self._conversation_stability().get(
+                "preserve_tier_after_migration",
+                True,
+            )
+        ):
+            return candidates, "conversation_fallback", None
         eligible = [
             endpoint
             for endpoint in candidates
@@ -2264,6 +2580,40 @@ def updated_conversation_state(
     encrypted_capsule: str | None = None,
     boundary_hash: str | None = None,
 ) -> ConversationState:
+    recovered = decision.affinity == "recovered"
+    recovery_endpoint_id = (
+        None
+        if recovered
+        else (
+            (
+                existing.recovery_endpoint_id
+                or existing.endpoint_id
+            )
+            if existing and decision.migration
+            else (
+                existing.recovery_endpoint_id
+                if existing
+                else None
+            )
+        )
+    )
+    recovery_tier_rank = (
+        None
+        if recovered
+        else (
+            (
+                existing.recovery_tier_rank
+                if existing.recovery_tier_rank is not None
+                else existing.tier_rank
+            )
+            if existing and decision.migration
+            else (
+                existing.recovery_tier_rank
+                if existing
+                else None
+            )
+        )
+    )
     return ConversationState(
         conversation_id=conversation_id,
         branch_id=branch_id or conversation_id,
@@ -2294,5 +2644,16 @@ def updated_conversation_state(
         directive_generation=decision.directive_generation,
         directive_endpoint_id=(
             decision.endpoint.id if decision.directive_id else None
+        ),
+        recovery_endpoint_id=recovery_endpoint_id,
+        recovery_tier_rank=recovery_tier_rank,
+        last_migration_reason=(
+            decision.reason
+            if decision.migration
+            else (
+                existing.last_migration_reason
+                if existing
+                else None
+            )
         ),
     )

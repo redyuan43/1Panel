@@ -255,37 +255,65 @@ async function run() {
         await page.unroute('**/api/route-traces?*');
       }
     });
-    let puts = 0;
+    let draftPatches = 0;
     page.on('request', request => {
-      if (request.method() === 'PUT' && request.url().endsWith('/api/settings')) puts++;
+      if (
+        request.method() === 'PATCH'
+        && request.url().endsWith('/api/policy/draft')
+      ) draftPatches++;
     });
+    const saveValidateActivate = async () => {
+      const saved = page.waitForResponse(response =>
+        response.url().endsWith('/api/policy/draft')
+        && response.request().method() === 'PATCH');
+      await page.locator('#settings-form button[type="submit"]').click();
+      assert.equal((await saved).status(), 200);
+      const validated = page.waitForResponse(response =>
+        response.url().endsWith('/api/policy/draft/validate')
+        && response.request().method() === 'POST');
+      await page.locator('#policy-validate').click();
+      assert.equal((await validated).status(), 200);
+      page.once('dialog', dialog => dialog.accept());
+      const activated = page.waitForResponse(response =>
+        response.url().endsWith('/api/policy/draft/activate')
+        && response.request().method() === 'POST');
+      await page.locator('#policy-activate').click();
+      assert.equal((await activated).status(), 200);
+      await page.waitForFunction(() => !state.policy?.draft);
+    };
     await page.locator('[data-view="settings"]').click();
-    await check('prompt directive random preview and confirmed save', async () => {
+    await check('prompt directive random preview and policy activation', async () => {
       assert.equal(await page.locator('[data-directive-phrase]').count(), 5);
       const input = page.locator('[data-directive-phrase="beichen"]');
       const original = await input.inputValue();
       const revision = await page.evaluate(() => state.settings.routing.prompt_directives.revision);
       const generation = await page.evaluate(() => state.settings.routing.prompt_directives.routes.beichen.generation);
-      const before = puts;
+      const before = draftPatches;
       const suggested = page.waitForResponse(response =>
         response.url().endsWith('/api/prompt-directives/suggest')
         && response.request().method() === 'POST');
       await page.locator('[data-directive-random="beichen"]').click();
       assert.equal((await suggested).status(), 200);
       assert.notEqual(await input.inputValue(), original);
-      assert.equal(puts, before);
-      page.once('dialog', async dialog => {
-        assert.match(dialog.message(), /旧暗语和旧会话定向立即失效/);
-        await dialog.accept();
-      });
+      assert.equal(draftPatches, before);
       const saved = page.waitForResponse(response =>
-        response.url().endsWith('/api/settings')
-        && response.request().method() === 'PUT');
+        response.url().endsWith('/api/policy/draft')
+        && response.request().method() === 'PATCH');
       await page.locator('#settings-form button[type="submit"]').click();
       assert.equal((await saved).status(), 200);
       assert.equal(await page.evaluate(() => state.settings.routing.prompt_directives.revision), revision + 1);
       assert.equal(await page.evaluate(() => state.settings.routing.prompt_directives.routes.beichen.generation), generation + 1);
       await page.waitForFunction(() => !document.querySelector("#settings-form button[type=submit]").disabled);
+      const validated = page.waitForResponse(response =>
+        response.url().endsWith('/api/policy/draft/validate'));
+      await page.locator('#policy-validate').click();
+      assert.equal((await validated).status(), 200);
+      page.once('dialog', dialog => dialog.accept());
+      const activated = page.waitForResponse(response =>
+        response.url().endsWith('/api/policy/draft/activate'));
+      await page.locator('#policy-activate').click();
+      assert.equal((await activated).status(), 200);
+      await page.waitForFunction(() => !state.policy?.draft);
     });
     await check('strategy branches and fallback-order controls', async () => {
       await page.locator('#routing-strategy').selectOption('legacy_v1');
@@ -319,19 +347,19 @@ async function run() {
       }, original);
     });
     await check('invalid drafts never reach the settings API', async () => {
-      const before = puts;
+      const before = draftPatches;
       const quality = page.locator('[data-weight="quality"]');
       const saved = await quality.inputValue();
       await quality.fill('0.99');
       await page.locator('#settings-form button[type="submit"]').click();
       await page.waitForTimeout(150);
-      assert.equal(puts, before);
+      assert.equal(draftPatches, before);
       assert.match(await page.locator('#notice').innerText(), /总和/);
       await quality.fill(saved);
       await page.locator('#review-base-url').fill('https://example.com');
       await page.locator('#settings-form button[type="submit"]').click();
       await page.waitForTimeout(150);
-      assert.equal(puts, before);
+      assert.equal(draftPatches, before);
       assert.match(await page.locator('#notice').innerText(), /私网|base_url/);
       await page.locator('#review-backend').selectOption('ollama');
       await page.locator('#review-base-url').fill('http://agx.taild500c8.ts.net:11434');
@@ -341,7 +369,7 @@ async function run() {
       });
       await page.locator('#settings-form button[type="submit"]').click();
       await page.waitForTimeout(150);
-      assert.equal(puts, before);
+      assert.equal(draftPatches, before);
       assert.match(await page.locator('#notice').innerText(), /每分钟/);
       await page.locator('#review-rpm').selectOption('2');
       assert.equal(await page.evaluate(() => validateReviewBaseUrl('http://[::1]:11434', 'ollama')), null);
@@ -351,9 +379,7 @@ async function run() {
       await page.locator('#review-model').fill('preview-explicit-model');
       await page.locator('#review-mode').selectOption('shadow');
       const expected = await page.evaluate(() => [...state.settings.routing.remote_fallback_order.general]);
-      const saved = page.waitForResponse(response => response.url().endsWith('/api/settings') && response.request().method() === 'PUT');
-      await page.locator('#settings-form button[type="submit"]').click();
-      assert.equal((await saved).status(), 200);
+      await saveValidateActivate();
       await page.reload();
       await page.waitForFunction(() => state.settings && state.dashboard);
       await page.locator('#auto-refresh').uncheck();

@@ -42,6 +42,18 @@ class SnapshotContractTests(unittest.TestCase):
         self.assertEqual(metadata["stages"][0]["stage"], "received")
         self.assertEqual(len(metadata["stages"][0]["sha256"]), 64)
 
+    def test_metadata_only_stage_does_not_archive_raw_body(self):
+        observer = ContentObservation()
+        observer.capture(
+            "received",
+            {"prompt": SYNTHETIC_TEXT},
+            archive_body=False,
+        )
+        archive = observer.archive()
+        self.assertFalse(archive["stages"][0]["archived"])
+        self.assertEqual(archive["bodies"], {})
+        self.assertNotIn(SYNTHETIC_TEXT, json.dumps(archive))
+
     def test_equal_bodies_are_deduplicated_without_losing_stages(self):
         observer = ContentObservation()
         for stage in ("received", "normalized", "routed"):

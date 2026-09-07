@@ -29,6 +29,12 @@ routing:
   strategy: intelligent_v2
   default_output_reserve_tokens: 4096
   provider_priority: local_first
+  conversation_stability:
+    enabled: false
+    health_failure_threshold: 2
+    health_recheck_interval_seconds: 10
+    recovery_mode: manual
+    preserve_tier_after_migration: true
   prompt_directives:
     enabled: false
     revision: 1
@@ -138,6 +144,7 @@ queue:
 health:
   refresh_seconds: 5
   stale_after_seconds: 15
+  probe_timeout_seconds: 3
 
 failover:
   max_attempts: 2

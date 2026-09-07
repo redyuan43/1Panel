@@ -1,6 +1,7 @@
 """Isolated console fixture; no production credentials, state, or model calls."""
 import argparse
 import asyncio
+import json
 import os
 from pathlib import Path
 import sys
@@ -34,6 +35,7 @@ async def prepare(directory):
         "AI_ROUTER_STATE_KEY": Fernet.generate_key().decode(),
         "AI_ROUTER_AUDIT_PATH": str(directory / "audit.jsonl"),
         "AI_ROUTER_ROUTE_TRACE_DB_PATH": str(directory / "traces.sqlite3"),
+        "AI_ROUTER_POLICY_DB_PATH": str(directory / "policy.sqlite3"),
         "AI_ROUTER_TRAINING_ENABLED": "false",
     })
     settings = Settings(defaults_path=ROOT / "config/defaults.yaml",
@@ -132,6 +134,68 @@ async def prepare(directory):
     payload["observation"] = {"content": content.metadata(), "ttft_ms": 7290, "first_text_ms": 7410, "queue_wait_ms": 81.5}
     await asyncio.to_thread(runtime.route_traces._save, payload)
     await CacheAudit(runtime.route_traces.database_path).save_operation({"operation_id": "preview-operation", "request_id": "preview-local", "attempt": 1, "kind": "foreground", "deployment_id": "preview-nx3", "terminal": True, "status": "completed", "ttft_ms": 7200, "queue_ms": 1.5, "cache": {"event": "hot", "fixed_tokens": 33028, "prime_tokens": 0, "template_ms": 112, "seconds": .112}, "timings": {"cache_n": 50211, "prompt_n": 986, "prompt_ms": 6376.6, "prompt_per_second": 154.6}})
+
+    lineage_fixture = json.loads(
+        (
+            ROOT
+            / "tests/fixtures"
+            / "lineage-e34e5fa424014588a80d735758a39c1a.json"
+        ).read_text(encoding="utf-8")
+    )
+    diagnosis_started_at = time.time() + 10
+    for fixture_index, raw in enumerate(lineage_fixture["traces"]):
+        started_at = diagnosis_started_at + fixture_index
+        trace = DecisionTrace(
+            request_id=raw["request_id"],
+            client_id=raw["client_id"],
+            key_id="preview",
+            protocol="chat",
+            requested_model=raw["requested_model"],
+            excerpt={
+                "text": "Synthetic sanitized route diagnosis fixture",
+                "tool_names": [],
+            },
+            instance_id="ui-preview",
+            boot_id="preview",
+            settings_hash="preview",
+            registry_hash="preview",
+        )
+        trace.payload.update(
+            {
+                **raw,
+                "started_at": started_at,
+                "selected_model": (
+                    registry.by_id(raw["endpoint_id"]).public_model
+                    if registry.by_id(raw["endpoint_id"])
+                    else raw["endpoint_id"]
+                ),
+                "task": "general",
+                "route_profile": "general",
+                "strategy_version": "intelligent_v2",
+                "history_mode": "native",
+                "status_code": 200,
+                "route_selected": True,
+                "updated_at": started_at + 1,
+                "completed_at": started_at + 1,
+            }
+        )
+        for number, attempt in enumerate(
+            trace.payload["attempts"],
+            start=1,
+        ):
+            attempt.setdefault("number", number)
+            attempt.setdefault("started_at", started_at)
+            attempt.setdefault("transitions", [])
+            for sequence, step in enumerate(
+                attempt.get("steps", []),
+                start=1,
+            ):
+                step.setdefault("sequence", sequence)
+                step.setdefault("timestamp", started_at)
+                step.setdefault("status", "passed")
+                step.setdefault("branch", None)
+                step.setdefault("path", False)
+        await runtime.route_traces.save(trace)
     return runtime
 
 
@@ -148,6 +212,15 @@ async def main():
         path = request.url.path
         allowed_write = (
             request.method == "PUT" and path == "/api/settings"
+        ) or (
+            request.method == "PATCH"
+            and path == "/api/policy/draft"
+        ) or (
+            request.method == "POST"
+            and (
+                path.startswith("/api/policy/")
+                or path.startswith("/api/conversations/")
+            )
         ) or (
             request.method == "POST"
             and path == "/api/prompt-directives/suggest"

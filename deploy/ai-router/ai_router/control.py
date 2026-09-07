@@ -23,6 +23,8 @@ from .prompt_directives import (
     configured_phrases,
     prepare_prompt_directive_update,
 )
+from .policy_config import PolicyConflictError
+from .route_diagnosis import diagnose_route
 from .route_trace import graph_document, validate_review
 from .runtime import RouterRuntime, build_runtime
 
@@ -147,6 +149,10 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 code="invalid_settings",
             ) from exc
         current.reload_settings()
+        active_policy = await current.policy_config.record_external_activation(
+            current.settings.value,
+            source=request.client.host if request.client else "unknown",
+        )
         updated_prompt = current.settings.section("routing").get(
             "prompt_directives",
             {},
@@ -168,11 +174,254 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 item["directive_id"] for item in prompt_changes
             ],
             source=request.client.host if request.client else "unknown",
+            policy_revision=active_policy["revision"],
         )
         return {
             "ok": True,
             "settings": _editable(current.settings.value),
+            "policy_revision": active_policy["revision"],
         }
+
+    @app.get("/api/policy")
+    async def get_policy(request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        current.reload_settings()
+        return {
+            "policy": await current.policy_config.snapshot(),
+            "effective_settings": _editable(current.settings.value),
+            "runtime_path": str(current.settings.runtime_path),
+        }
+
+    @app.patch("/api/policy/draft")
+    async def patch_policy_draft(
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        current.reload_settings()
+        value = await _json_body(request)
+        changes = value.get("changes")
+        if not isinstance(changes, dict):
+            raise RouterError(
+                "changes must be a JSON object",
+                status_code=400,
+                code="invalid_policy_draft",
+            )
+        snapshot = await current.policy_config.snapshot()
+        draft_record = snapshot.get("draft")
+        base_settings = (
+            draft_record.get("settings", {})
+            if draft_record
+            else snapshot["active"].get("settings", {})
+        )
+        proposed_prompt = (
+            changes.get("routing", {}).get("prompt_directives")
+            if isinstance(changes.get("routing"), dict)
+            else None
+        )
+        if proposed_prompt is not None:
+            base_prompt = (
+                base_settings.get("routing", {}).get(
+                    "prompt_directives"
+                )
+                or current.settings.section("routing").get(
+                    "prompt_directives",
+                    {},
+                )
+            )
+            prepared_prompt, _changes = prepare_prompt_directive_update(
+                base_prompt,
+                proposed_prompt,
+            )
+            changes = {
+                **changes,
+                "routing": {
+                    **changes["routing"],
+                    "prompt_directives": prepared_prompt,
+                },
+            }
+        source = request.client.host if request.client else "unknown"
+        try:
+            draft = await current.policy_config.patch_draft(
+                _editable(changes),
+                expected_revision=_optional_int(
+                    value.get("expected_revision")
+                ),
+                expected_fingerprint=_optional_text(
+                    value.get("expected_fingerprint"),
+                    128,
+                ),
+                source=source,
+            )
+        except PolicyConflictError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=409,
+                code="policy_revision_conflict",
+            ) from exc
+        except ValueError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=400,
+                code="invalid_policy_draft",
+            ) from exc
+        current.audit.write(
+            "policy_draft_updated",
+            revision=draft["revision"],
+            settings_fingerprint=draft["settings_fingerprint"],
+            source=source,
+        )
+        return {"draft": draft}
+
+    @app.post("/api/policy/draft/validate")
+    async def validate_policy_draft(
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        limit = max(1, min(500, int(value.get("limit", 100))))
+        traces = await current.route_traces.recent_auto(
+            limit=limit,
+            auto_models=(
+                "auto",
+                _public_model_id(current),
+            ),
+        )
+        source = request.client.host if request.client else "unknown"
+        try:
+            draft = await current.policy_config.validate_draft(
+                traces,
+                expected_revision=_optional_int(
+                    value.get("expected_revision")
+                ),
+                expected_fingerprint=_optional_text(
+                    value.get("expected_fingerprint"),
+                    128,
+                ),
+                source=source,
+            )
+        except PolicyConflictError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=409,
+                code="policy_revision_conflict",
+            ) from exc
+        except ValueError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=400,
+                code="invalid_policy_draft",
+            ) from exc
+        current.audit.write(
+            "policy_draft_validated",
+            revision=draft["revision"],
+            impact=draft["validation"]["impact"],
+            source=source,
+        )
+        return {"draft": draft}
+
+    @app.post("/api/policy/draft/activate")
+    async def activate_policy_draft(
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        source = request.client.host if request.client else "unknown"
+        current_prompt = current.settings.section("routing").get(
+            "prompt_directives",
+            {},
+        )
+        try:
+            active = await current.policy_config.activate(
+                expected_revision=_optional_int(
+                    value.get("expected_revision")
+                ),
+                expected_fingerprint=_optional_text(
+                    value.get("expected_fingerprint"),
+                    128,
+                ),
+                source=source,
+            )
+        except PolicyConflictError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=409,
+                code="policy_revision_conflict",
+            ) from exc
+        except ValueError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=400,
+                code="invalid_policy_activation",
+            ) from exc
+        current.reload_settings()
+        updated_prompt = current.settings.section("routing").get(
+            "prompt_directives",
+            {},
+        )
+        prompt_changes = _prompt_change_records(
+            current_prompt,
+            updated_prompt,
+        )
+        current.prompt_directives.sync_active(
+            configured_phrases(updated_prompt)
+        )
+        current.prompt_directives.record_changes(
+            int(updated_prompt.get("revision", 1)),
+            prompt_changes,
+            previous=current_prompt,
+            current=updated_prompt,
+            source=source,
+        )
+        current.audit.write(
+            "policy_activated",
+            revision=active["revision"],
+            settings_fingerprint=active["settings_fingerprint"],
+            source=source,
+        )
+        return {
+            "active": active,
+            "settings": _editable(current.settings.value),
+        }
+
+    @app.post("/api/policy/revisions/{revision}/rollback")
+    async def rollback_policy_revision(
+        revision: int,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        source = request.client.host if request.client else "unknown"
+        try:
+            draft = await current.policy_config.rollback(
+                revision,
+                expected_active_revision=_optional_int(
+                    value.get("expected_active_revision")
+                ),
+                expected_active_fingerprint=_optional_text(
+                    value.get("expected_active_fingerprint"),
+                    128,
+                ),
+                source=source,
+            )
+        except PolicyConflictError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=409,
+                code="policy_revision_conflict",
+            ) from exc
+        except ValueError as exc:
+            raise RouterError(
+                str(exc),
+                status_code=404,
+                code="policy_revision_not_found",
+            ) from exc
+        current.audit.write(
+            "policy_rollback_draft_created",
+            source_revision=revision,
+            draft_revision=draft["revision"],
+            source=source,
+        )
+        return {"draft": draft}
 
     @app.get("/api/prompt-directives/pool")
     async def prompt_directive_pool(
@@ -689,6 +938,143 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         value["cache_audit"] = await CacheAudit(current.route_traces.database_path).detail(value)
         return {"trace": value}
 
+    @app.get("/api/route-traces/{request_id}/diagnosis")
+    async def route_trace_diagnosis(
+        request_id: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        trace = await current.route_traces.get(request_id)
+        if trace is None:
+            raise RouterError(
+                "route trace was not found",
+                status_code=404,
+                code="route_trace_not_found",
+            )
+        conversation_id = str(trace.get("conversation_id") or "")
+        conversation = (
+            await current.route_traces.conversation(
+                conversation_id,
+                limit=500,
+            )
+            if conversation_id
+            else [trace]
+        )
+        return {
+            "diagnosis": diagnose_route(
+                trace,
+                conversation,
+                current.settings,
+                current.registry,
+            )
+        }
+
+    @app.get("/api/conversations/{conversation_id}/control")
+    async def get_conversation_control(
+        conversation_id: str,
+        request: Request,
+        client_id: str = Query(min_length=1, max_length=256),
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        return {
+            "control": await current.conversation_controls.get(
+                client_id,
+                conversation_id,
+            )
+        }
+
+    @app.post("/api/conversations/{conversation_id}/actions/{action}")
+    async def conversation_action(
+        conversation_id: str,
+        action: str,
+        request: Request,
+    ) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        client_id = str(value.get("client_id") or "").strip()[:256]
+        if not client_id:
+            raise RouterError(
+                "client_id is required",
+                status_code=400,
+                code="invalid_conversation_action",
+            )
+        reason = (
+            str(value.get("reason") or "admin console").strip()[:500]
+            or "admin console"
+        )
+        source = request.client.host if request.client else "unknown"
+        before = await current.conversation_controls.get(
+            client_id,
+            conversation_id,
+        )
+        try:
+            if action == "reset":
+                result = await current.conversation_controls.request_reset(
+                    client_id=client_id,
+                    conversation_id=conversation_id,
+                    operator=source,
+                    reason=reason,
+                )
+            elif action == "unpin":
+                result = await current.conversation_controls.unpin(
+                    client_id,
+                    conversation_id,
+                )
+            elif action == "pin":
+                endpoint_id = str(
+                    value.get("endpoint_id") or ""
+                ).strip()
+                endpoint = current.registry.by_id(endpoint_id)
+                if (
+                    endpoint is None
+                    or endpoint.role != "responder"
+                    or not endpoint.enabled
+                ):
+                    raise RouterError(
+                        "the pin target is not an enabled responder endpoint",
+                        status_code=404,
+                        code="conversation_pin_target_not_found",
+                    )
+                result = await current.conversation_controls.pin(
+                    client_id=client_id,
+                    conversation_id=conversation_id,
+                    endpoint_id=endpoint_id,
+                    ttl_seconds=int(value.get("ttl_seconds", 3600)),
+                    operator=source,
+                    reason=reason,
+                )
+            else:
+                raise RouterError(
+                    "action must be reset, pin, or unpin",
+                    status_code=400,
+                    code="invalid_conversation_action",
+                )
+        except (TypeError, ValueError) as exc:
+            raise RouterError(
+                str(exc),
+                status_code=400,
+                code="invalid_conversation_action",
+            ) from exc
+        after = await current.conversation_controls.get(
+            client_id,
+            conversation_id,
+        )
+        current.audit.write(
+            "conversation_control_updated",
+            action=action,
+            client_id=client_id,
+            conversation_id=conversation_id,
+            reason=reason,
+            before=before,
+            after=after,
+            source=source,
+        )
+        return {
+            "ok": True,
+            "result": result,
+            "control": after,
+        }
+
     @app.post("/api/route-traces/{request_id}/privacy-feedback")
     async def privacy_feedback(request_id: str, request: Request) -> dict[str, Any]:
         current = _authorized_runtime(request)
@@ -919,6 +1305,55 @@ def _optional_int(value: Any) -> int | None:
             status_code=400,
             code="invalid_endpoint_config",
         ) from exc
+
+
+def _optional_text(value: Any, limit: int) -> str | None:
+    text = str(value or "").strip()
+    return text[:limit] if text else None
+
+
+def _prompt_change_records(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    global_changed = any(
+        previous.get(field) != current.get(field)
+        for field in ("enabled", "match", "persistence", "fallback")
+    )
+    previous_routes = previous.get("routes", {})
+    current_routes = current.get("routes", {})
+    for directive_id in sorted(
+        set(previous_routes) | set(current_routes)
+    ):
+        old = previous_routes.get(directive_id, {})
+        new = current_routes.get(directive_id, {})
+        fields = [
+            field
+            for field in ("phrase", "endpoint_id")
+            if old.get(field) != new.get(field)
+        ]
+        if fields or global_changed:
+            result.append(
+                {
+                    "directive_id": directive_id,
+                    "fields": ",".join(fields or ["global"]),
+                }
+            )
+    old_reset = previous.get("reset", {})
+    new_reset = current.get("reset", {})
+    if old_reset.get("phrase") != new_reset.get("phrase") or global_changed:
+        result.append(
+            {
+                "directive_id": "reset",
+                "fields": (
+                    "phrase"
+                    if old_reset.get("phrase") != new_reset.get("phrase")
+                    else "global"
+                ),
+            }
+        )
+    return result
 
 
 def _worker_rows(endpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
