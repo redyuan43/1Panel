@@ -387,10 +387,11 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
     assert len(registry.endpoints) == 13
+    assert registry.by_id("ai-qwen38-27b").max_concurrency == 4
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
-        if not item.cloud
+        if not item.cloud and item.id != "ai-qwen38-27b"
     )
     ivan = registry.by_id("ivan-qwen38-flash-128k")
     assert ivan is not None
@@ -400,15 +401,16 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert ivan.auto_candidate is True
     ai = registry.by_id("ai-qwen38-27b")
     assert ai is not None
-    assert ai.safe_context_tokens == 262144
+    assert ai.public_model == "siyuan/qwen38-v100-196k"
+    assert ai.safe_context_tokens == 196608
+    assert ai.configured_context_tokens == 196608
+    assert ai.backend_type == "vllm"
     assert [item.id for item in ai.deployment_profiles] == [
-        "p40-qwen38-64k",
-        "v10032-qwen38-196k",
-        "v10016-p40-qwen38-262k",
+        "v100-tp2-qwen38-196k",
     ]
     assert ai.deployment_profiles[0].short_request_rank == 0
-    assert ai.deployment_profiles[1].short_request_rank == 10
-    assert ai.deployment_profiles[2].short_request_rank == 20
+    assert ai.metadata["kv_cache"] == "fp8_e5m2"
+    assert ai.metadata["speculative_tokens"] == 2
     edge = registry.by_id("edge-qwen38-flash")
     assert edge is not None
     assert edge.modalities == ("text",)

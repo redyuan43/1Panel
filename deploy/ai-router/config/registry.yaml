@@ -12,7 +12,7 @@ model_aliases:
     endpoint_ids:
       - ai-qwen38-27b
     deployment_profile_ids:
-      - p40-qwen38-64k
+      - v100-tp2-qwen38-196k
     max_input_tokens: 49152
     max_output_tokens: 8192
   siyuan/agent-deep:
@@ -27,7 +27,6 @@ model_aliases:
     deployment_profile_ids: []
     max_input_tokens: 49152
     max_output_tokens: 4096
-
   siyuan/qwen36-shared:
     endpoint_ids:
       - qwen36-shared-fleet
@@ -120,9 +119,9 @@ endpoints:
       fleet_config: config/qwen36-fleet.yaml
 
   - id: ai-qwen38-27b
-    public_model: huihui/Qwen3.8-27B-Q4-DFlash2
-    provider_model: huihui/Qwen3.8-27B-Q4-DFlash2
-    api_base: http://127.0.0.1:18103/v1
+    public_model: siyuan/qwen38-v100-196k
+    provider_model: siyuan/qwen38-v100-196k
+    api_base: http://127.0.0.1:18107/v1
     node: ai
     role: responder
     tier: local-general
@@ -135,11 +134,12 @@ endpoints:
       - code
       - batch
       - long-context
-    safe_context_tokens: 262144
-    configured_context_tokens: 262144
-    max_concurrency: 1
-    backend_type: ai_pool
-    health_url: http://127.0.0.1:18103/health
+    safe_context_tokens: 196608
+    configured_context_tokens: 196608
+    max_concurrency: 4
+    backend_type: vllm
+    health_url: http://127.0.0.1:18107/health
+    load_url: http://127.0.0.1:18107/metrics
     backend_api_key_env: AI_ROUTER_AI_BACKEND_KEY
     enabled: true
     auto_candidate: true
@@ -152,61 +152,48 @@ endpoints:
         - json_object
         - json_schema
       streaming: true
-      validation_status: live-validated-chat-responses-tools-structured
-      validated_at: "2026-09-01"
+      validation_status: live-validated-48k-tools-vision-mtp2-tp2-alignment32
+      validated_at: "2026-09-07"
     deployment_profiles:
-      - id: p40-qwen38-64k
+      - id: v100-tp2-qwen38-196k
         tiers:
-          - p40_single
-        modalities:
-          - text
-          - image
-        context_size: 65536
-        safe_context_tokens: 65536
-        cache_type_k: q8_0
-        cache_type_v: q8_0
-        short_request_rank: 0
-        vision_status: validated-2026-09-02
-        max_images: 1
-      - id: v10032-qwen38-196k
-        tiers:
-          - v100_32_single
+          - local-general
+          - local-large
         modalities:
           - text
           - image
         context_size: 196608
         safe_context_tokens: 196608
-        cache_type_k: f16
-        cache_type_v: f16
-        short_request_rank: 10
-        vision_status: validated-2026-09-02
-        max_images: 1
-      - id: v10016-p40-qwen38-262k
-        tiers:
-          - v100_16_p40_pair
-        modalities:
-          - text
-          - image
-        context_size: 262144
-        safe_context_tokens: 262144
-        cache_type_k: q8_0
-        cache_type_v: q8_0
-        short_request_rank: 20
-        vision_status: manual-validation-pending-2026-09-02
+        cache_type_k: fp8_e5m2
+        cache_type_v: fp8_e5m2
+        short_request_rank: 0
+        vision_status: validated-2026-09-06
         max_images: 1
     quality:
       general: 50
       code: 0
       batch: 0
     metadata:
-      context_status: physical-deployment-reported
-      quality_status: benchmarked-2026-09-01
-      quality_report: /opt/1panel/ai-router/benchmarks/report-ai-20260901.json
-      topology: model-family-with-physical-deployments
-      vision_status: per-deployment-single-image-validated
-      vision_projector: mmproj-model-bf16.gguf
-      image_min_tokens: 1024
-      vision_limitation: high-resolution mtmd chunks can exhaust decode workspace
+      context_status: runtime-reported-196608
+      quality_status: workbuddy-48k-semantic-live-validated
+      performance_report: /home/ai/.local/state/v100-vllm-isolation-20260907/fixed-tp2-alignment32-production-196k-mtp2/fixed-tp2-alignment32-production-196k-mtp2/report.json
+      runtime_patch: 1cat-vllm-pr517-nvfp4-output-alignment32
+      topology: v100-gpu4-gpu5-tp2-no-nvlink
+      service_unit: qwen38-v100-tp2-vllm.service
+      quantization: QUASAR-NVFP4
+      kv_cache: fp8_e5m2
+      speculative_method: mtp
+      speculative_tokens: 2
+      mtp_acceptance_rate: 0.9625
+      prefix_cache: automatic
+      lmcache_status: live-validated-dram-resume-2026-09-07
+      lmcache_prime_report: /home/ai/.local/state/qwen38-v100-tp2-lmcache/production-lmcache-driven-20260907/report-prime.md
+      lmcache_resume_report: /home/ai/.local/state/qwen38-v100-tp2-lmcache/production-lmcache-driven-20260907/report-resume.md
+      lmcache_http_url: http://127.0.0.1:18084
+      lmcache_storage: cpu-dram-only
+      lmcache_expected_registrations: 2
+      vision_status: live-validated-2026-09-06
+      max_images: 1
 
   - id: edge-qwen38-flash
     public_model: RadixArk/Qwen3.8-Flash-Next-NVFP4

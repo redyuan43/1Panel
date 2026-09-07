@@ -44,7 +44,7 @@ def _registry_with_alias(tmp_path: Path) -> Registry:
     value["model_aliases"] = {
         "siyuan/agent-fast": {
             "endpoint_ids": ["ai-qwen38-27b"],
-            "deployment_profile_ids": ["p40-qwen38-64k"],
+            "deployment_profile_ids": ["v100-tp2-qwen38-196k"],
             "max_input_tokens": 49152,
             "max_output_tokens": 8192,
         }
@@ -63,9 +63,9 @@ def test_registry_resolves_semantic_model_without_cloning_endpoint(tmp_path):
     assert len(endpoints) == 1
     assert endpoints[0].id == "ai-qwen38-27b"
     assert endpoints[0].public_model == "siyuan/agent-fast"
-    assert endpoints[0].provider_model == "huihui/Qwen3.8-27B-Q4-DFlash2"
+    assert endpoints[0].provider_model == "siyuan/qwen38-v100-196k"
     assert endpoints[0].metadata["allowed_deployment_profile_ids"] == [
-        "p40-qwen38-64k"
+        "v100-tp2-qwen38-196k"
     ]
     assert endpoints[0].metadata["model_alias_max_input_tokens"] == 49152
     assert endpoints[0].metadata["model_alias_max_output_tokens"] == 8192
@@ -118,10 +118,10 @@ def test_semantic_model_filters_physical_deployment_profile(tmp_path):
         detail={
             "workers": [
                 {
-                    "worker_id": "p40-1",
+                    "worker_id": "tp2-1",
                     "api_base": "http://127.0.0.1:18001/v1",
-                    "profile_id": "p40-qwen38-64k",
-                    "tier": "p40_single",
+                    "profile_id": "v100-tp2-qwen38-196k",
+                    "tier": "local-general",
                     "priority": 0,
                     "gpu_ids": ["0"],
                     "gpu_uuids": ["GPU-P40"],
@@ -143,8 +143,8 @@ def test_semantic_model_filters_physical_deployment_profile(tmp_path):
                 {
                     "worker_id": "v100-1",
                     "api_base": "http://127.0.0.1:18002/v1",
-                    "profile_id": "v10032-qwen38-196k",
-                    "tier": "v100_32_single",
+                    "profile_id": "legacy-v10032-qwen38-196k",
+                    "tier": "local-general",
                     "priority": 0,
                     "gpu_ids": ["1"],
                     "gpu_uuids": ["GPU-V100"],
@@ -177,7 +177,7 @@ def test_semantic_model_filters_physical_deployment_profile(tmp_path):
             require_available=True,
         )
     )
-    assert [item.worker_id for item in deployments] == ["p40-1"]
+    assert [item.worker_id for item in deployments] == ["tp2-1"]
 
 
 def test_semantic_model_enforces_separate_input_and_output_budgets(tmp_path):

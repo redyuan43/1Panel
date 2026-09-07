@@ -212,6 +212,7 @@ function renderDashboard() {
   renderRecentRequests(data.requests.slice(0, 8));
   renderEndpointTable(data.endpoints);
   renderWorkerTable(data.workers);
+  renderLmcacheRuntimeStatus();
   syncRequestNodeOptions();
 }
 
@@ -721,6 +722,7 @@ function renderEndpointTable(endpoints) {
         <span class="table-secondary">配置 ${formatTokens(endpoint.configured_context_tokens)}</span>
       </td>
       <td>${status.healthy ? `${Math.round(status.load_headroom * 100)}%` : "—"}</td>
+      <td>${endpointCacheStatus(endpoint, status)}</td>
       <td>${capabilitySummary(endpoint.capabilities, status.detail?.effective_modalities || endpoint.modalities)}</td>
       <td>
         <strong class="table-primary">${escapeHtml(endpoint.capabilities?.validation_status || "unverified")}</strong>
@@ -742,6 +744,42 @@ function renderEndpointTable(endpoints) {
     </tr>
   `).join("");
   bindEndpointActions();
+}
+
+function endpointCacheStatus(endpoint, status) {
+  const detail = status.detail || {};
+  const queries = Number(detail.prefix_cache_queries || 0);
+  const hits = Number(detail.prefix_cache_hits || 0);
+  const apcRatio = queries > 0 ? hits / queries : null;
+  if (endpoint.backend_type !== "vllm") {
+    return '<span class="table-secondary">—</span>';
+  }
+  const lmcache = detail.lmcache || {};
+  const desired = endpoint.id === "ai-qwen38-27b"
+    ? state.settings?.lmcache
+    : null;
+  const active = Boolean(lmcache.connector_active);
+  const restartRequired = desired
+    ? Boolean(desired.enabled) !== active
+    : false;
+  const lmcacheRatio = Number(lmcache.lookup_requested_tokens || 0) > 0
+    ? Number(lmcache.lookup_hit_tokens || 0)
+      / Number(lmcache.lookup_requested_tokens)
+    : null;
+  const memory = Number(lmcache.memory_total_bytes || 0) > 0
+    ? `${formatBytes(lmcache.memory_used_bytes)} / ${formatBytes(lmcache.memory_total_bytes)}`
+    : "未分配";
+  const runtimeLabel = restartRequired
+    ? "待重启"
+    : active
+      ? lmcache.healthy ? "运行中" : "故障"
+      : "未启用";
+  return `
+    <strong class="table-primary">GPU ${escapeHtml(formatCacheHit(hits, apcRatio))}</strong>
+    <span class="table-secondary">
+      DRAM ${escapeHtml(formatCacheHit(lmcache.lookup_hit_tokens, lmcacheRatio))}
+      · ${escapeHtml(runtimeLabel)} · ${escapeHtml(memory)}
+    </span>`;
 }
 
 function endpointStatusBadge(endpoint, status) {
@@ -2758,6 +2796,18 @@ function formatCacheHit(tokens, ratio) {
   return `${formatTokens(tokens)} / ${percent}`;
 }
 
+function formatBytes(value) {
+  const bytes = Number(value || 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const index = Math.min(
+    units.length - 1,
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+  );
+  const scaled = bytes / (1024 ** index);
+  return `${scaled >= 100 ? scaled.toFixed(0) : scaled.toFixed(1)} ${units[index]}`;
+}
+
 function value(path, fallback = "") {
   let current = state.settings;
   for (const part of path.split(".")) current = current?.[part];
@@ -2855,6 +2905,18 @@ function renderSettings() {
     "routing.new_request_capacity_wait_seconds",
     0,
   );
+  byId("lmcache-enabled").checked = Boolean(
+    value("lmcache.enabled", false),
+  );
+  byId("lmcache-l1-size").value = value("lmcache.l1_size_gb", 80);
+  byId("lmcache-memory-max").value = value(
+    "lmcache.memory_max_gb",
+    96,
+  );
+  byId("lmcache-chunk-size").value = value(
+    "lmcache.chunk_size",
+    1600,
+  );
   byId("provider-priority").value = value(
     "routing.provider_priority",
     "local_first",
@@ -2884,8 +2946,59 @@ function renderSettings() {
     weights.append(wrapper);
   });
   renderRemoteFallbackOrder();
+  renderLmcacheRuntimeStatus();
   updateStrategyBranchVisibility();
   updateWeightsTotal();
+}
+
+function lmcacheRuntime() {
+  const item = (state.dashboard?.endpoints || []).find(
+    ({endpoint}) => endpoint.id === "ai-qwen38-27b",
+  );
+  return item?.status?.detail?.lmcache || null;
+}
+
+function lmcacheRestartRequired() {
+  const desired = state.settings?.lmcache;
+  const runtime = lmcacheRuntime();
+  if (!desired || !runtime) return Boolean(desired?.enabled);
+  const active = Boolean(runtime.connector_active);
+  if (Boolean(desired.enabled) !== active) return true;
+  if (!active) return false;
+  const expectedBytes = Number(desired.l1_size_gb || 0) * (1024 ** 3);
+  return (
+    !runtime.healthy
+    || Number(runtime.chunk_size || 0) !== Number(desired.chunk_size || 0)
+    || Number(runtime.memory_total_bytes || 0) !== expectedBytes
+  );
+}
+
+function renderLmcacheRuntimeStatus() {
+  const target = byId("lmcache-runtime-status");
+  if (!target || !state.settings) return;
+  const desired = state.settings.lmcache || {};
+  const runtime = lmcacheRuntime();
+  if (!runtime) {
+    target.textContent = "尚未取得 TP2 的 LMCache 运行状态；目标配置已保存时仍按需要重启处理。";
+    return;
+  }
+  const active = Boolean(runtime.connector_active);
+  const restartRequired = lmcacheRestartRequired();
+  const requested = Number(runtime.lookup_requested_tokens || 0);
+  const hits = Number(runtime.lookup_hit_tokens || 0);
+  const hitRate = requested > 0
+    ? `${Math.round((hits / requested) * 100)}%`
+    : "—";
+  const health = runtime.healthy ? "健康" : active ? "异常" : "未运行";
+  target.textContent = [
+    `目标：${desired.enabled ? "启用" : "关闭"} / ${desired.l1_size_gb} GiB`,
+    `实际：${active ? "已连接" : "未连接"} / ${health}`,
+    `内存：${formatBytes(runtime.memory_used_bytes)} / ${formatBytes(runtime.memory_total_bytes)}`,
+    `注册：${Number(runtime.registered_count || 0)} / ${Number(runtime.expected_registrations || 0)}`,
+    `命中：${formatTokens(hits)} / ${hitRate}`,
+    `代次：${runtime.generation || "—"}`,
+    restartRequired ? "状态：需要重启模型服务" : "状态：配置与运行一致",
+  ].join(" · ");
 }
 
 function promptDirectiveSettings() {
@@ -3221,6 +3334,15 @@ function validateReviewBaseUrl(rawUrl, backend) {
 
 function validateSettingsDraft(draft) {
   const errors = [];
+  const lmcache = draft.lmcache || {};
+  const l1Size = Number(lmcache.l1_size_gb);
+  if (
+    !Number.isInteger(l1Size)
+    || l1Size < 8
+    || l1Size > 80
+  ) {
+    errors.push("LMCache CPU 缓存预算须为 8 到 80 GiB 的整数");
+  }
   const weightTotal = Object.values(draft.routing.weights || {}).reduce(
     (sum, item) => sum + (Number(item) || 0),
     0,
@@ -3353,6 +3475,11 @@ function collectSettings() {
       max_attempts: Number(byId("failover-attempts").value),
     },
     health: state.settings.health,
+    lmcache: {
+      ...state.settings.lmcache,
+      enabled: byId("lmcache-enabled").checked,
+      l1_size_gb: Number(byId("lmcache-l1-size").value),
+    },
     queue: {
       ...state.settings.queue,
       timeout_seconds: Number(byId("queue-timeout").value),
@@ -3384,6 +3511,12 @@ async function saveSettings(event) {
     return;
   }
   const current = promptDirectiveSettings();
+  const currentLmcache = state.settings.lmcache || {};
+  const lmcacheChanged = (
+    Boolean(currentLmcache.enabled) !== Boolean(draft.lmcache.enabled)
+    || Number(currentLmcache.l1_size_gb)
+      !== Number(draft.lmcache.l1_size_gb)
+  );
   const next = draft.routing.prompt_directives;
   const changedLabels = PROMPT_DIRECTIVES
     .filter(([id]) => (
@@ -3417,8 +3550,13 @@ async function saveSettings(event) {
     });
     state.settings = payload.settings;
     renderSettings();
-    notice("设置已保存，新请求立即生效。");
     await loadDashboard(true);
+    renderSettings();
+    notice(
+      lmcacheChanged || lmcacheRestartRequired()
+        ? "设置已保存；路由设置立即生效，LMCache 配置需要受控重启缓存与模型服务。"
+        : "设置已保存，新请求立即生效。",
+    );
   } catch (error) {
     notice(error.message, true);
   } finally {

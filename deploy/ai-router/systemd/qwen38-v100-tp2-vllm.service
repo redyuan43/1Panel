@@ -1,0 +1,23 @@
+[Unit]
+Description=Qwen3.8 27B QUASAR TP2 on two V100 GPUs
+After=network-online.target qwen38-v100-tp2-lmcache.service
+Requires=qwen38-v100-tp2-lmcache.service
+BindsTo=qwen38-v100-tp2-lmcache.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/1cat-vllm/qwen38-v100-tp2.env
+ExecStartPre=/home/ai/venvs/1cat-vllm-1.5.0-lmcache/bin/python /home/ai/github/1Panel/deploy/ai-router/scripts/check-qwen38-v100-tp2-lmcache.py --require-vllm-guards
+ExecStart=/home/ai/github/1Panel/deploy/ai-router/scripts/run-qwen38-v100-tp2-container.sh
+ExecStop=-/usr/bin/docker stop --time 300 qwen38-v100-tp2-vllm
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=1800
+TimeoutStopSec=300
+KillMode=mixed
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=default.target

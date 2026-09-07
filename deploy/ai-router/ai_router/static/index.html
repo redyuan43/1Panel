@@ -158,6 +158,7 @@
                   <th>等级</th>
                   <th>安全 / 配置上下文</th>
                   <th>负载余量</th>
+                  <th>前缀缓存</th>
                   <th>协议能力</th>
                   <th>验证状态</th>
                   <th>自动候选</th>
@@ -740,6 +741,41 @@
                   新请求容量等待（秒）
                   <input id="new-request-capacity-wait" type="number" min="0" step="0.1">
                 </label>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
+                <h3>TP2 内存级前缀缓存 <span class="badge neutral">重启生效</span></h3>
+                <span>GPU APC and LMCache DRAM</span>
+              </div>
+              <div class="control-grid">
+                <label class="toggle-row">
+                  <span>启用 LMCache</span>
+                  <input id="lmcache-enabled" type="checkbox">
+                </label>
+                <label>
+                  CPU 缓存预算（GiB）
+                  <input id="lmcache-l1-size" type="number" min="8" max="80" step="1">
+                </label>
+                <label>
+                  进程内存上限（GiB）
+                  <input id="lmcache-memory-max" type="number" value="96" disabled>
+                </label>
+                <label>
+                  缓存块大小
+                  <input id="lmcache-chunk-size" type="number" value="1600" disabled>
+                </label>
+                <div id="lmcache-runtime-status" class="wide field-hint">
+                  正在读取 TP2 实际运行状态。
+                </div>
+                <p class="wide field-hint">
+                  保存只更新持久配置，不会即时改动正在运行的推理进程。启用状态或
+                  内存预算变化后，需要受控重启 LMCache 与
+                  qwen38-v100-tp2-vllm.service；磁盘和远端缓存始终关闭。
+                </p>
               </div>
             </section>
 

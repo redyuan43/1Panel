@@ -118,6 +118,17 @@ prefix_affinity:
     - workbuddy-qwen36-shared
     - hermes-qwen36-shared
 
+lmcache:
+  enabled: false
+  endpoint_id: ai-qwen38-27b
+  server_url: tcp://127.0.0.1:6555
+  http_url: http://127.0.0.1:18084
+  l1_size_gb: 80
+  memory_max_gb: 96
+  chunk_size: 1600
+  separate_object_groups: true
+  numa_node: 1
+
 queue:
   timeout_seconds: 120
   lock_ttl_seconds: 3600

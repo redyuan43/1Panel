@@ -30,6 +30,7 @@ EDITABLE_SECTIONS = {
     "failover",
     "health",
     "identity",
+    "lmcache",
     "queue",
     "routing",
     "vision",

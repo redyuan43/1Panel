@@ -25,7 +25,51 @@ _VLLM_METRIC_PATTERNS = {
     "kv": re.compile(r"^vllm:kv_cache_usage_perc(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
     "prefix_queries": re.compile(r"^vllm:prefix_cache_queries_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
     "prefix_hits": re.compile(r"^vllm:prefix_cache_hits_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
+    "external_prefix_queries": re.compile(r"^vllm:external_prefix_cache_queries_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
+    "external_prefix_hits": re.compile(r"^vllm:external_prefix_cache_hits_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
+    "prompt_tokens_cached": re.compile(r"^vllm:prompt_tokens_cached_total(?:\{[^}]*\})?\s+([0-9.eE+-]+)$", re.MULTILINE),
+    "prompt_tokens_local_compute": re.compile(r'^vllm:prompt_tokens_by_source_total\{[^}]*source="local_compute"[^}]*\}\s+([0-9.eE+-]+)$', re.MULTILINE),
+    "prompt_tokens_local_cache_hit": re.compile(r'^vllm:prompt_tokens_by_source_total\{[^}]*source="local_cache_hit"[^}]*\}\s+([0-9.eE+-]+)$', re.MULTILINE),
+    "prompt_tokens_external_transfer": re.compile(r'^vllm:prompt_tokens_by_source_total\{[^}]*source="external_kv_transfer"[^}]*\}\s+([0-9.eE+-]+)$', re.MULTILINE),
     "process_start": re.compile(r"^process_start_time_seconds\s+([0-9.eE+-]+)$", re.MULTILINE),
+}
+
+_LMCACHE_METRIC_PATTERNS = {
+    "lookup_requested_tokens": re.compile(
+        r"^lmcache_mp_lookup_requested_tokens_total(?:\{[^}]*\})?\s+"
+        r"([0-9.eE+-]+)$",
+        re.MULTILINE,
+    ),
+    "lookup_hit_tokens": re.compile(
+        r"^lmcache_mp_lookup_hit_tokens_total(?:\{[^}]*\})?\s+"
+        r"([0-9.eE+-]+)$",
+        re.MULTILINE,
+    ),
+    "l1_read_chunks": re.compile(
+        r"^lmcache_mp_l1_read_chunks_total(?:\{[^}]*\})?\s+"
+        r"([0-9.eE+-]+)$",
+        re.MULTILINE,
+    ),
+    "l1_write_chunks": re.compile(
+        r"^lmcache_mp_l1_write_chunks_total(?:\{[^}]*\})?\s+"
+        r"([0-9.eE+-]+)$",
+        re.MULTILINE,
+    ),
+    "l1_memory_usage_bytes": re.compile(
+        r"^lmcache_mp_l1_memory_usage_bytes(?:\{[^}]*\})?\s+"
+        r"([0-9.eE+-]+)$",
+        re.MULTILINE,
+    ),
+    "l1_usage_ratio": re.compile(
+        r"^lmcache_mp_l1_usage_ratio(?:\{[^}]*\})?\s+"
+        r"([0-9.eE+-]+)$",
+        re.MULTILINE,
+    ),
+    "process_start": re.compile(
+        r"^process_start_time_seconds(?:\{[^}]*\})?\s+"
+        r"([0-9.eE+-]+)$",
+        re.MULTILINE,
+    ),
 }
 
 
@@ -389,9 +433,10 @@ class HealthMonitor:
         )
 
     async def _probe_vllm(self, endpoint: Endpoint, checked_at: float) -> EndpointStatus:
-        health_response, metrics_response = await asyncio.gather(
+        health_response, metrics_response, lmcache = await asyncio.gather(
             self.client.get(endpoint.health_url),
             self.client.get(endpoint.load_url or endpoint.health_url),
+            self._probe_lmcache(endpoint),
         )
         health_response.raise_for_status()
         metrics_response.raise_for_status()
@@ -401,6 +446,18 @@ class HealthMonitor:
         kv_usage = _metric(metrics, "kv")
         prefix_queries = _metric(metrics, "prefix_queries")
         prefix_hits = _metric(metrics, "prefix_hits")
+        external_prefix_queries = _metric(
+            metrics,
+            "external_prefix_queries",
+        )
+        external_prefix_hits = _metric(metrics, "external_prefix_hits")
+        prompt_tokens_external_transfer = _metric(
+            metrics,
+            "prompt_tokens_external_transfer",
+        )
+        lmcache["connector_active"] = bool(
+            lmcache.get("healthy") and lmcache.get("registered")
+        )
         capacity = max(1, endpoint.max_concurrency)
         load = min(1.0, (running + waiting) / capacity)
         return EndpointStatus(
@@ -412,6 +469,7 @@ class HealthMonitor:
             cache_generation=_generation(
                 str(_metric(metrics, "process_start")),
                 str(endpoint.metadata.get("runtime_generation", "")),
+                str(lmcache.get("generation", "")),
             ),
             eligible_context_tokens=endpoint.safe_context_tokens,
             detail={
@@ -420,8 +478,133 @@ class HealthMonitor:
                 "kv_usage": kv_usage,
                 "prefix_cache_queries": prefix_queries,
                 "prefix_cache_hits": prefix_hits,
+                "external_prefix_cache_queries": external_prefix_queries,
+                "external_prefix_cache_hits": external_prefix_hits,
+                "prompt_tokens_cached": _metric(
+                    metrics,
+                    "prompt_tokens_cached",
+                ),
+                "prompt_tokens_local_compute": _metric(
+                    metrics,
+                    "prompt_tokens_local_compute",
+                ),
+                "prompt_tokens_local_cache_hit": _metric(
+                    metrics,
+                    "prompt_tokens_local_cache_hit",
+                ),
+                "prompt_tokens_external_transfer": (
+                    prompt_tokens_external_transfer
+                ),
+                "lmcache": lmcache,
             },
         )
+
+    async def _probe_lmcache(self, endpoint: Endpoint) -> dict[str, Any]:
+        base_url = str(
+            endpoint.metadata.get("lmcache_http_url", "")
+        ).rstrip("/")
+        if not base_url:
+            return {"supported": False, "healthy": False}
+        try:
+            status_response, metrics_response = await asyncio.gather(
+                self.client.get(f"{base_url}/status"),
+                self.client.get(f"{base_url}/metrics"),
+            )
+            status_response.raise_for_status()
+            metrics_response.raise_for_status()
+            payload = status_response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("LMCache status must be an object")
+            storage = payload.get("storage_manager", {})
+            l1 = (
+                storage.get("l1_manager", {})
+                if isinstance(storage, dict)
+                else {}
+            )
+            contexts = payload.get("cache_context_meta", {})
+            registered_gpu_ids = payload.get("registered_gpu_ids", [])
+            registered_count = max(
+                len(contexts) if isinstance(contexts, dict) else 0,
+                (
+                    len(registered_gpu_ids)
+                    if isinstance(registered_gpu_ids, list)
+                    else 0
+                ),
+            )
+            expected_registrations = int(
+                endpoint.metadata.get(
+                    "lmcache_expected_registrations",
+                    1,
+                )
+            )
+            registered = registered_count >= expected_registrations
+            metrics = metrics_response.text
+            process_start = _lmcache_metric(metrics, "process_start")
+            generation = _generation(
+                str(process_start),
+                str(payload.get("engine_type", "")),
+                str(payload.get("chunk_size", "")),
+            )
+            return {
+                "supported": True,
+                "healthy": bool(payload.get("is_healthy", False)),
+                "registered": registered,
+                "registered_count": registered_count,
+                "expected_registrations": expected_registrations,
+                "generation": generation,
+                "process_start_time_seconds": process_start,
+                "chunk_size": int(payload.get("chunk_size", 0)),
+                "active_sessions": int(
+                    payload.get("active_sessions", 0)
+                ),
+                "memory_used_bytes": int(
+                    l1.get("memory_used_bytes", 0)
+                    if isinstance(l1, dict)
+                    else 0
+                ),
+                "memory_total_bytes": int(
+                    l1.get("memory_total_bytes", 0)
+                    if isinstance(l1, dict)
+                    else 0
+                ),
+                "memory_usage_ratio": float(
+                    l1.get("memory_usage_ratio", 0)
+                    if isinstance(l1, dict)
+                    else 0
+                ),
+                "lookup_requested_tokens": _lmcache_metric(
+                    metrics,
+                    "lookup_requested_tokens",
+                ),
+                "lookup_hit_tokens": _lmcache_metric(
+                    metrics,
+                    "lookup_hit_tokens",
+                ),
+                "l1_read_chunks": _lmcache_metric(
+                    metrics,
+                    "l1_read_chunks",
+                ),
+                "l1_write_chunks": _lmcache_metric(
+                    metrics,
+                    "l1_write_chunks",
+                ),
+                "metrics_memory_used_bytes": _lmcache_metric(
+                    metrics,
+                    "l1_memory_usage_bytes",
+                ),
+                "metrics_usage_ratio": _lmcache_metric(
+                    metrics,
+                    "l1_usage_ratio",
+                ),
+            }
+        except Exception as exc:
+            return {
+                "supported": True,
+                "healthy": False,
+                "registered": False,
+                "connector_active": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
 
     async def _probe_llama_cpp(self, endpoint: Endpoint, checked_at: float) -> EndpointStatus:
         headers = {}
@@ -482,6 +665,13 @@ class HealthMonitor:
 def _metric(text: str, name: str) -> float:
     match = _VLLM_METRIC_PATTERNS[name].search(text)
     return float(match.group(1)) if match else 0.0
+
+
+def _lmcache_metric(text: str, name: str) -> float:
+    return sum(
+        float(match.group(1))
+        for match in _LMCACHE_METRIC_PATTERNS[name].finditer(text)
+    )
 
 
 def _physical_deployment(
