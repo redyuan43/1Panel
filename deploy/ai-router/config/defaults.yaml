@@ -57,6 +57,12 @@ routing:
         endpoint_id: zhipu-glm-5.3-flash
         generation: 1
   affinity_capacity_wait_seconds: 120
+  client_deployment_pins:
+    - client_id: workbuddy-qwen36-shared
+      model: siyuan/qwen36-shared
+      endpoint_id: qwen36-shared-fleet
+      deployment_id: qwen36-nx3
+      capacity_wait_seconds: 900
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
   auto_max_input_tokens: 196608
@@ -95,6 +101,22 @@ routing:
 affinity:
   ttl_seconds: 86400
   max_priority_burst: 8
+
+prefix_affinity:
+  enabled: true
+  revision: 3
+  legacy_revision: 2
+  ttl_seconds: 86400
+  min_prompt_tokens: 2048
+  checkpoint_tokens: 2048
+  partial_min_tokens: 8192
+  replica_on_busy_min_prompt_tokens: 12000
+  capture_templates: true
+  template_dir: /data/private/prefix-templates
+  template_min_tokens: 12000
+  template_client_ids:
+    - workbuddy-qwen36-shared
+    - hermes-qwen36-shared
 
 queue:
   timeout_seconds: 120

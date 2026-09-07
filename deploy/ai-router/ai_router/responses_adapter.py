@@ -32,6 +32,7 @@ def responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
         "seed",
         "stop",
         "user",
+        "chat_template_kwargs",
     ):
         if key in body:
             result[key] = body[key]

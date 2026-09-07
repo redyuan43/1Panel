@@ -17,14 +17,20 @@ import yaml
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from PIL import Image
+from starlette.background import BackgroundTask
+from starlette.requests import ClientDisconnect
 
 from ai_router.api import (
+    _FinalizingStreamingResponse,
+    _StreamResourceFinalizer,
     _acquire_internal_model,
     _acquire_route_capacity,
     _cache_metrics,
+    _finalize_abandoned_stream,
     _filter_restart_draining_deployments,
     _mirror_responses_format,
     _prefix_cache_delta,
+    _run_stream_finalization,
     _prepare_routed_body,
     _usage_totals,
     _wait_for_selected_deployment,
@@ -380,7 +386,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 12
+    assert len(registry.endpoints) == 13
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
@@ -473,6 +479,25 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert nx3_shared.capabilities.chat is True
     assert nx3_shared.capabilities.tools == "none"
     assert nx3_shared.capabilities.responses == "none"
+    qwen36_shared = registry.by_id("qwen36-shared-fleet")
+    assert qwen36_shared is not None
+    assert qwen36_shared.capabilities.tools == "single"
+    assert qwen36_shared.capabilities.tool_choice is True
+    assert qwen36_shared.capabilities.tool_choice_modes == (
+        "auto",
+        "required",
+    )
+    assert qwen36_shared.capabilities.structured_output == (
+        "json_schema",
+    )
+    assert (
+        qwen36_shared.metadata["tool_status"]
+        == "single-auto-required-nx3-nx4-agx-live-validated-2026-09-06"
+    )
+    assert (
+        qwen36_shared.metadata["structured_output_status"]
+        == "json-schema-nx3-nx4-agx-live-validated-2026-09-06"
+    )
 
 
 def test_tail_control_tls_is_isolated_and_installable() -> None:
@@ -888,6 +913,251 @@ def test_deployment_capacity_allows_future_parallel_cloud_requests() -> None:
     run(scenario())
 
 
+def test_stream_resource_finalizer_releases_all_leases_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv(
+        "AI_ROUTER_LITELLM_MASTER_KEY",
+        "internal-key",
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_STATE_KEY",
+        Fernet.generate_key().decode(),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+
+    async def scenario() -> None:
+        runtime = build_runtime(
+            settings=settings(tmp_path),
+            registry=Registry(ROOT / "config" / "registry.yaml"),
+            store=InMemoryStateStore(),
+            token_counter=SimpleTokenCounter(),
+        )
+        lease = await runtime.scheduler.begin_request(None)
+        await runtime.track_request_started(
+            lease.owner_token,
+            "stream-request",
+            None,
+        )
+        assert await runtime.limiter.acquire_parallel(
+            "stream-client",
+            lease.owner_token,
+            1,
+        )
+        finalizer = _StreamResourceFinalizer(
+            runtime,
+            lease,
+            "stream-client",
+        )
+
+        await finalizer.begin_stream()
+        waiting = asyncio.create_task(
+            finalizer.wait_for_stream_finalization()
+        )
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        finalizer.finish_stream()
+        await waiting
+
+        await asyncio.gather(finalizer(), finalizer())
+
+        replacement = await runtime.scheduler.begin_request(None)
+        assert await runtime.limiter.acquire_parallel(
+            "stream-client",
+            replacement.owner_token,
+            1,
+        )
+        assert lease.owner_token not in runtime._active_requests
+        await runtime.limiter.release_parallel(
+            "stream-client",
+            replacement.owner_token,
+        )
+        await replacement.release()
+        await runtime.close()
+
+    run(scenario())
+
+
+def test_stream_finalization_completes_before_cancellation_propagates() -> None:
+    async def scenario() -> None:
+        started = asyncio.Event()
+        release = asyncio.Event()
+        completed: list[str] = []
+
+        async def finalize() -> None:
+            started.set()
+            await release.wait()
+            completed.append("done")
+
+        task = asyncio.create_task(_run_stream_finalization(finalize()))
+        await started.wait()
+        task.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert completed == ["done"]
+
+    run(scenario())
+
+
+def test_finalizing_stream_runs_background_after_send_disconnect() -> None:
+    async def scenario() -> list[str]:
+        finalized: list[str] = []
+
+        async def body():
+            yield b"partial"
+
+        async def finish() -> None:
+            finalized.append("done")
+
+        async def receive() -> dict[str, str]:
+            return {"type": "http.request"}
+
+        async def send(message: dict) -> None:
+            if message["type"] == "http.response.body":
+                raise OSError("client disconnected")
+
+        response = _FinalizingStreamingResponse(
+            body(),
+            background=BackgroundTask(finish),
+        )
+        with pytest.raises(ClientDisconnect):
+            await response(
+                {
+                    "type": "http",
+                    "asgi": {
+                        "version": "3.0",
+                        "spec_version": "2.4",
+                    },
+                },
+                receive,
+                send,
+            )
+        return finalized
+
+    assert run(scenario()) == ["done"]
+
+
+def test_abandoned_stream_records_499_and_releases_parallel_slot(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv(
+        "AI_ROUTER_LITELLM_MASTER_KEY",
+        "internal-key",
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_STATE_KEY",
+        Fernet.generate_key().decode(),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+
+    async def scenario() -> None:
+        registry = Registry(ROOT / "config" / "registry.yaml")
+        runtime = build_runtime(
+            settings=settings(tmp_path),
+            registry=registry,
+            store=InMemoryStateStore(),
+            token_counter=SimpleTokenCounter(),
+        )
+        runtime.track_instance = True
+        endpoint = registry.by_id("qwen36-shared-fleet")
+        assert endpoint is not None
+        trace = DecisionTrace(
+            request_id="abandoned-stream",
+            client_id="stream-client",
+            key_id="stream-key",
+            protocol="chat",
+            requested_model="siyuan/qwen36-shared",
+            excerpt={"text": "stream probe", "tool_names": []},
+            instance_id=runtime.instance_id,
+            boot_id=runtime.boot_id,
+            settings_hash=settings_fingerprint(runtime.settings),
+            registry_hash=registry_fingerprint(registry),
+        )
+        trace.set_request_context(
+            prompt_tokens=120,
+            output_reserve_tokens=8,
+            modalities={"text"},
+            required_capabilities=["chat", "streaming"],
+        )
+        await runtime.route_traces.save(trace)
+        decision = RouteDecision(
+            endpoint=endpoint,
+            requested_model="siyuan/qwen36-shared",
+            task="general",
+            prompt_tokens=120,
+            output_reserve_tokens=8,
+            reason="explicit_model",
+            affinity="new",
+            score=1,
+            deployment_id="qwen36-nx3",
+            trace=trace,
+        )
+        lease = await runtime.scheduler.begin_request(None)
+        await runtime.track_request_started(
+            lease.owner_token,
+            trace.request_id,
+            None,
+        )
+        assert await runtime.limiter.acquire_parallel(
+            "stream-client",
+            lease.owner_token,
+            1,
+        )
+        finalizer = _StreamResourceFinalizer(
+            runtime,
+            lease,
+            "stream-client",
+        )
+
+        for _index in range(2):
+            await _finalize_abandoned_stream(
+                runtime,
+                resource_finalizer=finalizer,
+                client_id="stream-client",
+                key_id="stream-key",
+                request_id=trace.request_id,
+                conversation_id=None,
+                decision=decision,
+                training_token=None,
+                started_at=time.monotonic(),
+                cache_snapshot=None,
+            )
+
+        detail = await runtime.route_traces.get(trace.request_id)
+        assert detail is not None
+        assert detail["status"] == "failed"
+        assert detail["status_code"] == 499
+        assert lease.owner_token not in runtime._active_requests
+        usage = await runtime.clients.usage_24h("stream-client")
+        assert usage["requests"] == 1
+        assert usage["errors"] == 1
+        replacement = await runtime.scheduler.begin_request(None)
+        assert await runtime.limiter.acquire_parallel(
+            "stream-client",
+            replacement.owner_token,
+            1,
+        )
+        await runtime.limiter.release_parallel(
+            "stream-client",
+            replacement.owner_token,
+        )
+        await replacement.release()
+        await runtime.close()
+
+    run(scenario())
+
+
 def test_pool_candidates_use_distinct_single_capacity_workers() -> None:
     async def scenario() -> None:
         store = InMemoryStateStore()
@@ -1159,6 +1429,8 @@ def test_runtime_start_cleans_previous_boot_and_marks_backend_draining(
         assert state is not None
         assert state["boot_id"] == "boot-new"
         assert state["startup_cleanup"]["deployment_members"] == 1
+        assert state["registry_fingerprint"]
+        assert state["endpoint_config_revision"] == 0
         events = second.audit.recent(20)
         interrupted = next(
             item
@@ -1490,6 +1762,37 @@ def test_ai_pool_health_builds_physical_deployments_and_quarantines_drift(
     )
     assert by_id["worker-4"]["schedulable"] is True
     assert by_id["worker-5"]["profile_id"] == "v10032-qwen38-196k"
+
+
+def test_health_monitor_does_not_probe_disabled_endpoint() -> None:
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    endpoint = registry.by_id("agx-qwen36-cerebellum-256k")
+    assert endpoint is not None
+    assert endpoint.enabled is False
+    requests: list[httpx.Request] = []
+
+    async def scenario() -> EndpointStatus:
+        async def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(200, json={"status": "ok"})
+
+        client = httpx.AsyncClient(
+            transport=httpx.MockTransport(respond)
+        )
+        monitor = HealthMonitor(
+            InMemoryStateStore(),
+            client=client,
+        )
+        try:
+            return await monitor.status(endpoint)
+        finally:
+            await client.aclose()
+
+    status = run(scenario())
+    assert requests == []
+    assert status.healthy is False
+    assert status.load_headroom == 0
+    assert status.detail == {"disabled": True}
 
 
 def test_ai_pool_health_marks_directly_processing_worker_busy(
@@ -3166,6 +3469,61 @@ class CapturingTokenizer:
         return [1] * 12
 
 
+class PrefixCapturingTokenizer:
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tools,
+        tokenize,
+        add_generation_prompt,
+        **kwargs,
+    ):
+        assert tokenize is True
+        assert add_generation_prompt is True
+        rendered = json.dumps(
+            {
+                "messages": messages,
+                "tools": tools,
+                "kwargs": kwargs,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return list(rendered.encode("utf-8"))
+
+
+def test_token_counter_extracts_prefix_before_the_final_user() -> None:
+    counter = HuggingFaceTokenCounter(ROOT / "missing-tokenizer")
+    counter._tokenizer = PrefixCapturingTokenizer()
+    first = {
+        "messages": [
+            {"role": "system", "content": "fixed"},
+            {"role": "developer", "content": "fixed tools"},
+            {"role": "user", "content": "first question"},
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {"name": "lookup"},
+            }
+        ],
+    }
+    second = {
+        **first,
+        "messages": [
+            *first["messages"][:-1],
+            {"role": "user", "content": "second question"},
+        ],
+    }
+
+    assert counter.prefix_token_ids(first, "chat")
+    assert (
+        counter.prefix_token_ids(first, "chat")
+        == counter.prefix_token_ids(second, "chat")
+    )
+
+
 def test_multimodal_token_counter_does_not_tokenize_base64() -> None:
     tokenizer = CapturingTokenizer()
     counter = HuggingFaceTokenCounter(
@@ -3428,6 +3786,7 @@ def test_validated_vision_endpoints_are_registered_for_images() -> None:
         "ivan-qwen38-flash-128k",
         "amd-qwen38-rocmfpx-128k",
         "codex-pro-gpt-5.6-sol",
+        "qwen36-shared-fleet",
         "zhipu-glm-5.3-flash",
     }
     pending_validation = {
@@ -4244,14 +4603,24 @@ def test_sse_accumulator_rebuilds_responses_function_call() -> None:
 
 
 def test_sse_accumulator_detects_protocol_completion_events() -> None:
+    finish_reason = SSEAccumulator("chat")
+    finish_reason.feed(
+        b'data: {"choices":[{"delta":{"content":"done"},'
+        b'"finish_reason":"stop"}]}\n\n'
+    )
+    assert finish_reason.terminal is True
+    assert finish_reason.completed is False
+
     chat = SSEAccumulator("chat")
     chat.feed(b"data: [DONE]\n\n")
+    assert chat.terminal is True
     assert chat.completed is True
 
     responses = SSEAccumulator("responses")
     responses.feed(
         b'data: {"type":"response.completed","response":{"output":[]}}\n\n'
     )
+    assert responses.terminal is True
     assert responses.completed is True
 
 
@@ -6298,6 +6667,10 @@ def test_cache_metrics_accepts_common_usage_shapes() -> None:
         None,
         cached_prompt_tokens_fallback=64,
     ) == (64, 0.64)
+    assert _cache_metrics(
+        json.dumps({"usage": {"prompt_tokens": 100}}).encode(),
+        None,
+    ) == (None, None)
 
 
 def test_vllm_prefix_cache_delta_uses_native_counters(

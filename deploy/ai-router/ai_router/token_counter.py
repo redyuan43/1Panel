@@ -24,6 +24,12 @@ MEDIA_PAYLOAD_KEYS = {
 class TokenCounter(Protocol):
     def count_request(self, body: dict[str, Any], api_kind: str) -> int: ...
 
+    def prefix_token_ids(
+        self,
+        body: dict[str, Any],
+        api_kind: str,
+    ) -> tuple[int, ...]: ...
+
 
 def output_reserve_tokens(body: dict[str, Any], api_kind: str, default_value: int = 4096) -> int:
     names = (
@@ -115,13 +121,7 @@ class HuggingFaceTokenCounter:
 
     def count_request(self, body: dict[str, Any], api_kind: str) -> int:
         tokenizer = self._load()
-        if api_kind == "chat":
-            messages = body.get("messages")
-        else:
-            messages = _responses_to_messages(
-                body.get("input"),
-                instructions=body.get("instructions"),
-            )
+        messages = _request_messages(body, api_kind)
         if not isinstance(messages, list):
             raise TokenizationUnavailableError("request does not contain tokenizable messages")
         messages, media_tokens = _sanitize_media(
@@ -136,6 +136,7 @@ class HuggingFaceTokenCounter:
                 tools=tools,
                 tokenize=True,
                 add_generation_prompt=True,
+                **_chat_template_kwargs(body),
             )
             return len(token_ids) + media_tokens
         except Exception:
@@ -148,6 +149,57 @@ class HuggingFaceTokenCounter:
                 len(tokenizer.encode(rendered, add_special_tokens=True))
                 + media_tokens
             )
+
+    def prefix_token_ids(
+        self,
+        body: dict[str, Any],
+        api_kind: str,
+    ) -> tuple[int, ...]:
+        tokenizer = self._load()
+        messages = _request_messages(body, api_kind)
+        if (
+            not isinstance(messages, list)
+            or len(messages) < 2
+            or not isinstance(messages[-1], dict)
+            or str(messages[-1].get("role", "")).lower() != "user"
+        ):
+            return ()
+        prefix_messages, media_tokens = _sanitize_media(
+            messages[:-1],
+            image_token_estimate=self.image_token_estimate,
+            audio_token_estimate=self.audio_token_estimate,
+        )
+        if media_tokens:
+            return ()
+        tools = body.get("tools")
+        kwargs = _chat_template_kwargs(body)
+        try:
+            rendered = [
+                tokenizer.apply_chat_template(
+                    [
+                        *prefix_messages,
+                        {
+                            "role": "user",
+                            "content": sentinel,
+                        },
+                    ],
+                    tools=tools,
+                    tokenize=True,
+                    add_generation_prompt=True,
+                    **kwargs,
+                )
+                for sentinel in ("A", "九", "🧪")
+            ]
+        except Exception as exc:
+            raise TokenizationUnavailableError(
+                f"prefix tokenization failed: {exc}"
+            ) from exc
+        common = 0
+        for values in zip(*rendered, strict=False):
+            if len(set(values)) != 1:
+                break
+            common += 1
+        return tuple(int(token) for token in rendered[0][:common])
 
 
 def _responses_to_messages(
@@ -249,6 +301,67 @@ class SimpleTokenCounter:
             len(json.dumps(sanitized, ensure_ascii=False)) // 4,
         )
         return text_tokens + media_tokens
+
+    def prefix_token_ids(
+        self,
+        body: dict[str, Any],
+        api_kind: str,
+    ) -> tuple[int, ...]:
+        messages = _request_messages(body, api_kind)
+        if (
+            not isinstance(messages, list)
+            or len(messages) < 2
+            or not isinstance(messages[-1], dict)
+            or str(messages[-1].get("role", "")).lower() != "user"
+        ):
+            return ()
+        prefix, media_tokens = _sanitize_media(
+            messages[:-1],
+            image_token_estimate=self.image_token_estimate,
+            audio_token_estimate=self.audio_token_estimate,
+        )
+        if media_tokens:
+            return ()
+        rendered = json.dumps(
+            {
+                "messages": prefix,
+                "tools": body.get("tools") or [],
+                "chat_template_kwargs": _chat_template_kwargs(body),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return tuple(rendered)
+
+
+def _request_messages(
+    body: dict[str, Any],
+    api_kind: str,
+) -> Any:
+    if api_kind == "chat":
+        return body.get("messages")
+    return _responses_to_messages(
+        body.get("input"),
+        instructions=body.get("instructions"),
+    )
+
+
+def _chat_template_kwargs(body: dict[str, Any]) -> dict[str, Any]:
+    value = body.get("chat_template_kwargs")
+    if not isinstance(value, dict):
+        return {}
+    reserved = {
+        "messages",
+        "tools",
+        "tokenize",
+        "add_generation_prompt",
+    }
+    return {
+        str(key): item
+        for key, item in value.items()
+        if str(key) not in reserved
+    }
 
 
 def _sanitize_media(

@@ -156,6 +156,118 @@ Auto 路由。跨物理部署不等于独占 GPU，路由器只保存亲和关�
 物理 deployment；新的链路优先选择最近 120 秒未使用的合格 worker。客户端声明
 上下文已压缩时会切断旧亲和。worker 进程代际变化时保留模型选择，但标记缓存重置。
 
+跨会话 Prefix Affinity 由全局开关和端点开关共同控制。启用后，它处理显式模型的首轮文本请求，以及
+“固定前缀为纯文本、图片只出现在最后一条 user 消息”的视觉请求。Router 使用
+`AI_ROUTER_STATE_KEY` 对真实 tokenizer 输出计算累计 HMAC checkpoint；作用域
+包含客户端、模型、API 类型、工具定义和身份模板版本。原始提示词、图片和 token
+不写入 Redis。
+
+每个单 slot worker 在 Redis 中只保存一份当前 checkpoint 链。worker 被新请求
+占用时，单次写入直接替换旧状态，不再维护可能失去原子性的双向索引。新请求会扫描
+少量 worker 状态并采用最长公共 checkpoint；默认每 2,048 tokens 一个 checkpoint，
+至少匹配 8,192 tokens 才参与缓存路由。精确命中保留完整前缀长度。
+
+同一共享池内，Router 比较 `剩余 prefill tokens / worker 实测 prefill TPS`。
+因此完整暖命中通常优先，但较短的局部命中不会阻止明显更快的冷节点接单。暖副本
+繁忙且存在空闲冷 worker 时，长请求仍可在冷 worker 上形成新副本。worker 不可用、
+服务重启或 generation 改变时只失效该 worker 的状态。
+
+Qwen3.6 fleet 当前保留四台已验证 worker 的发现信息，但生产调度只启用
+NX3、NX4 和 AGX。Ivan 的 RTX 3060 Laptop 6GB 采用 GPU offload 加 CPU MoE
+混合推理，长上下文冷 prefill 的尾延迟过高，因此在
+`config/qwen36-fleet.yaml` 中设置 `routing_enabled: false`，状态显示为
+`standby`。恢复参与时只需重新评测后打开该开关，不需要重新同步模型。
+
+三台活跃 worker 已逐台验证单函数调用；Router 对该 fleet 声明
+`tools: single`，并接受 `tool_choice=auto/required`。并行工具调用尚未完成
+逐节点验证，因此不对外声明 `parallel`。NX3、NX4 和 AGX 还逐台验证了
+`response_format.type=json_schema`，结构化辅助请求可以继续使用同一个共享模型，
+不需要回退到其他客户端或模型。
+
+固定内容必须位于 system/developer 消息，动态问题和图片位于最后一条 user 消息。
+固定内容与问题混在最后一条 user 消息时，本阶段不猜测边界。WorkBuddy 是显式
+例外：仅对 `workbuddy-qwen36-shared` 客户端和
+`siyuan/qwen36-shared` 模型，Router 会在认证后、token 统计前识别原始 system
+中的唯一 Workspace Memory 区域，或兼容已有的
+`<workbuddy_dynamic_context>` 标签块。Workspace Memory 以及 `Agent`、`Skill`
+和 `ToolSearch` 的动态描述会移动到最后一条 user 消息开头；工具原位置保留固定
+描述，名称、schema 和顺序不变。其他客户端、`auto`、边界缺失或重复、最后一条
+消息不是 user 的请求都保持不变。
+
+端点必须显式声明 `metadata.prefix_affinity_enabled: true`。只有后端已经独立验证
+支持 token 级部分复用时，才可再声明
+`metadata.prefix_partial_affinity_enabled: true`。Qwen3.6 llama.cpp fleet 当前
+保持为 `false`，仅使用经过实测的完整消息前缀命中。
+
+```yaml
+prefix_affinity:
+  enabled: true
+  revision: 3
+  legacy_revision: 2
+  ttl_seconds: 86400
+  min_prompt_tokens: 2048
+  checkpoint_tokens: 2048
+  partial_min_tokens: 8192
+  replica_on_busy_min_prompt_tokens: 12000
+  capture_templates: true
+  template_dir: /data/private/prefix-templates
+  template_min_tokens: 12000
+  template_client_ids:
+    - workbuddy-qwen36-shared
+    - hermes-qwen36-shared
+```
+
+只有完成胜出模型选择、固定前缀实测、隔离 Router 验证和生产密钥配置后，才能同时
+打开全局开关与端点开关。`auto`、续轮上下文、固定前缀中包含媒体及未声明支持的
+端点不参与。
+
+获准客户端的可复用前缀可以写入
+`/data/private/prefix-templates`。目录权限为 `0700`，模板文件权限为
+`0600`；最后一条动态 user 消息和图片数据不会写入。捕获仅限
+`template_client_ids`，Redis、审计和测试报告仍只保存 HMAC 与指标。
+
+为同一客户端账号创建独立预热 Key，并保存到私有 `0600` 文件后，可建立两个
+缓存副本：
+
+```bash
+scripts/prewarm-qwen36-prefix.py \
+  --template /opt/1panel/ai-router/private/prefix-templates/<client>/<hmac>.json \
+  --key-file /opt/1panel/ai-router/private/prefix-keys/<client>.key \
+  --copies 2 \
+  --output /opt/1panel/ai-router/private/prefix-prewarm/<run>.json \
+  --execute
+```
+
+预热 Key 必须属于模板的同一客户端账号，因为 client ID 是前缀指纹的一部分。
+其他客户端的 Key 无法制造命中。
+
+Fleet adapter 只需要三个物理 worker 密钥。生产 Compose 从独立文件
+`/opt/1panel/ai-router/qwen36-fleet.env` 读取，权限必须为 `0600`；不要让该
+adapter 继承包含 Router 管理密钥、云模型密钥和媒体密钥的完整
+`router.env`。模板见 `config/qwen36-fleet.env.example`。
+
+Hermes 的生产接入范围限定为 Nano1 和 Nano2。两台使用同一个
+`hermes-qwen36-shared` 私有客户端身份和显式模型
+`siyuan/qwen36-shared`，这样相同 Hermes 固定前缀可以共享同一个 HMAC 身份及
+Redis 副本目录。NX3 上的 `qwen36prefix` profile 只用于隔离捕获和命令行验证，
+不运行 gateway，也不属于生产 Hermes fleet。
+
+Nano1 和 Nano2 的 `auxiliary.title_generation.enabled` 设为 `false`。Hermes
+继续使用本地即时标题，但不再为标题向共享模型池发起独立请求。标题请求的前缀与
+主会话不同，在单 slot worker 上会占用并替换业务暖前缀；关闭它可以避免后台辅助
+任务与主请求争抢三个活跃 worker。
+
+Nano1 和 Nano2 当前加载的工具集合不同，因此生成两个独立 Hermes 前缀；连同
+WorkBuddy，一共需要维护三个业务前缀。Ivan 处于 standby 后，三个活跃单 slot
+worker 的稳态目标是每个前缀至少一个暖副本，不能同时为任一前缀长期保留两个副本。
+两路 `>=12K` 的同前缀并发仍可在空闲冷 worker 上建立临时第二副本；双副本验收
+完成后必须重新预热三个业务前缀，不能把一次验收形成的缓存状态当作长期静态分配。
+
+模板捕获阈值设为 `12K`，但仍只允许 `template_client_ids` 中的私有客户端。
+该阈值覆盖当前 Nano1/Nano2 的约 `15K–17K` 固定前缀，同时不会扩大模板捕获的
+客户端范围。忙时扩副本阈值也设为 `12K`，使这些实测需要约 85–93 秒冷 prefill
+的 Hermes 前缀在第二路并发到达时可以使用空闲 worker 建立副本，而不是只排队等待。
+
 llama.cpp 后端使用按 MiB 限额的主机内存 prompt cache 保存被新任务换出的
 KV，容量满后按 LRU 淘汰，不按亲和 TTL 无限占用显存。控制台记录实际
 `cached_prompt_tokens` 和命中率；只有指标证明 RAM 层不足时，才评估
@@ -436,3 +548,9 @@ docker compose up -d
 - 容量满载时的跨端点分流与云端预算兜底
 - Luna/Terra 随机 pilot 的真实运行及人工审核
 - 1Panel Custom Provider 的真实端到端调用
+
+## NX3 WorkBuddy 固定前缀缓存
+
+WorkBuddy 专用客户端现有模型入口的 NX3 固定路由、内存 checkpoint 保留、
+自动本地磁盘恢复及回滚说明见 [运行手册](docs/nx3-prefix-cache.md)。
+此客户端通过认证后的部署固定规则排队，不依赖客户端提供会话 ID。

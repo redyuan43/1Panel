@@ -6,12 +6,13 @@ import os
 import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable
 from uuid import uuid4
 
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette.background import BackgroundTask
 
 from .compaction import extract_messages, replace_messages
 from .errors import (
@@ -48,11 +49,16 @@ from .identity import (
 from .media import inspect_image_inputs, normalize_ai_images
 from .media_service.gateway import model_descriptors as media_model_descriptors, router as media_router
 from .policy import updated_conversation_state
+from .prefix_affinity import PrefixAffinityRecord, PrefixSignature
 from .prompt_directives import (
     resolve_conversation_directive,
     sanitize_prompt_directives,
 )
-from .protocol import normalize_llama_tool_schemas, normalize_request
+from .protocol import (
+    move_workbuddy_dynamic_context,
+    normalize_llama_tool_schemas,
+    normalize_request,
+)
 from .public_protocol import private_history_items
 from .privacy_view import review_view
 from .responses_adapter import (
@@ -663,6 +669,20 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             code="router_draining",
             details={"instance_id": current.instance_id},
         )
+    dynamic_context_move = move_workbuddy_dynamic_context(
+        body,
+        api_kind,
+        client_id=authenticated.policy.id,
+    )
+    body = dynamic_context_move.body
+    if dynamic_context_move.moved:
+        current.audit.write(
+            "workbuddy_dynamic_context_moved",
+            request_id=request_id,
+            client_id=authenticated.policy.id,
+            moved_chars=dynamic_context_move.moved_chars,
+            mode=dynamic_context_move.mode,
+        )
     normalized = normalize_request(
         body,
         api_kind,
@@ -981,6 +1001,80 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 context_compaction_source="router",
             )
         await _save_request_trace(current, trace)
+        signature_body = json.loads(json.dumps(effective_body))
+        prefix_endpoints = (
+            current.registry.by_public_model(requested_model)
+            if requested_model != "auto"
+            else ()
+        )
+        if (
+            isinstance(signature_body.get("tools"), list)
+            and prefix_endpoints
+            and all(
+                item.backend_type in {"llama_cpp", "ai_pool"}
+                and item.metadata.get("prefix_affinity_enabled") is True
+                for item in prefix_endpoints
+            )
+        ):
+            signature_body["tools"] = normalize_llama_tool_schemas(
+                signature_body["tools"],
+                api_kind,
+            )
+        rendered_signature_body = identity.inject(
+            signature_body,
+            api_kind,
+        )
+        prefix_signature: PrefixSignature | None = None
+        try:
+            prefix_token_reader = getattr(
+                current.token_counter,
+                "prefix_token_ids",
+                None,
+            )
+            prefix_token_ids = (
+                prefix_token_reader(rendered_signature_body, api_kind)
+                if callable(prefix_token_reader)
+                else ()
+            )
+            prefix_signature = current.prefix_affinity.signature(
+                rendered_signature_body,
+                api_kind,
+                client_id=authenticated.policy.id,
+                requested_model=requested_model,
+                token_ids=prefix_token_ids,
+                modalities=modalities,
+                new_conversation=(
+                    lineage.parent is None
+                    and not client_compacted
+                    and pre_route_capsule is None
+                ),
+                context_revision=(
+                    identity.revision if identity.enabled else ""
+                ),
+                legacy_body=effective_body,
+            )
+        except Exception as exc:
+            current.audit.write(
+                "prefix_signature_failed",
+                request_id=request_id,
+                client_id=authenticated.policy.id,
+                requested_model=requested_model,
+                error=type(exc).__name__,
+            )
+        prefix_affinity_key = (
+            prefix_signature.exact_key
+            if prefix_signature is not None
+            else None
+        )
+        reusable_prefix_tokens = (
+            prefix_signature.prefix_tokens
+            if prefix_signature is not None
+            else 0
+        )
+        prefix_affinity = await current.prefix_affinity.match(
+            prefix_signature
+        )
+        template_capture_attempted = False
         excluded_deployments: set[str] = set()
         max_attempts = int(current.settings.section("failover").get("max_attempts", 2))
         # At this point no response bytes or tool calls reached the client.
@@ -1022,6 +1116,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current,
                     request_id=request_id,
                     requested_model=requested_model,
+                    client_id=authenticated.policy.id,
                     evaluation=evaluation,
                     prompt_tokens=prompt_tokens,
                     output_reserve_tokens=reserve_tokens,
@@ -1041,6 +1136,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     excluded_deployments=excluded_deployments,
                     capacity_attempts=total_capacity_attempts,
                     queue_wait_ms=total_queue_wait_ms,
+                    prefix_affinity=prefix_affinity,
+                    prefix_affinity_key=prefix_affinity_key,
                     trace=trace,
                     route_attempt=attempt,
                     identity=identity,
@@ -1061,6 +1158,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 )
                 decision.context_compacted = bool(compaction_source)
                 decision.context_compaction_source = compaction_source
+                decision.prefix_affinity_signature = prefix_signature
+                decision.prefix_affinity_prefix_tokens = (
+                    reusable_prefix_tokens
+                )
                 decision.conversation_mode = conversation_mode
                 decision.branch_id = lineage.branch_id
                 decision.parent_branch_id = lineage.parent_branch_id
@@ -1075,6 +1176,42 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     and client_requested_model
                     not in {"auto", identity.public_model_id}
                 )
+                if (
+                    not template_capture_attempted
+                    and decision.endpoint.metadata.get(
+                        "prefix_affinity_enabled"
+                    )
+                    is True
+                ):
+                    template_capture_attempted = True
+                    try:
+                        template_path = (
+                            await current.prefix_affinity.capture_template(
+                                prefix_affinity_key,
+                                effective_body,
+                                api_kind,
+                                client_id=authenticated.policy.id,
+                                requested_model=requested_model,
+                                prefix_tokens=reusable_prefix_tokens,
+                            )
+                        )
+                        if template_path is not None:
+                            current.audit.write(
+                                "prefix_template_captured",
+                                request_id=request_id,
+                                client_id=authenticated.policy.id,
+                                requested_model=requested_model,
+                                prefix_tokens=reusable_prefix_tokens,
+                                prefix_key=prefix_affinity_key,
+                            )
+                    except Exception as exc:
+                        current.audit.write(
+                            "prefix_template_capture_failed",
+                            request_id=request_id,
+                            client_id=authenticated.policy.id,
+                            requested_model=requested_model,
+                            error=type(exc).__name__,
+                        )
                 if current.training is not None:
                     await current.training.mark_routed(
                         training_token,
@@ -1356,12 +1493,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     capsule=capsule,
                 )
                 if bool(routed_body.get("stream")):
-                    stream_owned = True
-                    return StreamingResponse(
+                    resource_finalizer = _StreamResourceFinalizer(
+                        current,
+                        lease,
+                        authenticated.policy.id,
+                    )
+                    response = _FinalizingStreamingResponse(
                         _stream_response(
                             current,
                             upstream,
-                            lease=lease,
+                            resource_finalizer=resource_finalizer,
                             client_id=authenticated.policy.id,
                             key_id=authenticated.key_id,
                             request_id=request_id,
@@ -1379,7 +1520,22 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         status_code=upstream.status_code,
                         headers=headers,
                         media_type=upstream.headers.get("content-type"),
+                        background=BackgroundTask(
+                            _finalize_abandoned_stream,
+                            current,
+                            resource_finalizer=resource_finalizer,
+                            client_id=authenticated.policy.id,
+                            key_id=authenticated.key_id,
+                            request_id=request_id,
+                            conversation_id=conversation_id,
+                            decision=decision,
+                            training_token=training_token,
+                            started_at=request.state.started_at,
+                            cache_snapshot=cache_snapshot,
+                        ),
                     )
+                    stream_owned = True
+                    return response
 
                 payload = await upstream.aread()
                 await upstream.aclose()
@@ -1931,11 +2087,14 @@ async def _acquire_route_capacity(
     excluded_deployments: set[str],
     capacity_attempts: int,
     queue_wait_ms: float,
+    prefix_affinity: PrefixAffinityRecord | None = None,
+    prefix_affinity_key: str | None = None,
     trace: DecisionTrace | None = None,
     route_attempt: int = 1,
     identity: IdentityProfile | None = None,
     allow_compaction: bool = False,
     history_precompacted: bool = False,
+    client_id: str = "",
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -1963,7 +2122,10 @@ async def _acquire_route_capacity(
                 conversation=conversation,
                 excluded_endpoint_ids=excluded_endpoints,
                 excluded_deployment_ids=excluded_deployments,
-                routing_key=request_id,
+                prefix_affinity=prefix_affinity,
+                prefix_affinity_key=prefix_affinity_key,
+                routing_key=prefix_affinity_key or request_id,
+                client_id=client_id,
                 trace=trace,
                 trace_attempt=route_attempt,
             )
@@ -1977,6 +2139,14 @@ async def _acquire_route_capacity(
                     raise AllLocalCapacityBusyError()
                 raise CapacityBusyError()
             raise
+        if (
+            prefix_affinity_key
+            and decision.endpoint.metadata.get(
+                "prefix_affinity_enabled"
+            )
+            is True
+        ):
+            decision.prefix_affinity_key = prefix_affinity_key
 
         _apply_protocol_constraints(decision, api_kind)
         capacity_attempts += 1
@@ -2004,6 +2174,8 @@ async def _acquire_route_capacity(
             affinity_spilled = affinity_spilled or decision.affinity in {
                 "hit",
                 "logical-hit",
+                "prefix-hit",
+                "prefix-replica",
             }
             if trace:
                 trace.record(
@@ -2102,7 +2274,12 @@ async def _acquire_route_capacity(
                             request_id,
                             timeout_seconds=wait_seconds,
                             affinity_priority=decision.affinity
-                            in {"hit", "logical-hit"},
+                            in {
+                                "hit",
+                                "logical-hit",
+                                "prefix-hit",
+                                "prefix-replica",
+                            },
                             capacity=decision.endpoint.max_concurrency,
                         )
                     )
@@ -2125,6 +2302,8 @@ async def _acquire_route_capacity(
             affinity_spilled = affinity_spilled or decision.affinity in {
                 "hit",
                 "logical-hit",
+                "prefix-hit",
+                "prefix-replica",
             }
             _exclude_busy_decision(
                 decision,
@@ -2285,6 +2464,8 @@ async def _acquire_route_capacity(
             conversation = None
             history_conversation = None
             history_precompacted = True
+            prefix_affinity = None
+            prefix_affinity_key = None
             await lease.release_deployment()
             continue
         capsule = capsule or carried_capsule
@@ -2408,9 +2589,14 @@ def _capacity_wait_seconds(
     requested_model: str,
     decision: RouteDecision,
 ) -> float:
+    pin = decision.endpoint.metadata.get("client_deployment_pin")
+    if pin is not None:
+        return float(pin["capacity_wait_seconds"])
     if requested_model != "auto" or decision.affinity in {
         "hit",
         "logical-hit",
+        "prefix-hit",
+        "prefix-replica",
     }:
         return max(
             0.0,
@@ -2461,7 +2647,15 @@ def _exclude_busy_decision(
     if (
         decision.endpoint.backend_type in {"ai_pool", "codex_pool"}
         and decision.affinity
-        in {"hit", "logical-hit", "physical-failover"}
+        in {
+            "hit",
+            "logical-hit",
+            "prefix-hit",
+            "prefix-replica",
+            "prefix-reset",
+            "prefix-miss",
+            "physical-failover",
+        }
         and decision.deployment_id
     ):
         excluded_deployments.add(decision.deployment_id)
@@ -2532,7 +2726,13 @@ async def _filter_restart_draining_deployments(
         decision.deployment_id = filtered[0][0]
         decision.upstream_api_base = filtered[0][1]
         _apply_selected_deployment(decision, filtered[0][0])
-        if decision.affinity in {"hit", "logical-hit"}:
+        if decision.affinity in {
+            "hit",
+            "logical-hit",
+            "prefix-hit",
+            "prefix-replica",
+            "prefix-reset",
+        }:
             decision.affinity = "physical-failover"
             decision.reason = "physical_worker_unavailable"
         return True
@@ -2637,8 +2837,20 @@ async def _send_upstream(
     )
     api_key = current.internal_api_key
     if direct:
+        deployment = getattr(
+            decision,
+            "deployment_details",
+            {},
+        ).get(
+            getattr(decision, "deployment_id", "") or "",
+            {},
+        )
+        key_env = str(
+            deployment.get("backend_api_key_env")
+            or decision.endpoint.backend_api_key_env
+        )
         api_key = os.environ.get(
-            decision.endpoint.backend_api_key_env,
+            key_env,
             "",
         )
     headers = {
@@ -3198,7 +3410,16 @@ async def _acquire_internal_model(
         return ModelCallTarget(
             base_url=decision.upstream_api_base or endpoint.api_base,
             model=endpoint.provider_model,
-            api_key=os.environ.get(endpoint.backend_api_key_env, ""),
+            api_key=os.environ.get(
+                str(
+                    decision.deployment_details.get(
+                        selected,
+                        {},
+                    ).get("backend_api_key_env")
+                    or endpoint.backend_api_key_env
+                ),
+                "",
+            ),
         )
 
     if wait:
@@ -3306,6 +3527,146 @@ async def _lineage_context(
     )
 
 
+class _FinalizingStreamingResponse(StreamingResponse):
+    """Run the background finalizer even when ASGI send disconnects."""
+
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        background = self.background
+        self.background = None
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if background is not None:
+                await background()
+
+
+class _StreamResourceFinalizer:
+    """Release stream-owned leases exactly once, including disconnects."""
+
+    def __init__(
+        self,
+        current: RouterRuntime,
+        lease: Any,
+        client_id: str,
+    ) -> None:
+        self.current = current
+        self.lease = lease
+        self.client_id = client_id
+        self._lock = asyncio.Lock()
+        self._stream_finalization_lock = asyncio.Lock()
+        self._released = False
+
+    async def begin_stream(self) -> None:
+        await self._stream_finalization_lock.acquire()
+
+    async def wait_for_stream_finalization(self) -> None:
+        async with self._stream_finalization_lock:
+            pass
+
+    def finish_stream(self) -> None:
+        if self._stream_finalization_lock.locked():
+            self._stream_finalization_lock.release()
+
+    async def __call__(self) -> None:
+        async with self._lock:
+            if self._released:
+                return
+            first_error: Exception | None = None
+            for operation in (
+                self.lease.release,
+                lambda: self.current.limiter.release_parallel(
+                    self.client_id,
+                    self.lease.owner_token,
+                ),
+                lambda: self.current.track_request_finished(
+                    self.lease.owner_token
+                ),
+            ):
+                try:
+                    await operation()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+            if first_error is not None:
+                raise first_error
+            self._released = True
+
+
+async def _run_stream_resource_finalizer(
+    finalizer: _StreamResourceFinalizer,
+) -> None:
+    cleanup = asyncio.create_task(finalizer())
+    try:
+        await asyncio.shield(cleanup)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(cleanup)
+        finally:
+            raise
+
+
+async def _run_stream_finalization(finalization: Awaitable[None]) -> None:
+    """Finish stream bookkeeping before propagating client cancellation."""
+    task = asyncio.create_task(finalization)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        try:
+            await asyncio.shield(task)
+        finally:
+            raise
+
+
+async def _finalize_abandoned_stream(
+    current: RouterRuntime,
+    *,
+    resource_finalizer: _StreamResourceFinalizer,
+    client_id: str,
+    key_id: str,
+    request_id: str,
+    conversation_id: str | None,
+    decision: RouteDecision,
+    training_token: str | None,
+    started_at: float,
+    cache_snapshot: dict[str, float] | None,
+) -> None:
+    try:
+        await resource_finalizer.wait_for_stream_finalization()
+        if decision.trace is not None and not decision.trace.terminal:
+            if current.training is not None:
+                await asyncio.shield(
+                    current.training.fail(
+                        training_token,
+                        status_code=499,
+                        error={
+                            "type": "stream_interrupted",
+                            "message": (
+                                "stream response ended before finalization"
+                            ),
+                        },
+                        interrupted=True,
+                    )
+                )
+            await _audit(
+                current,
+                request_id=request_id,
+                client_id=client_id,
+                key_id=key_id,
+                conversation_id=conversation_id,
+                decision=decision,
+                status_code=499,
+                started_at=started_at,
+                cache_snapshot=cache_snapshot,
+            )
+    finally:
+        await _run_stream_resource_finalizer(resource_finalizer)
+
+
 async def _map_response_id(
     current: RouterRuntime,
     payload: bytes,
@@ -3328,7 +3689,7 @@ async def _stream_response(
     current: RouterRuntime,
     upstream: httpx.Response,
     *,
-    lease: Any,
+    resource_finalizer: _StreamResourceFinalizer,
     client_id: str,
     key_id: str,
     request_id: str,
@@ -3343,6 +3704,7 @@ async def _stream_response(
     identity: IdentityProfile,
     identifiers: tuple[str, ...],
 ) -> AsyncIterator[bytes]:
+    await resource_finalizer.begin_stream()
     accumulator = SSEAccumulator(api_kind)
     private_accumulator = SSEAccumulator(api_kind)
     sanitizer = IdentityStreamSanitizer(
@@ -3383,89 +3745,99 @@ async def _stream_response(
     finally:
         accumulator.finish()
         private_accumulator.finish()
-        try:
-            await upstream.aclose()
-            if completed:
-                await persist_history(
-                    current.compactor,
-                    current.conversations,
-                    state=state,
-                    client_id=client_id,
-                    body=body,
-                    api_kind=api_kind,
-                    assistant_items=private_history_items(
-                        accumulator.assistant_items(), private_accumulator.assistant_items(),
-                    ),
-                )
-                if accumulator.response_id and state:
-                    await current.conversations.map_response(
-                        accumulator.response_id,
-                        state.branch_id or state.conversation_id,
+        completed = bool(
+            completed
+            or accumulator.terminal
+            or private_accumulator.terminal
+        )
+
+        async def finalize_stream() -> None:
+            try:
+                await upstream.aclose()
+                if completed:
+                    await persist_history(
+                        current.compactor,
+                        current.conversations,
+                        state=state,
+                        client_id=client_id,
+                        body=body,
+                        api_kind=api_kind,
+                        assistant_items=private_history_items(
+                            accumulator.assistant_items(),
+                            private_accumulator.assistant_items(),
+                        ),
                     )
-                if current.training is not None:
+                    if accumulator.response_id and state:
+                        await current.conversations.map_response(
+                            accumulator.response_id,
+                            state.branch_id or state.conversation_id,
+                        )
+                    if current.training is not None:
+                        await asyncio.shield(
+                            current.training.complete(
+                                training_token,
+                                status_code=status_code,
+                                assistant_items=(
+                                    private_accumulator.assistant_items()
+                                ),
+                                usage=private_accumulator.usage,
+                            )
+                        )
+                elif current.training is not None:
                     await asyncio.shield(
-                        current.training.complete(
+                        current.training.fail(
                             training_token,
-                            status_code=status_code,
-                            assistant_items=private_accumulator.assistant_items(),
-                            usage=private_accumulator.usage,
+                            status_code=499,
+                            error={
+                                "type": "stream_interrupted",
+                                "message": (
+                                    "stream ended before a complete response"
+                                ),
+                            },
+                            interrupted=True,
                         )
                     )
-            elif current.training is not None:
-                await asyncio.shield(
-                    current.training.fail(
-                        training_token,
-                        status_code=499,
-                        error={
-                            "type": "stream_interrupted",
-                            "message": (
-                                "stream ended before a complete response"
-                            ),
-                        },
-                        interrupted=True,
+                if not completed and decision.trace:
+                    decision.trace.record(
+                        decision.attempts,
+                        "upstream_request",
+                        "error",
+                        reason="stream_interrupted",
+                        evidence={"status_code": 499},
                     )
-                )
-            if not completed and decision.trace:
-                decision.trace.record(
-                    decision.attempts,
-                    "upstream_request",
-                    "error",
-                    reason="stream_interrupted",
-                    evidence={"status_code": 499},
-                )
-                decision.trace.fail(
-                    status_code=499,
-                    code="stream_interrupted",
-                    message=(
-                        "stream ended before a complete response"
-                    ),
-                    interrupted=True,
-                    attempt=decision.attempts,
-                )
-                await _save_request_trace(
+                    decision.trace.fail(
+                        status_code=499,
+                        code="stream_interrupted",
+                        message=(
+                            "stream ended before a complete response"
+                        ),
+                        interrupted=True,
+                        attempt=decision.attempts,
+                    )
+                    await _save_request_trace(
+                        current,
+                        decision.trace,
+                    )
+                decision.response_redactions = sanitizer.redactions
+                await _audit(
                     current,
-                    decision.trace,
+                    request_id=request_id,
+                    client_id=client_id,
+                    key_id=key_id,
+                    conversation_id=conversation_id,
+                    decision=decision,
+                    status_code=status_code if completed else 499,
+                    started_at=started_at,
+                    usage=private_accumulator.usage,
+                    cache_snapshot=cache_snapshot,
                 )
-            decision.response_redactions = sanitizer.redactions
-            await _audit(
-                current,
-                request_id=request_id,
-                client_id=client_id,
-                key_id=key_id,
-                conversation_id=conversation_id,
-                decision=decision,
-                status_code=status_code,
-                started_at=started_at,
-                usage=private_accumulator.usage,
-                cache_snapshot=cache_snapshot,
-            )
-        finally:
-            await lease.release()
-            await current.limiter.release_parallel(
-                client_id,
-                lease.owner_token,
-            )
-            await current.track_request_finished(lease.owner_token)
+            finally:
+                try:
+                    await _run_stream_resource_finalizer(resource_finalizer)
+                finally:
+                    resource_finalizer.finish_stream()
+
+        await _run_stream_finalization(finalize_stream())
 
 
 async def _fail_training_record(
@@ -3557,6 +3929,15 @@ async def _audit(
         cached_prompt_tokens_fallback=cached_prompt_tokens_fallback,
         prompt_tokens_fallback=decision.prompt_tokens,
     )
+    decision.actual_cached_tokens = cached_prompt_tokens
+    prefix_prediction_error_tokens = (
+        abs(
+            decision.predicted_cached_tokens
+            - decision.actual_cached_tokens
+        )
+        if decision.actual_cached_tokens is not None
+        else None
+    )
     input_tokens, output_tokens = _usage_totals(
         response_payload,
         usage,
@@ -3574,6 +3955,13 @@ async def _audit(
                 "output_tokens": output_tokens,
                 "cached_prompt_tokens": cached_prompt_tokens,
                 "cache_hit_ratio": cache_hit_ratio,
+                "prefix_match_type": decision.prefix_match_type,
+                "predicted_cached_tokens": (
+                    decision.predicted_cached_tokens
+                ),
+                "matched_checkpoint_tokens": (
+                    decision.matched_checkpoint_tokens
+                ),
             },
         )
         await _save_request_trace(current, decision.trace)
@@ -3623,6 +4011,13 @@ async def _audit(
         latency_ms=round((time.monotonic() - started_at) * 1000, 2),
         cached_prompt_tokens=cached_prompt_tokens,
         cache_hit_ratio=cache_hit_ratio,
+        prefix_match_type=decision.prefix_match_type,
+        predicted_cached_tokens=decision.predicted_cached_tokens,
+        actual_cached_tokens=decision.actual_cached_tokens,
+        matched_checkpoint_tokens=decision.matched_checkpoint_tokens,
+        prefix_prediction_error_tokens=(
+            prefix_prediction_error_tokens
+        ),
         required_capabilities=list(decision.required_capabilities),
         tool_history_repairs=decision.tool_history_repairs,
         protocol=decision.protocol,
@@ -3651,6 +4046,51 @@ async def _audit(
                 request_id=request_id,
                 deployment_id=(
                     decision.deployment_id or decision.endpoint.id
+                ),
+                error=type(exc).__name__,
+            )
+    if (
+        decision.endpoint.metadata.get("prefix_affinity_enabled")
+        is True
+    ):
+        try:
+            deployment_id = (
+                decision.deployment_id or decision.endpoint.id
+            )
+            details = decision.deployment_details.get(
+                deployment_id,
+                {},
+            )
+            cache_generation = str(
+                details.get("cache_generation") or ""
+            )
+            if not cache_generation:
+                endpoint_status = await current.health.status(
+                    decision.endpoint
+                )
+                cache_generation = endpoint_status.cache_generation
+            if (
+                status_code < 400
+                and decision.prefix_affinity_signature is not None
+            ):
+                await current.prefix_affinity.record_worker(
+                    decision.prefix_affinity_signature,
+                    endpoint_id=decision.endpoint.id,
+                    deployment_id=deployment_id,
+                    cache_generation=cache_generation,
+                )
+            else:
+                await current.prefix_affinity.invalidate_worker(
+                    deployment_id
+                )
+        except Exception as exc:
+            current.audit.write(
+                "prefix_affinity_marker_failed",
+                request_id=request_id,
+                endpoint_id=decision.endpoint.id,
+                deployment_id=(
+                    decision.deployment_id
+                    or decision.endpoint.id
                 ),
                 error=type(exc).__name__,
             )
@@ -3770,11 +4210,12 @@ def _cache_metrics(
         for value in cached_values
         if isinstance(value, (int, float))
     ]
-    cached_prompt_tokens = (
-        max(explicit_cached_values)
-        if explicit_cached_values
-        else int(cached_prompt_tokens_fallback or 0)
-    )
+    if explicit_cached_values:
+        cached_prompt_tokens = max(explicit_cached_values)
+    elif cached_prompt_tokens_fallback is not None:
+        cached_prompt_tokens = int(cached_prompt_tokens_fallback)
+    else:
+        return None, None
     ratio = (
         round(cached_prompt_tokens / prompt_tokens, 6)
         if prompt_tokens > 0

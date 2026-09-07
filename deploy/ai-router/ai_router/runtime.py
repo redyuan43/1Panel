@@ -21,9 +21,10 @@ from .endpoint_config import EndpointConfigManager
 from .health import HealthMonitor
 from .history import history_identities
 from .policy import ConversationRepository, RoutingPolicy
+from .prefix_affinity import PrefixAffinityRepository
 from .prompt_directives import PromptDirectiveStore, configured_phrases
 from .privacy_review import PrivacyReviewer
-from .route_trace import RouteTraceStore
+from .route_trace import RouteTraceStore, registry_fingerprint
 from .scheduler import ClientLimiter, Scheduler
 from .store import InMemoryStateStore, RedisStateStore, StateStore
 from .token_counter import HuggingFaceTokenCounter, TokenCounter
@@ -40,6 +41,7 @@ class RouterRuntime:
     token_counter: TokenCounter
     health: HealthMonitor
     conversations: ConversationRepository
+    prefix_affinity: PrefixAffinityRepository
     scheduler: Scheduler
     limiter: ClientLimiter
     budget: CloudBudget
@@ -103,15 +105,21 @@ class RouterRuntime:
         revision = await self.endpoint_configs.revision()
         if not force and revision == self._endpoint_config_revision:
             return revision
+        changed = revision != self._endpoint_config_revision
         async with self._endpoint_config_lock:
             revision = await self.endpoint_configs.revision()
             if not force and revision == self._endpoint_config_revision:
                 return revision
+            changed = revision != self._endpoint_config_revision
             registry = await self.endpoint_configs.effective_registry()
             self.registry = registry
             self.policy.registry = registry
             self._endpoint_config_revision = revision
-            return revision
+        if changed and self._started and self.track_instance:
+            await self._publish_instance_state(
+                "draining" if self.draining else "running"
+            )
+        return revision
 
     async def start(self) -> None:
         if self._started:
@@ -404,6 +412,8 @@ class RouterRuntime:
                 "active_request_count": len(self._active_requests),
                 "active_requests": list(self._active_requests.values()),
                 "startup_cleanup": self.startup_cleanup,
+                "registry_fingerprint": registry_fingerprint(self.registry),
+                "endpoint_config_revision": self._endpoint_config_revision,
             },
             ttl_seconds=None,
         )
@@ -531,6 +541,11 @@ def build_runtime(
             settings.section("routing").get("prompt_directives", {})
         )
     )
+    prefix_affinity = PrefixAffinityRepository(
+        store,
+        settings,
+        state_encryption_key,
+    )
     return RouterRuntime(
         settings=settings,
         base_registry=registry,
@@ -540,6 +555,7 @@ def build_runtime(
         token_counter=token_counter,
         health=health,
         conversations=ConversationRepository(store, settings),
+        prefix_affinity=prefix_affinity,
         scheduler=Scheduler(
             store,
             lock_ttl_seconds=int(

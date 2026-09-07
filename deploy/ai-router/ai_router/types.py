@@ -122,7 +122,9 @@ class PhysicalDeployment:
     runtime_fingerprint: str
     ready: bool
     state: str
+    backend_api_key_env: str = ""
     cache_generation: str = ""
+    prefill_tokens_per_second: float = 1.0
     config_drift: tuple[str, ...] = ()
     short_request_rank: int = 0
     error_code: str | None = None
@@ -160,7 +162,9 @@ class PhysicalDeployment:
         fields = dict(value)
         fields.pop("schedulable", None)
         fields.setdefault("max_images", None)
+        fields.setdefault("backend_api_key_env", "")
         fields.setdefault("cache_generation", "")
+        fields.setdefault("prefill_tokens_per_second", 1.0)
         for key in (
             "gpu_ids",
             "gpu_uuids",
@@ -332,6 +336,43 @@ class RouteDecision:
     context_compaction_source: str | None = None
     directive_id: str | None = None
     directive_generation: int = 0
+    prefix_affinity_key: str | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    prefix_affinity_deployment_id: str | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    prefix_affinity_cache_generation: str = field(
+        default="",
+        repr=False,
+        compare=False,
+    )
+    prefix_affinity_locations: tuple[
+        tuple[str, str, str, float, int, str],
+        ...,
+    ] = field(
+        default=(),
+        repr=False,
+        compare=False,
+    )
+    prefix_affinity_signature: Any | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    prefix_affinity_prefix_tokens: int = field(
+        default=0,
+        repr=False,
+        compare=False,
+    )
+    prefix_match_type: str = "none"
+    predicted_cached_tokens: int = 0
+    actual_cached_tokens: int | None = None
+    matched_checkpoint_tokens: int = 0
     trace: Any | None = field(default=None, repr=False, compare=False)
 
     def response_headers(self, request_id: str) -> dict[str, str]:

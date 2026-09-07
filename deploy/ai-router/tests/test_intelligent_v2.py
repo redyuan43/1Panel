@@ -31,6 +31,7 @@ from ai_router.policy import RoutingPolicy
 from ai_router.responses_adapter import (
     chat_response_to_responses,
     chat_stream_to_responses,
+    responses_request_to_chat,
 )
 from ai_router.runtime import build_runtime
 from ai_router.store import InMemoryStateStore
@@ -656,7 +657,7 @@ def test_v2_returns_503_for_mixed_incompatible_and_temporary_rejections(
         v2_settings(tmp_path),
         FakeHealth(
             statuses,
-            cooldown_ids={registry.endpoints[0].id},
+            cooldown_ids={"ai-qwen38-27b"},
         ),
     )
     with pytest.raises(NoEligibleModelError) as raised:
@@ -1187,6 +1188,19 @@ def test_responses_adapter_parses_crlf_and_trailing_event() -> None:
     assert '"input_tokens":5' in text
     assert '"output_tokens":2' in text
     assert "response.completed" in text
+
+
+def test_responses_adapter_preserves_chat_template_kwargs() -> None:
+    converted = responses_request_to_chat(
+        {
+            "input": "hello",
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
+    )
+
+    assert converted["chat_template_kwargs"] == {
+        "enable_thinking": False,
+    }
 
 
 def test_responses_adapter_maps_incomplete_finish_reasons() -> None:

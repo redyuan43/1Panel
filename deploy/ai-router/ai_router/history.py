@@ -582,6 +582,7 @@ class SSEAccumulator:
         self._completed_output: list[dict[str, Any]] | None = None
         self.response_id: str | None = None
         self.usage: dict[str, Any] | None = None
+        self.terminal = False
         self.completed = False
 
     def feed(self, chunk: bytes) -> None:
@@ -667,6 +668,7 @@ class SSEAccumulator:
         if not value:
             return
         if value == "[DONE]":
+            self.terminal = True
             self.completed = True
             return
         try:
@@ -686,6 +688,8 @@ class SSEAccumulator:
             self.usage = usage
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
+            if choices[0].get("finish_reason") is not None:
+                self.terminal = True
             delta = choices[0].get("delta", {})
             if isinstance(delta, dict):
                 if isinstance(delta.get("content"), str):
@@ -790,6 +794,7 @@ class SSEAccumulator:
                 item["arguments"] = payload["arguments"]
             return
         if event_type == "response.completed":
+            self.terminal = True
             self.completed = True
             response = payload.get("response")
             if isinstance(response, dict):

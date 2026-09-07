@@ -28,7 +28,97 @@ model_aliases:
     max_input_tokens: 49152
     max_output_tokens: 4096
 
+  siyuan/qwen36-shared:
+    endpoint_ids:
+      - qwen36-shared-fleet
+    deployment_profile_ids: []
+    max_input_tokens: 250000
+    max_output_tokens: 4096
+
 endpoints:
+  - id: qwen36-shared-fleet
+    public_model: internal/qwen36-shared-fleet
+    provider_model: siyuan/qwen36-shared
+    api_base: http://127.0.0.1:18108/v1
+    node: qwen36-fleet
+    role: responder
+    tier: local-general
+    tier_rank: 20
+    modalities:
+      - text
+      - image
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 255000
+    configured_context_tokens: 262144
+    max_concurrency: 1
+    backend_type: ai_pool
+    health_url: http://127.0.0.1:18108/health
+    backend_api_key_env: AI_ROUTER_QWEN36_POOL_KEY
+    enabled: true
+    auto_candidate: false
+    capabilities:
+      chat: true
+      responses: adapter
+      tools: single
+      tool_choice: true
+      tool_choice_modes:
+        - auto
+        - required
+      structured_output:
+        - json_schema
+      streaming: true
+      validation_status: three-active-node-chat-vision-single-tools-json-schema-prefix-cache-validated
+      validated_at: "2026-09-06"
+    deployment_profiles:
+      - id: nx-q4-vision
+        tiers:
+          - edge-small
+        modalities:
+          - text
+          - image
+        context_size: 57344
+        safe_context_tokens: 57344
+        cache_type_k: q4_0
+        cache_type_v: q4_0
+        short_request_rank: 0
+        vision_status: validated
+        max_images: 1
+      - id: large-q8-vision
+        tiers:
+          - local-general
+          - local-large
+        modalities:
+          - text
+          - image
+        context_size: 262144
+        safe_context_tokens: 255000
+        cache_type_k: q8_0
+        cache_type_v: q8_0
+        short_request_rank: 10
+        vision_status: validated
+        max_images: 1
+    quality: {}
+    metadata:
+      prefix_affinity_enabled: true
+      prefix_partial_affinity_enabled: false
+      vision_status: four-node-live-validated-2026-09-06
+      context_status: nx-common-57344-ivan-agx-255034-prompt-image-live-validated-2026-09-06
+      routing_status: nx3-nx4-agx-active-ivan-standby-2026-09-06
+      ivan_standby_reason: rtx3060-6gb-cpu-moe-long-prefill-tail-latency
+      tool_status: single-auto-required-nx3-nx4-agx-live-validated-2026-09-06
+      structured_output_status: json-schema-nx3-nx4-agx-live-validated-2026-09-06
+      prefix_cache_status: exact-message-prefix-live-validated-2026-09-06
+      validation_report: /home/ai/.local/state/ai-router-acceptance/20260906-qwen36-fleet
+      model_artifact_sha256: b989da14b63b29bd469cb1fab5bd16b422ab921787569b4b2bb4fd61e26129b8
+      vision_projector_sha256: edb3295e60bff6f1d814fa96e77715964f45c9767971d2736fb71cd556809616
+      cache_policy: dedicated-single-slot-per-worker
+      cache_persistence: process-memory-only
+      fleet_config: config/qwen36-fleet.yaml
+
   - id: ai-qwen38-27b
     public_model: huihui/Qwen3.8-27B-Q4-DFlash2
     provider_model: huihui/Qwen3.8-27B-Q4-DFlash2
@@ -292,7 +382,7 @@ endpoints:
     health_url: http://agx.taild500c8.ts.net:8080/health
     load_url: http://agx.taild500c8.ts.net:8080/slots
     backend_api_key_env: AI_ROUTER_AGX_BACKEND_KEY
-    enabled: true
+    enabled: false
     auto_candidate: false
     capabilities:
       chat: true
@@ -311,6 +401,7 @@ endpoints:
       validated_at: "2026-09-04"
     quality: {}
     metadata:
+      lifecycle_status: replaced-by-qwen36-shared-fleet-2026-09-06
       context_status: live-261493-token-cold-retrieval-validated-2026-09-04
       upstream_read_timeout_seconds: 1800
       quality_status: unbenchmarked

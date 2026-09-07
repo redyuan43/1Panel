@@ -15,6 +15,232 @@ class NormalizedRequest:
     required: RequestCapabilities
 
 
+@dataclass(frozen=True)
+class WorkBuddyDynamicContextMove:
+    body: dict[str, Any]
+    moved: bool
+    moved_chars: int
+    mode: str | None = None
+
+
+_WORKBUDDY_CLIENT_ID = "workbuddy-qwen36-shared"
+_WORKBUDDY_MODEL_ID = "siyuan/qwen36-shared"
+_WORKBUDDY_DYNAMIC_START = "<workbuddy_dynamic_context>"
+_WORKBUDDY_DYNAMIC_END = "</workbuddy_dynamic_context>"
+_WORKBUDDY_MEMORY_HEADING = (
+    "# Layer 3 \u2014 Workspace Memory (read/write)"
+)
+_WORKBUDDY_MEMORY_END = "</memory_system>"
+_WORKBUDDY_MEMORY_PLACEHOLDER = (
+    "Workspace memory details are provided in the final user "
+    "dynamic context."
+)
+_WORKBUDDY_DYNAMIC_TOOL_DESCRIPTIONS = {
+    "Agent": (
+        "Delegate work to an available subagent. The current agent "
+        "catalog is provided in the final user dynamic context."
+    ),
+    "Skill": (
+        "Run an available skill. The current skill catalog is provided "
+        "in the final user dynamic context."
+    ),
+    "ToolSearch": (
+        "Search and load deferred tools. The current tool catalog is "
+        "provided in the final user dynamic context."
+    ),
+}
+
+
+def move_workbuddy_dynamic_context(
+    body: dict[str, Any],
+    api_kind: str,
+    *,
+    client_id: str,
+) -> WorkBuddyDynamicContextMove:
+    value = copy.deepcopy(body)
+    if (
+        api_kind != "chat"
+        or client_id != _WORKBUDDY_CLIENT_ID
+        or str(value.get("model", "")) != _WORKBUDDY_MODEL_ID
+    ):
+        return WorkBuddyDynamicContextMove(value, False, 0)
+    messages = value.get("messages")
+    if not isinstance(messages, list) or len(messages) < 2:
+        return WorkBuddyDynamicContextMove(value, False, 0)
+    final_message = messages[-1]
+    if (
+        not isinstance(final_message, dict)
+        or str(final_message.get("role", "")).lower() != "user"
+    ):
+        return WorkBuddyDynamicContextMove(value, False, 0)
+
+    dynamic_parts: list[str] = []
+    moved_chars = 0
+    move_mode: str | None = None
+    tagged_messages: list[
+        tuple[dict[str, Any], str, int, int]
+    ] = []
+    raw_memory_messages: list[
+        tuple[dict[str, Any], str, int, int]
+    ] = []
+    for message in messages[:-1]:
+        if (
+            not isinstance(message, dict)
+            or str(message.get("role", "")).lower() != "system"
+            or not isinstance(message.get("content"), str)
+        ):
+            continue
+        content = message["content"]
+        start = content.find(_WORKBUDDY_DYNAMIC_START)
+        end = content.find(_WORKBUDDY_DYNAMIC_END)
+        if start >= 0 or end >= 0:
+            if (
+                start < 0
+                or end < start
+                or content.count(_WORKBUDDY_DYNAMIC_START) != 1
+                or content.count(_WORKBUDDY_DYNAMIC_END) != 1
+            ):
+                return WorkBuddyDynamicContextMove(value, False, 0)
+            marker_end = end + len(_WORKBUDDY_DYNAMIC_END)
+            if content[marker_end:].strip():
+                return WorkBuddyDynamicContextMove(value, False, 0)
+            tagged_messages.append(
+                (message, content, start, marker_end)
+            )
+            continue
+
+        heading = content.find(_WORKBUDDY_MEMORY_HEADING)
+        if heading < 0:
+            continue
+        if content.count(_WORKBUDDY_MEMORY_HEADING) != 1:
+            return WorkBuddyDynamicContextMove(value, False, 0)
+        dynamic_start = heading + len(_WORKBUDDY_MEMORY_HEADING)
+        dynamic_end = content.find(
+            _WORKBUDDY_MEMORY_END,
+            dynamic_start,
+        )
+        if (
+            dynamic_end <= dynamic_start
+            or content.count(_WORKBUDDY_MEMORY_END) != 1
+        ):
+            return WorkBuddyDynamicContextMove(value, False, 0)
+        raw_memory_messages.append(
+            (message, content, dynamic_start, dynamic_end)
+        )
+
+    if tagged_messages and raw_memory_messages:
+        return WorkBuddyDynamicContextMove(value, False, 0)
+    if len(tagged_messages) > 1 or len(raw_memory_messages) > 1:
+        return WorkBuddyDynamicContextMove(value, False, 0)
+
+    if tagged_messages:
+        system_message, system_content, start, end = tagged_messages[0]
+        stable_system = system_content[:start].rstrip()
+        inner_start = start + len(_WORKBUDDY_DYNAMIC_START)
+        inner_end = end - len(_WORKBUDDY_DYNAMIC_END)
+        dynamic_value = system_content[inner_start:inner_end].strip()
+        if not stable_system or not dynamic_value:
+            return WorkBuddyDynamicContextMove(value, False, 0)
+        system_message["content"] = stable_system
+        dynamic_parts.append(dynamic_value)
+        moved_chars += len(system_content[start:end].strip())
+        move_mode = "tagged"
+    elif raw_memory_messages:
+        system_message, system_content, start, end = (
+            raw_memory_messages[0]
+        )
+        workspace_memory = system_content[start:end].strip()
+        if not workspace_memory:
+            return WorkBuddyDynamicContextMove(value, False, 0)
+        system_message["content"] = (
+            system_content[:start].rstrip()
+            + "\n\n"
+            + _WORKBUDDY_MEMORY_PLACEHOLDER
+            + "\n\n"
+            + system_content[end:]
+        )
+        dynamic_parts.append(
+            "<workbuddy_workspace_memory>\n"
+            + workspace_memory
+            + "\n</workbuddy_workspace_memory>"
+        )
+        moved_chars += len(workspace_memory)
+        move_mode = "raw_workbuddy"
+
+    tools = value.get("tools")
+    if isinstance(tools, list):
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            function = tool.get("function")
+            if not isinstance(function, dict):
+                continue
+            name = str(function.get("name", ""))
+            stable_description = (
+                _WORKBUDDY_DYNAMIC_TOOL_DESCRIPTIONS.get(name)
+            )
+            description = function.get("description")
+            if (
+                stable_description is None
+                or not isinstance(description, str)
+                or description == stable_description
+            ):
+                continue
+            dynamic_parts.append(
+                f'<workbuddy_tool_description name="{name}">\n'
+                f"{description}\n"
+                "</workbuddy_tool_description>"
+            )
+            moved_chars += len(description)
+            function["description"] = stable_description
+
+    if not dynamic_parts:
+        return WorkBuddyDynamicContextMove(value, False, 0)
+    dynamic_context = (
+        _WORKBUDDY_DYNAMIC_START
+        + "\n"
+        + "\n\n".join(dynamic_parts)
+        + "\n"
+        + _WORKBUDDY_DYNAMIC_END
+    )
+    if not _prepend_workbuddy_dynamic_context(
+        final_message,
+        dynamic_context,
+    ):
+        return WorkBuddyDynamicContextMove(
+            copy.deepcopy(body),
+            False,
+            0,
+        )
+    return WorkBuddyDynamicContextMove(
+        value,
+        True,
+        moved_chars,
+        move_mode or "dynamic_tools",
+    )
+
+
+def _prepend_workbuddy_dynamic_context(
+    message: dict[str, Any],
+    dynamic_context: str,
+) -> bool:
+    user_content = message.get("content")
+    if isinstance(user_content, str):
+        message["content"] = (
+            f"{dynamic_context}\n\n{user_content}"
+            if user_content
+            else dynamic_context
+        )
+        return True
+    if isinstance(user_content, list):
+        message["content"] = [
+            {"type": "text", "text": dynamic_context},
+            *user_content,
+        ]
+        return True
+    return False
+
+
 def normalize_request(
     body: dict[str, Any],
     api_kind: str,

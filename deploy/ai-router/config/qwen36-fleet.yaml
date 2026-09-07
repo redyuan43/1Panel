@@ -1,0 +1,93 @@
+version: 1
+model: siyuan/qwen36-shared
+revision: qwen36-ud-iq2m-mmproj-q8-v1
+
+workers:
+  - worker_id: qwen36-nx3
+    api_base: http://nx3.taild500c8.ts.net:8081/v1
+    profile_id: nx-q4-vision
+    tier: edge-small
+    priority: 10
+    context_size: 57344
+    safe_context_tokens: 57344
+    cache_type_k: q4_0
+    cache_type_v: q4_0
+    context_checkpoints: 2
+    prefill_tokens_per_second: 290
+    backend_api_key_env: AI_ROUTER_QWEN36_NX3_KEY
+    expected_model_alias: siyuan/qwen36-shared
+    expected_parameter_count: 35505251456
+    expected_quantization: IQ2_M
+    expected_model_sha256: b989da14b63b29bd469cb1fab5bd16b422ab921787569b4b2bb4fd61e26129b8
+    expected_projector_sha256: edb3295e60bff6f1d814fa96e77715964f45c9767971d2736fb71cd556809616
+    modalities: [text, image]
+    vision_status: validated
+    max_images: 1
+    names: [Jetson Orin NX]
+
+  - worker_id: qwen36-nx4
+    api_base: http://nx4.taild500c8.ts.net:8081/v1
+    profile_id: nx-q4-vision
+    tier: edge-small
+    priority: 10
+    context_size: 57344
+    safe_context_tokens: 57344
+    cache_type_k: q4_0
+    cache_type_v: q4_0
+    context_checkpoints: 2
+    prefill_tokens_per_second: 290
+    backend_api_key_env: AI_ROUTER_QWEN36_NX4_KEY
+    expected_model_alias: siyuan/qwen36-shared
+    expected_parameter_count: 35505251456
+    expected_quantization: IQ2_M
+    expected_model_sha256: b989da14b63b29bd469cb1fab5bd16b422ab921787569b4b2bb4fd61e26129b8
+    expected_projector_sha256: edb3295e60bff6f1d814fa96e77715964f45c9767971d2736fb71cd556809616
+    modalities: [text, image]
+    vision_status: validated
+    max_images: 1
+    names: [Jetson Orin NX]
+
+  - worker_id: qwen36-ivan-laptop
+    api_base: http://127.0.0.1:18888/v1
+    profile_id: large-q8-vision
+    tier: local-large
+    priority: 30
+    routing_enabled: false
+    context_size: 262144
+    safe_context_tokens: 255000
+    cache_type_k: q8_0
+    cache_type_v: q8_0
+    context_checkpoints: 2
+    prefill_tokens_per_second: 20
+    backend_api_key_env: ""
+    expected_model_alias: siyuan/qwen36-shared
+    expected_parameter_count: 35505251456
+    expected_quantization: IQ2_M
+    expected_model_sha256: b989da14b63b29bd469cb1fab5bd16b422ab921787569b4b2bb4fd61e26129b8
+    expected_projector_sha256: edb3295e60bff6f1d814fa96e77715964f45c9767971d2736fb71cd556809616
+    modalities: [text, image]
+    vision_status: validated
+    max_images: 1
+    names: [Windows 11 RTX 3060 6GB CPU MoE hybrid]
+
+  - worker_id: qwen36-agx
+    api_base: http://agx.taild500c8.ts.net:8080/v1
+    profile_id: large-q8-vision
+    tier: local-general
+    priority: 10
+    context_size: 262144
+    safe_context_tokens: 255000
+    cache_type_k: q8_0
+    cache_type_v: q8_0
+    context_checkpoints: 8
+    prefill_tokens_per_second: 775
+    backend_api_key_env: AI_ROUTER_QWEN36_AGX_KEY
+    expected_model_alias: siyuan/qwen36-shared
+    expected_parameter_count: 35505251456
+    expected_quantization: IQ2_M
+    expected_model_sha256: b989da14b63b29bd469cb1fab5bd16b422ab921787569b4b2bb4fd61e26129b8
+    expected_projector_sha256: edb3295e60bff6f1d814fa96e77715964f45c9767971d2736fb71cd556809616
+    modalities: [text, image]
+    vision_status: validated
+    max_images: 1
+    names: [Jetson AGX Orin]

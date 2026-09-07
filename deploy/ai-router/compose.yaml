@@ -24,6 +24,35 @@ x-host-service: &host-service
   network_mode: host
 
 services:
+  qwen36-fleet-adapter:
+    <<: *host-service
+    env_file:
+      - path: /opt/1panel/ai-router/qwen36-fleet.env
+        required: true
+    environment:
+      <<: *router-environment
+      AI_ROUTER_QWEN36_FLEET_CONFIG: /app/config/qwen36-fleet.yaml
+    command:
+      - uvicorn
+      - ai_router.fleet_adapter:app
+      - --no-server-header
+      - --no-access-log
+      - --host
+      - 127.0.0.1
+      - --port
+      - "18108"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:18108/v1/models', timeout=5)
+      interval: 10s
+      timeout: 6s
+      retries: 30
+
   codex-adapter:
     <<: *host-service
     environment:
@@ -130,6 +159,8 @@ services:
         condition: service_healthy
       codex-adapter:
         condition: service_started
+      qwen36-fleet-adapter:
+        condition: service_started
 
   router-api-tail:
     <<: *host-service
@@ -159,6 +190,8 @@ services:
       litellm:
         condition: service_healthy
       codex-adapter:
+        condition: service_started
+      qwen36-fleet-adapter:
         condition: service_started
 
   router-control-local:

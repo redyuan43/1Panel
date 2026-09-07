@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import time
+from dataclasses import replace
 from typing import Any
 from uuid import uuid4
 
@@ -15,6 +16,10 @@ from .errors import (
     RouterError,
 )
 from .health import HealthMonitor
+from .prefix_affinity import (
+    PrefixAffinityLocation,
+    PrefixAffinityRecord,
+)
 from .route_trace import DecisionTrace
 from .store import StateStore
 from .types import (
@@ -42,6 +47,20 @@ INCOMPATIBLE_REJECTION_REASONS = frozenset(
         "tier_downgrade",
     }
 )
+
+
+def _usable_prefix_locations(
+    endpoint: Endpoint,
+    prefix_affinity: PrefixAffinityRecord,
+) -> tuple[PrefixAffinityLocation, ...]:
+    locations = prefix_affinity.for_endpoint(endpoint.id)
+    if endpoint.metadata.get("prefix_partial_affinity_enabled") is True:
+        return locations
+    return tuple(
+        item
+        for item in locations
+        if item.match_type in {"exact", "legacy_exact"}
+    )
 
 
 class ConversationRepository:
@@ -234,7 +253,10 @@ class RoutingPolicy:
         conversation: ConversationState | None,
         excluded_endpoint_ids: set[str] | None = None,
         excluded_deployment_ids: set[str] | None = None,
+        prefix_affinity: PrefixAffinityRecord | None = None,
+        prefix_affinity_key: str | None = None,
         routing_key: str = "",
+        client_id: str = "",
         trace: DecisionTrace | None = None,
         trace_attempt: int = 1,
     ) -> RouteDecision:
@@ -291,6 +313,32 @@ class RoutingPolicy:
                 if requested_model == "auto"
                 else list(self.registry.by_public_model(requested_model))
             )
+        # Scope the pin to this authenticated request; the shared registry is immutable.
+        pin = next(
+            (
+                item
+                for item in self.settings.section("routing").get(
+                    "client_deployment_pins", []
+                )
+                if item["client_id"] == client_id
+                and item["model"] == requested_model
+            ),
+            None,
+        )
+        if pin is not None:
+            endpoints = [
+                replace(
+                    endpoint,
+                    metadata={**endpoint.metadata, "client_deployment_pin": pin},
+                )
+                for endpoint in endpoints
+                if endpoint.id == pin["endpoint_id"]
+                and endpoint.backend_type == "ai_pool"
+            ]
+            if not endpoints:
+                raise NoEligibleModelError(
+                    "the configured client deployment endpoint is outside the model scope"
+                )
         if not endpoints:
             if trace:
                 trace.record_candidate_round(
@@ -477,6 +525,7 @@ class RoutingPolicy:
                 modalities,
                 image_count,
                 routing_key,
+                prefix_affinity_key,
                 trace,
                 trace_attempt,
             )
@@ -548,6 +597,7 @@ class RoutingPolicy:
                     modalities,
                     image_count,
                     routing_key,
+                    prefix_affinity_key,
                     trace,
                     trace_attempt,
                 )
@@ -576,6 +626,115 @@ class RoutingPolicy:
                     ),
                 },
             )
+
+        if prefix_affinity and requested_model != "auto":
+            endpoint = next(
+                (
+                    item
+                    for item in candidates
+                    if (
+                        _usable_prefix_locations(
+                            item,
+                            prefix_affinity,
+                        )
+                        and item.metadata.get(
+                            "prefix_affinity_enabled"
+                        )
+                        is True
+                    )
+                ),
+                None,
+            )
+            if endpoint:
+                locations = _usable_prefix_locations(
+                    endpoint,
+                    prefix_affinity,
+                )
+                first_location = locations[0]
+                cache_reset = bool(
+                    first_location.cache_generation
+                    and endpoint.backend_type != "ai_pool"
+                    and statuses[endpoint.id].cache_generation
+                    and first_location.cache_generation
+                    != statuses[endpoint.id].cache_generation
+                )
+                decision = RouteDecision(
+                    endpoint=endpoint,
+                    requested_model=requested_model,
+                    task=evaluation.task,
+                    prompt_tokens=prompt_tokens,
+                    output_reserve_tokens=output_reserve_tokens,
+                    reason=(
+                        "prefix_cache_generation_changed"
+                        if cache_reset
+                        else "prefix_affinity"
+                    ),
+                    affinity=(
+                        "prefix-reset" if cache_reset else "prefix-hit"
+                    ),
+                    score=1.0,
+                    protocol=required.protocol,
+                    native_or_adapter=endpoint.capabilities.protocol_mode(
+                        required.protocol
+                    ),
+                    required_capabilities=required.labels(),
+                    candidate_rejections=tuple(rejections),
+                    strategy_version=strategy,
+                    route_profile=evaluation.route_profile,
+                    complexity=evaluation.complexity,
+                    context_required=context_required,
+                    prefix_affinity_key=prefix_affinity_key,
+                    prefix_affinity_deployment_id=(
+                        first_location.deployment_id
+                    ),
+                    prefix_affinity_cache_generation=(
+                        first_location.cache_generation
+                    ),
+                    prefix_affinity_locations=tuple(
+                        (
+                            item.endpoint_id,
+                            item.deployment_id,
+                            item.cache_generation,
+                            item.last_hit_at,
+                            (
+                                item.matched_tokens
+                                or item.prefix_tokens
+                                or prompt_tokens
+                            ),
+                            item.match_type,
+                        )
+                        for item in locations
+                    ),
+                    prefix_affinity_prefix_tokens=(
+                        first_location.prefix_tokens or prompt_tokens
+                    ),
+                    prefix_match_type=first_location.match_type,
+                    predicted_cached_tokens=(
+                        first_location.matched_tokens
+                        or first_location.prefix_tokens
+                        or prompt_tokens
+                    ),
+                    matched_checkpoint_tokens=(
+                        first_location.matched_tokens
+                        or first_location.prefix_tokens
+                        or prompt_tokens
+                    ),
+                    trace=trace,
+                )
+                await self._bind_traced_deployment(
+                    decision,
+                    statuses[endpoint.id],
+                    None,
+                    prompt_tokens + output_reserve_tokens,
+                    excluded_deployments,
+                    modalities,
+                    image_count,
+                    routing_key,
+                    prefix_affinity_key,
+                    trace,
+                    trace_attempt,
+                )
+                return decision
 
         remote_fallback_position = None
         selection_reason = ""
@@ -732,6 +891,7 @@ class RoutingPolicy:
                 modalities,
                 image_count,
                 routing_key,
+                prefix_affinity_key,
                 trace,
                 trace_attempt,
             )
@@ -824,6 +984,7 @@ class RoutingPolicy:
             modalities,
             image_count,
             routing_key,
+            prefix_affinity_key,
             trace,
             trace_attempt,
         )
@@ -926,9 +1087,18 @@ class RoutingPolicy:
         modalities: set[str],
         image_count: int,
         routing_key: str,
+        prefix_affinity_key: str | None,
         trace: DecisionTrace | None,
         trace_attempt: int,
     ) -> None:
+        if (
+            prefix_affinity_key
+            and decision.endpoint.metadata.get(
+                "prefix_affinity_enabled"
+            )
+            is True
+        ):
+            decision.prefix_affinity_key = prefix_affinity_key
         if trace:
             trace.record(
                 trace_attempt,
@@ -1359,6 +1529,14 @@ class RoutingPolicy:
     ) -> None:
         endpoint = decision.endpoint
         if endpoint.backend_type not in {"ai_pool", "codex_pool"}:
+            if (
+                decision.prefix_affinity_cache_generation
+                and status.cache_generation
+                and decision.prefix_affinity_cache_generation
+                != status.cache_generation
+            ):
+                decision.affinity = "prefix-reset"
+                decision.reason = "prefix_cache_generation_changed"
             decision.deployment_id = endpoint.id
             if not endpoint.cloud:
                 decision.upstream_api_base = endpoint.api_base
@@ -1409,6 +1587,7 @@ class RoutingPolicy:
                         "runtime_fingerprint": "",
                         "ready": bool(item.get("ready")),
                         "state": str(item.get("state", "unknown")),
+                        "backend_api_key_env": "",
                         "config_drift": (),
                         "short_request_rank": 0,
                         "error_code": item.get("error_code"),
@@ -1433,7 +1612,46 @@ class RoutingPolicy:
                 "the local model pool has no physical worker with sufficient context"
             )
         selected = None
-        if conversation and conversation.endpoint_id == endpoint.id:
+        available: list[PhysicalDeployment] = []
+        pin = endpoint.metadata.get("client_deployment_pin")
+        if pin is not None:
+            selected = next(
+                (
+                    item
+                    for item in workers
+                    if item.worker_id == pin["deployment_id"]
+                    and item.state in {"available", "busy", "leased"}
+                ),
+                None,
+            )
+            if selected is None:
+                raise NoEligibleModelError(
+                    f"the configured client deployment {pin['deployment_id']} "
+                    "is unavailable or incompatible with this request"
+                )
+            # Keep even a busy worker as the sole candidate for the shared queue.
+            available = [selected]
+            decision.affinity = "client-pinned"
+            decision.reason = "client_deployment_pin"
+            if (
+                decision.prefix_affinity_deployment_id != selected.worker_id
+                or (
+                    decision.prefix_affinity_cache_generation
+                    and selected.cache_generation
+                    and decision.prefix_affinity_cache_generation
+                    != selected.cache_generation
+                )
+            ):
+                decision.prefix_match_type = "none"
+                decision.predicted_cached_tokens = 0
+                decision.matched_checkpoint_tokens = 0
+                decision.prefix_affinity_deployment_id = None
+                decision.prefix_affinity_cache_generation = ""
+        if (
+            selected is None
+            and conversation
+            and conversation.endpoint_id == endpoint.id
+        ):
             selected = next(
                 (
                     item
@@ -1452,7 +1670,173 @@ class RoutingPolicy:
             ):
                 decision.affinity = "cache-reset"
                 decision.reason = "cache_generation_changed"
-        available: list[PhysicalDeployment] = []
+        if selected is None and decision.prefix_affinity_deployment_id:
+            location_values = {
+                deployment_id: (
+                    cache_generation,
+                    last_hit_at,
+                    matched_tokens,
+                    match_type,
+                )
+                for (
+                    endpoint_id,
+                    deployment_id,
+                    cache_generation,
+                    last_hit_at,
+                    matched_tokens,
+                    match_type,
+                ) in decision.prefix_affinity_locations
+                if endpoint_id == endpoint.id
+            }
+            valid_warm_workers = [
+                item
+                for item in workers
+                if (
+                    item.worker_id in location_values
+                    and item.state in {"available", "busy", "leased"}
+                    and (
+                        not location_values[item.worker_id][0]
+                        or not item.cache_generation
+                        or location_values[item.worker_id][0]
+                        == item.cache_generation
+                    )
+                )
+            ]
+            valid_warm_ids = {
+                item.worker_id for item in valid_warm_workers
+            }
+            known_location_workers = [
+                item
+                for item in workers
+                if item.worker_id in location_values
+            ]
+            available_workers = [
+                item
+                for item in workers
+                if item.state == "available"
+            ]
+            replicate_threshold = int(
+                self.settings.section("prefix_affinity").get(
+                    "replica_on_busy_min_prompt_tokens",
+                    20000,
+                )
+            )
+            available_workers.sort(
+                key=lambda item: self._estimated_prefill_key(
+                    item,
+                    prompt_tokens=decision.prompt_tokens,
+                    matched_tokens=(
+                        location_values.get(
+                            item.worker_id,
+                            ("", 0.0, 0, "none"),
+                        )[2]
+                        if item.worker_id in valid_warm_ids
+                        else 0
+                    ),
+                    routing_key=routing_key,
+                )
+            )
+            available_warm = [
+                item
+                for item in available_workers
+                if item in valid_warm_workers
+            ]
+            busy_warm = [
+                item
+                for item in valid_warm_workers
+                if item.state != "available"
+            ]
+            available_cold = [
+                item
+                for item in available_workers
+                if item.worker_id not in valid_warm_ids
+            ]
+            if (
+                not available_warm
+                and busy_warm
+                and available_cold
+                and decision.prompt_tokens >= replicate_threshold
+            ):
+                available_cold = await self._order_available_deployments(
+                    endpoint,
+                    available_cold,
+                    routing_key=routing_key,
+                    protect_recent=True,
+                )
+                selected = available_cold[0]
+                available = available_cold
+                decision.affinity = "prefix-replica"
+                decision.reason = "prefix_replica_on_busy"
+            elif available_workers and valid_warm_workers:
+                selected = available_workers[0]
+                available = available_workers
+                selected_location = location_values.get(
+                    selected.worker_id
+                )
+                if selected_location is not None:
+                    available = available_warm
+                    decision.affinity = "prefix-hit"
+                    decision.reason = "prefix_affinity"
+                    decision.prefix_match_type = selected_location[3]
+                    decision.predicted_cached_tokens = (
+                        selected_location[2]
+                    )
+                    decision.matched_checkpoint_tokens = (
+                        selected_location[2]
+                    )
+                    decision.prefix_affinity_deployment_id = (
+                        selected.worker_id
+                    )
+                    decision.prefix_affinity_cache_generation = (
+                        selected_location[0]
+                    )
+                else:
+                    decision.affinity = "prefix-bypass"
+                    decision.reason = "prefix_estimated_ttft"
+                    decision.prefix_match_type = "none"
+                    decision.predicted_cached_tokens = 0
+                    decision.matched_checkpoint_tokens = 0
+                    decision.prefix_affinity_deployment_id = None
+                    decision.prefix_affinity_cache_generation = ""
+            elif busy_warm:
+                busy_warm.sort(
+                    key=lambda item: (
+                        -location_values[item.worker_id][2],
+                        location_values[item.worker_id][1],
+                        item.short_request_rank,
+                        _deployment_hash(
+                            routing_key,
+                            item.worker_id,
+                        ),
+                        item.worker_id,
+                    )
+                )
+                selected = busy_warm[0]
+                available = busy_warm
+                selected_location = location_values[selected.worker_id]
+                decision.affinity = "prefix-hit"
+                decision.reason = "prefix_affinity"
+                decision.prefix_match_type = selected_location[3]
+                decision.predicted_cached_tokens = selected_location[2]
+                decision.matched_checkpoint_tokens = selected_location[2]
+                decision.prefix_affinity_deployment_id = (
+                    selected.worker_id
+                )
+                decision.prefix_affinity_cache_generation = (
+                    selected_location[0]
+                )
+            elif known_location_workers:
+                decision.affinity = "prefix-reset"
+                decision.reason = "prefix_cache_generation_changed"
+                decision.prefix_match_type = "none"
+                decision.predicted_cached_tokens = 0
+                decision.matched_checkpoint_tokens = 0
+            else:
+                decision.affinity = "prefix-miss"
+                decision.reason = "prefix_worker_unavailable"
+                decision.prefix_match_type = "none"
+                decision.predicted_cached_tokens = 0
+                decision.matched_checkpoint_tokens = 0
         if selected is None:
             available = [
                 item for item in workers if item.state == "available"
@@ -1465,15 +1849,23 @@ class RoutingPolicy:
                 endpoint,
                 available,
                 routing_key=routing_key,
-                protect_recent=conversation is None,
+                protect_recent=(
+                    conversation is None
+                    and not decision.prefix_affinity_key
+                ),
             )
             selected = available[0]
             if conversation and conversation.endpoint_id == endpoint.id:
                 decision.affinity = "physical-failover"
                 decision.reason = "physical_worker_unavailable"
         candidates = (
-            [selected]
-            if decision.affinity in {"hit", "cache-reset"}
+            available
+            if decision.affinity
+            in {"prefix-hit", "prefix-replica"}
+            and available
+            else [selected]
+            if decision.affinity
+            in {"hit", "cache-reset", "prefix-reset"}
             else available or [selected]
         )
         decision.deployment_candidates = tuple(
@@ -1497,6 +1889,24 @@ class RoutingPolicy:
         decision.deployment_max_images = selected.max_images
         decision.upstream_api_base = decision.deployment_candidates[0][1]
 
+    @staticmethod
+    def _estimated_prefill_key(
+        item: PhysicalDeployment,
+        *,
+        prompt_tokens: int,
+        matched_tokens: int,
+        routing_key: str,
+    ) -> tuple[float, int, int, str, str]:
+        throughput = max(float(item.prefill_tokens_per_second), 1.0)
+        remaining = max(int(prompt_tokens) - int(matched_tokens), 0)
+        return (
+            remaining / throughput,
+            item.short_request_rank,
+            item.priority,
+            _deployment_hash(routing_key, item.worker_id),
+            item.worker_id,
+        )
+
     async def _order_available_deployments(
         self,
         endpoint: Endpoint,
@@ -1505,9 +1915,12 @@ class RoutingPolicy:
         routing_key: str,
         protect_recent: bool,
     ) -> list[PhysicalDeployment]:
-        def base_key(item: PhysicalDeployment) -> tuple[int, str, str]:
+        def base_key(
+            item: PhysicalDeployment,
+        ) -> tuple[int, int, str, str]:
             return (
                 item.short_request_rank,
+                item.priority,
                 _deployment_hash(routing_key, item.worker_id),
                 item.worker_id,
             )
@@ -1787,6 +2200,9 @@ def _physical_deployment_from_status(
         ),
         ready=bool(value.get("ready")),
         state=str(value.get("state", "unknown")),
+        backend_api_key_env=str(
+            value.get("backend_api_key_env", "")
+        ),
         cache_generation=str(value.get("cache_generation", "")),
         config_drift=tuple(value.get("config_drift", ())),
         short_request_rank=(

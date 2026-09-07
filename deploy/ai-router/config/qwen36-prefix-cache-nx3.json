@@ -1,0 +1,23 @@
+{
+  "host": "0.0.0.0",
+  "port": 8081,
+  "backend_url": "http://127.0.0.1:18081",
+  "backend_unit": "nx3-qwen36.service",
+  "api_key_file": "/home/nx/.config/qwen36-shared/api-key",
+  "cache_directory": "/home/nx/.local/share/qwen36-prefix-cache",
+  "minimum_prefix_tokens": 4096,
+  "max_snapshots": 3,
+  "max_disk_bytes": 2147483648,
+  "queue_timeout": 1800,
+  "backend_timeout": 1800,
+  "expected_server_impl_sha256": "355c27b01fde70472cb42cce5d772dbae99f975e149f012c84dc7b842f7a264d",
+  "runtime_files": {
+    "model": "/home/nx/llama/Qwen3.6-35B-A3B-UD-IQ2_M.gguf",
+    "projector": "/home/nx/llama/Cerebellum-mmproj-Q8_0.gguf",
+    "server_impl": "/home/nx/llama/prefix-cache-production/lib/libllama-server-impl.so",
+    "llama": "/home/nx/llama/lib/libllama.so",
+    "common": "/home/nx/llama/lib/libllama-common.so",
+    "cuda": "/home/nx/llama/lib/libggml-cuda.so",
+    "launcher": "/home/nx/llama/prefix-cache-production/run-server.sh"
+  }
+}

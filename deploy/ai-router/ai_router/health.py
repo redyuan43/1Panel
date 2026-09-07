@@ -63,8 +63,16 @@ class HealthMonitor:
         *,
         force_refresh: bool = False,
     ) -> EndpointStatus:
-        key = f"router:health:{endpoint.id}"
         now = time.time()
+        if not endpoint.enabled and not force_refresh:
+            return EndpointStatus(
+                endpoint_id=endpoint.id,
+                healthy=False,
+                checked_at=now,
+                load_headroom=0,
+                detail={"disabled": True},
+            )
+        key = f"router:health:{endpoint.id}"
         if not force_refresh:
             cached = await self.store.get_json(key)
             if cached:
@@ -261,8 +269,16 @@ class HealthMonitor:
             root = f"http://127.0.0.1:{int(worker['port'])}"
         if not root:
             return False
+        headers = {}
+        key_env = str(worker.get("backend_api_key_env", ""))
+        api_key = os.environ.get(key_env, "") if key_env else ""
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
         try:
-            response = await self.client.get(f"{root}/slots")
+            response = await self.client.get(
+                f"{root}/slots",
+                headers=headers,
+            )
             response.raise_for_status()
             slots = response.json()
         except (httpx.HTTPError, ValueError, TypeError):
@@ -597,7 +613,16 @@ def _physical_deployment(
         runtime_fingerprint=deployment_fingerprint,
         ready=bool(worker.get("ready")),
         state=str(worker.get("state", "unknown")),
+        backend_api_key_env=str(
+            override.get(
+                "backend_api_key_env",
+                worker.get("backend_api_key_env", ""),
+            )
+        ),
         cache_generation=str(worker.get("cache_generation", "")),
+        prefill_tokens_per_second=float(
+            worker.get("prefill_tokens_per_second", 1.0)
+        ),
         config_drift=tuple(drift),
         short_request_rank=(
             profile.short_request_rank

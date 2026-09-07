@@ -22,7 +22,12 @@ def test_agx_uses_discovered_artifact_and_single_slot():
     assert value.configured_context_tokens == 262144
     assert value.safe_context_tokens == value.configured_context_tokens
     assert value.max_concurrency == 1
+    assert not value.enabled
     assert value.modalities == ("text", "image")
+    assert (
+        value.metadata["lifecycle_status"]
+        == "replaced-by-qwen36-shared-fleet-2026-09-06"
+    )
     assert value.metadata["vision_status"] == "user-enabled-live-validation-pending"
     assert value.metadata["vision_context_status"] == "unverified"
     assert not value.cloud

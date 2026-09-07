@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import replace
 import os
 from pathlib import Path
@@ -580,6 +581,90 @@ def validate_settings(value: dict[str, Any]) -> None:
     if int(affinity.get("max_priority_burst", 0)) <= 0:
         raise ValueError("affinity.max_priority_burst must be positive")
 
+    prefix_affinity = value.get("prefix_affinity", {})
+    if not isinstance(prefix_affinity, dict):
+        raise ValueError("prefix_affinity must be an object")
+    if not isinstance(prefix_affinity.get("enabled"), bool):
+        raise ValueError("prefix_affinity.enabled must be a boolean")
+    prefix_ttl = int(prefix_affinity.get("ttl_seconds", 0))
+    if not 300 <= prefix_ttl <= 604800:
+        raise ValueError(
+            "prefix_affinity.ttl_seconds must be between 300 and 604800"
+        )
+    if int(prefix_affinity.get("min_prompt_tokens", 0)) <= 0:
+        raise ValueError(
+            "prefix_affinity.min_prompt_tokens must be positive"
+        )
+    if int(prefix_affinity.get("revision", 0)) <= 0:
+        raise ValueError("prefix_affinity.revision must be positive")
+    if int(prefix_affinity.get("legacy_revision", 0)) <= 0:
+        raise ValueError(
+            "prefix_affinity.legacy_revision must be positive"
+        )
+    checkpoint_tokens = int(
+        prefix_affinity.get("checkpoint_tokens", 0)
+    )
+    if checkpoint_tokens <= 0:
+        raise ValueError(
+            "prefix_affinity.checkpoint_tokens must be positive"
+        )
+    partial_min_tokens = int(
+        prefix_affinity.get("partial_min_tokens", 0)
+    )
+    if partial_min_tokens < checkpoint_tokens:
+        raise ValueError(
+            "prefix_affinity.partial_min_tokens must be at least one "
+            "checkpoint"
+        )
+    if (
+        int(
+            prefix_affinity.get(
+                "replica_on_busy_min_prompt_tokens",
+                0,
+            )
+        )
+        <= 0
+    ):
+        raise ValueError(
+            "prefix_affinity.replica_on_busy_min_prompt_tokens "
+            "must be positive"
+        )
+    if not isinstance(
+        prefix_affinity.get("capture_templates"),
+        bool,
+    ):
+        raise ValueError(
+            "prefix_affinity.capture_templates must be a boolean"
+        )
+    template_dir = str(
+        prefix_affinity.get("template_dir", "")
+    ).strip()
+    if not template_dir or not Path(template_dir).is_absolute():
+        raise ValueError(
+            "prefix_affinity.template_dir must be an absolute path"
+        )
+    if int(prefix_affinity.get("template_min_tokens", 0)) <= 0:
+        raise ValueError(
+            "prefix_affinity.template_min_tokens must be positive"
+        )
+    template_client_ids = prefix_affinity.get(
+        "template_client_ids",
+        [],
+    )
+    if (
+        not isinstance(template_client_ids, list)
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in template_client_ids
+        )
+        or len(template_client_ids)
+        != len(set(template_client_ids))
+    ):
+        raise ValueError(
+            "prefix_affinity.template_client_ids must be a unique "
+            "string array"
+        )
+
     evaluator = value.get("evaluator", {})
     confidence = float(evaluator.get("confidence_threshold", 0))
     if not 0 <= confidence <= 1:
@@ -587,6 +672,39 @@ def validate_settings(value: dict[str, Any]) -> None:
 
     routing = value.get("routing", {})
     validate_prompt_directives(routing.get("prompt_directives", {}))
+    pins = routing.get("client_deployment_pins", [])
+    if not isinstance(pins, list):
+        raise ValueError("routing.client_deployment_pins must be an array")
+    pin_scopes: set[tuple[str, str]] = set()
+    pin_fields = {
+        "client_id", "model", "endpoint_id", "deployment_id",
+        "capacity_wait_seconds",
+    }
+    for pin in pins:
+        if not isinstance(pin, dict) or set(pin) != pin_fields:
+            raise ValueError("routing.client_deployment_pins has invalid fields")
+        for field in pin_fields - {"capacity_wait_seconds"}:
+            text = pin[field]
+            if not isinstance(text, str) or not text.strip() or text != text.strip():
+                raise ValueError(
+                    "routing.client_deployment_pins requires nonempty strings"
+                )
+        if pin["model"] == "auto":
+            raise ValueError("routing.client_deployment_pins requires an explicit model")
+        scope = (pin["client_id"], pin["model"])
+        if scope in pin_scopes:
+            raise ValueError("routing.client_deployment_pins scopes must be unique")
+        pin_scopes.add(scope)
+        wait = pin["capacity_wait_seconds"]
+        if (
+            isinstance(wait, bool)
+            or not isinstance(wait, (int, float))
+            or not math.isfinite(wait)
+            or not 0 < wait <= 3600
+        ):
+            raise ValueError(
+                "routing.client_deployment_pins wait must be between 0 and 3600 seconds"
+            )
     strategy = str(routing.get("strategy", "legacy_v1"))
     if strategy not in {"legacy_v1", "intelligent_v2"}:
         raise ValueError(

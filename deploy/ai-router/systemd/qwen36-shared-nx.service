@@ -1,0 +1,18 @@
+[Unit]
+Description=Qwen3.6 35B A3B shared multimodal worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-%h/.config/qwen36-shared/runtime.env
+ExecStart=%h/llama/run-qwen36-shared-nx.sh
+Restart=on-failure
+RestartSec=15
+TimeoutStartSec=300
+TimeoutStopSec=60
+KillMode=mixed
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=default.target
