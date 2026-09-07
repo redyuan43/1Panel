@@ -124,6 +124,10 @@ class TrainingArchive:
             endpoint_id=str(route.get("endpoint_id", "")),
         )
 
+    async def record_pipeline(self, token, pipeline):
+        if token:
+            await self._merge(token, lambda payload: payload.update(pipeline=pipeline))
+
     async def set_effective_context(
         self,
         token: str | None,

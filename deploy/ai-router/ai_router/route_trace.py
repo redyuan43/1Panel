@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Registry, Settings
+from .cache_audit import initialize as initialize_cache_audit
 
 
 SCHEMA_VERSION = 3
@@ -148,7 +149,7 @@ GRAPH_EDGES: tuple[dict[str, str], ...] = (
     {"id": "e-context-failed", "from": "context_formula", "to": "failed", "label": "无模型满足"},
     {"id": "e-scope-affinity", "from": "candidate_scope", "to": "conversation_affinity", "label": "有合格候选"},
     {"id": "e-scope-failed", "from": "candidate_scope", "to": "failed", "label": "无合格候选"},
-    {"id": "e-affinity-deploy", "from": "conversation_affinity", "to": "deployment_binding", "label": "命中"},
+    {"id": "e-affinity-deploy", "from": "conversation_affinity", "to": "deployment_binding", "label": "沿用会话路由"},
     {"id": "e-affinity-explicit", "from": "conversation_affinity", "to": "explicit_selection", "label": "显式未命中"},
     {"id": "e-affinity-local", "from": "conversation_affinity", "to": "local_sufficiency", "label": "intelligent_v2"},
     {"id": "e-affinity-legacy", "from": "conversation_affinity", "to": "provider_priority", "label": "legacy_v1"},
@@ -1362,6 +1363,7 @@ class RouteTraceStore:
 
     def _initialize(self) -> None:
         with self._connect(initialize=True) as connection:
+            initialize_cache_audit(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS route_traces (
@@ -2088,6 +2090,7 @@ class RouteTraceStore:
     def _cleanup(self) -> int:
         cutoff = time.time() - self.retention_days * 86400
         with self._connect() as connection:
+            connection.execute("DELETE FROM cache_operations WHERE updated_at < ?", (cutoff,))
             request_ids = [
                 str(item["request_id"])
                 for item in connection.execute(

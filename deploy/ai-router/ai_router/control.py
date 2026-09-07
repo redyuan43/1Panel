@@ -3,6 +3,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+import asyncio
+import os
+import sqlite3
+from urllib.parse import quote
+from .cache_audit import CacheAudit
+from .content_audit import ArchiveReader
 import time
 from typing import Any, AsyncIterator
 
@@ -582,7 +588,9 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             privacy_decision=privacy_decision,
             auto_models=("auto", str(current.settings.section("identity").get("public_model_id") or "siyuan/auto")),
         )
+        cache_rows = await CacheAudit(current.route_traces.database_path).for_requests([x["request_id"] for x in payload["items"]])
         for item in payload["items"]:
+            item["cache_audit"] = cache_rows.get(item["request_id"])
             item["node"] = (
                 item.get("node")
                 or endpoint_nodes.get(item.get("endpoint_id"))
@@ -593,6 +601,77 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 or endpoint_nodes.get(summary.get("latest_endpoint_id"))
             )
         return payload
+
+    @app.get("/api/cache/summary")
+    async def cache_summary(request: Request, since: float | None = None, until: float | None = None,
+                            client_id: str | None = None, device: str | None = None, client_group: str | None = None,
+                            model: str | None = None, conversation_id: str | None = None,
+                            status: str | None = None, event: str | None = None):
+        current = _authorized_runtime(request)
+        result = await CacheAudit(current.route_traces.database_path).query(
+            since=since, until=until, client_id=client_id, device=device, model=model, client_group=client_group,
+            conversation_id=conversation_id, status=status, event=event)
+        return CacheAudit.summarize(result)
+
+    @app.get("/api/cache/requests")
+    async def cache_requests(request: Request, since: float | None = None, until: float | None = None,
+                             client_id: str | None = None, device: str | None = None, client_group: str | None = None,
+                             model: str | None = None, conversation_id: str | None = None,
+                             status: str | None = None, event: str | None = None,
+                             offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=100)):
+        current = _authorized_runtime(request)
+        result = await CacheAudit(current.route_traces.database_path).query(
+            since=since, until=until, client_id=client_id, device=device, model=model, client_group=client_group,
+            conversation_id=conversation_id, status=status, event=event)
+        result["items"] = result["items"][offset:offset+limit]
+        result["next_offset"] = offset+limit if offset+limit < result["total"] else None
+        return result
+
+    @app.get("/api/route-traces/{request_id}/content")
+    async def trace_content(request: Request, request_id: str, stage: str | None = None,
+                            offset: int = Query(default=0, ge=0), limit: int = Query(default=16384, ge=1, le=65536)):
+        current = _authorized_runtime(request)
+        if not await current.route_traces.get(request_id):
+            raise RouterError("request not found", status_code=404, code="route_trace_not_found")
+        def read():
+            reader = ArchiveReader(os.environ.get("AI_ROUTER_TRAINING_DB_PATH", "/training/conversations.sqlite3"),
+                                   os.environ.get("AI_ROUTER_TRAINING_KEY_PATH", "/training/training.key"))
+            return reader.content(request_id, stage, offset, limit)
+        try:
+            value = await asyncio.to_thread(read)
+        except KeyError:
+            raise RouterError("stage not available", status_code=404, code="content_stage_not_found")
+        except sqlite3.OperationalError:
+            # A WAL database may have no -wal/-shm files after the last writer
+            # disconnects. A read-only bind mount cannot create these sidecars.
+            # Read through an authenticated local API using the same mode=ro
+            # reader; never use immutable=1 against a live changing database.
+            value = None
+            client = getattr(current, "internal_client", None)
+            bases = ["http://127.0.0.1:4000"]
+            if os.environ.get("AI_ROUTER_TAILSCALE_IP"):
+                bases.append("http://" + os.environ["AI_ROUTER_TAILSCALE_IP"] + ":4000")
+            if client:
+                for base in bases:
+                    try:
+                        response = await client.get(base + "/internal/request-content/" + quote(request_id, safe=""),
+                            params={"offset": offset, "limit": limit, **({"stage": stage} if stage else {})},
+                            headers={"Authorization": request.headers.get("authorization", "")}, timeout=5)
+                    except Exception:
+                        continue
+                    if response.status_code == 200:
+                        value = response.json()
+                        break
+                    if response.status_code == 404:
+                        raise RouterError("content or stage not archived", status_code=404, code="content_not_archived")
+            if value is None:
+                raise RouterError("encrypted archive is unavailable", status_code=503, code="content_archive_unavailable")
+        except Exception:
+            raise RouterError("encrypted archive is unavailable", status_code=503, code="content_archive_unavailable")
+        if value is None:
+            raise RouterError("content was not archived", status_code=404, code="content_not_archived")
+        current.audit.write("admin_content_viewed", request_id=request_id, stage=stage, offset=offset)
+        return JSONResponse(value, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
     @app.get("/api/route-traces/{request_id}")
     async def route_trace(
@@ -607,6 +686,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 status_code=404,
                 code="route_trace_not_found",
             )
+        value["cache_audit"] = await CacheAudit(current.route_traces.database_path).detail(value)
         return {"trace": value}
 
     @app.post("/api/route-traces/{request_id}/privacy-feedback")

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from .content_audit import ContentObservation, ArchiveReader
+from .cache_audit import TelemetryCollector, OutputClock
+
 import asyncio
 import json
 import os
@@ -10,7 +13,7 @@ from typing import Any, AsyncIterator, Awaitable
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
@@ -187,6 +190,27 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             {},
         )
         return {"ok": True, "instance": current_state}
+
+    @app.get("/internal/request-content/{request_id}")
+    async def internal_request_content(request: Request, request_id: str, stage: str | None = None,
+                                       offset: int = Query(default=0, ge=0), limit: int = Query(default=16384, ge=1, le=65536)):
+        current = _runtime(request)
+        current.auth.authenticate_admin(request.headers.get("authorization"))
+        if not await current.route_traces.get(request_id):
+            raise RouterError("request not found", status_code=404, code="route_trace_not_found")
+        def read():
+            return ArchiveReader(os.environ.get("AI_ROUTER_TRAINING_DB_PATH", "/training/conversations.sqlite3"),
+                                 os.environ.get("AI_ROUTER_TRAINING_KEY_PATH", "/training/training.key")).content(request_id, stage, offset, limit)
+        try:
+            value = await asyncio.to_thread(read)
+        except KeyError:
+            raise RouterError("stage not available", status_code=404, code="content_stage_not_found")
+        except Exception:
+            raise RouterError("encrypted archive is unavailable", status_code=503, code="content_archive_unavailable")
+        if value is None:
+            raise RouterError("content was not archived", status_code=404, code="content_not_archived")
+        current.audit.write("admin_content_read_internal", request_id=request_id, stage=stage, offset=offset)
+        return JSONResponse(value, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
     @app.get("/internal/training/status")
     async def internal_training_status(request: Request) -> dict[str, Any]:
@@ -613,6 +637,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         authenticated.policy.disclosure_mode,
     )
     request.state.identity_profile = identity
+    observation = ContentObservation()
+    observation.capture("received", body)
+    request.state.content_observation = observation
     prompt_directive_settings = current.settings.section("routing").get(
         "prompt_directives",
         {},
@@ -623,6 +650,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         prompt_directive_settings,
     )
     body = prompt_directive_result.body
+    observation.capture("after_directives", body)
     received_body = json.loads(json.dumps(body))
     trace = DecisionTrace(
         request_id=request_id,
@@ -674,7 +702,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         api_kind,
         client_id=authenticated.policy.id,
     )
+    before_reorder = body
     body = dynamic_context_move.body
+    observation.check_workbuddy(before_reorder, body, dynamic_context_move)
+    observation.capture("workbuddy_reordered", body)
+    trace.payload["observation"] = {"content": observation.metadata()}
     if dynamic_context_move.skip_reason != "not_applicable":
         current.audit.write(
             "workbuddy_dynamic_context_moved" if dynamic_context_move.moved
@@ -793,6 +825,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         await _finish_trace_exception(current, trace, exc)
         raise
+    request.state.training_token = training_token
     parallel_acquired = False
     stream_owned = False
     request_tracked = False
@@ -835,6 +868,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             api_kind,
         )
         effective_body = normalized_effective.body
+        observation.capture("effective", effective_body)
+        trace.payload["observation"]["content"] = observation.metadata()
         tool_history_repairs += normalized_effective.repairs
         required_capabilities = normalized_effective.required
         if current.training is not None:
@@ -2889,6 +2924,19 @@ async def _send_upstream(
             write=timeout.write,
             pool=timeout.pool,
         )
+    operation_id = uuid4().hex
+    headers["X-1Panel-Operation-ID"] = operation_id
+    headers["X-1Panel-Attempt"] = str(decision.attempts)
+    headers["X-1Panel-Operation-Kind"] = "foreground"
+    observation = getattr(request.state, "content_observation", None)
+    if observation:
+        observation.capture("forwarded_" + str(decision.attempts), payload)
+        if decision.trace:
+            decision.trace.payload.setdefault("observation", {})["content"] = observation.metadata()
+            decision.trace.payload["observation"]["queue_wait_ms"] = decision.queue_wait_ms
+            await _save_request_trace(current, decision.trace)
+        if current.training:
+            await current.training.record_pipeline(getattr(request.state, "training_token", None), observation.archive())
     upstream_request = current.internal_client.build_request(
         "POST",
         url,
@@ -2896,7 +2944,14 @@ async def _send_upstream(
         json=payload,
         timeout=timeout,
     )
-    return await current.internal_client.send(upstream_request, stream=True)
+    response = await current.internal_client.send(upstream_request, stream=True)
+    if direct and response.headers.get("X-Prefix-Telemetry") == "1":
+        if not getattr(current, "cache_collector", None):
+            current.cache_collector = TelemetryCollector(current)
+        current.cache_collector.collect(base_url=base_url, key=api_key,
+            request_id=headers["X-Request-ID"], operation_id=operation_id,
+            attempt=decision.attempts, deployment_id=decision.deployment_id or decision.endpoint.id)
+    return response
 
 
 def _mirror_responses_format(payload: dict[str, Any]) -> None:
@@ -3716,6 +3771,7 @@ async def _stream_response(
     await resource_finalizer.begin_stream()
     accumulator = SSEAccumulator(api_kind)
     private_accumulator = SSEAccumulator(api_kind)
+    output_clock = OutputClock(api_kind, started_at)
     sanitizer = IdentityStreamSanitizer(
         api_kind,
         identity,
@@ -3740,6 +3796,9 @@ async def _stream_response(
             batch_completed = False
             for public_chunk in sanitizer.feed(chunk):
                 accumulator.feed(public_chunk)
+                output_clock.feed(public_chunk)
+                if decision.trace:
+                    decision.trace.payload.setdefault("observation", {}).update(output_clock.values)
                 yield public_chunk
                 if accumulator.completed:
                     batch_completed = True
@@ -3938,7 +3997,11 @@ async def _audit(
         cached_prompt_tokens_fallback=cached_prompt_tokens_fallback,
         prompt_tokens_fallback=decision.prompt_tokens,
     )
+    explicit_cached, _ = _cache_metrics(response_payload, usage, prompt_tokens_fallback=decision.prompt_tokens)
+    cache_measurement_source = "upstream_usage" if explicit_cached is not None else "backend_counter_delta" if cached_prompt_tokens_fallback is not None else "unavailable"
     decision.actual_cached_tokens = cached_prompt_tokens
+    if decision.trace:
+        decision.trace.payload.setdefault("observation", {})["queue_wait_ms"] = decision.queue_wait_ms
     prefix_prediction_error_tokens = (
         abs(
             decision.predicted_cached_tokens
@@ -3963,6 +4026,7 @@ async def _audit(
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
                 "cached_prompt_tokens": cached_prompt_tokens,
+                "cache_measurement_source": cache_measurement_source,
                 "cache_hit_ratio": cache_hit_ratio,
                 "prefix_match_type": decision.prefix_match_type,
                 "predicted_cached_tokens": (

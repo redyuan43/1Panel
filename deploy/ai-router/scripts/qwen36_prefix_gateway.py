@@ -5,10 +5,12 @@ Request bodies are forwarded unchanged. Only text requests with an unambiguous
 last-user boundary use snapshots; all other requests retain native behavior.
 """
 import argparse
+from collections import OrderedDict
 import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 from pathlib import Path
@@ -27,6 +29,10 @@ SNAPSHOT_NAME = re.compile(r"prefix-[0-9a-f]{32}\.bin(?:\.draft|\.checkpoints)?"
 
 def encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def measured_number(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
 
 
 def digest(data):
@@ -60,6 +66,39 @@ def atomic_json(path, value):
         tmp.unlink(missing_ok=True)
 
 
+class TelemetryRing:
+    def __init__(self, max_records=1024, ttl=1800, max_bytes=8*1024**2):
+        self.max_records, self.ttl, self.max_bytes = max_records, ttl, max_bytes
+        self.lock = threading.Lock()
+        self.entries = OrderedDict()
+        self.bytes = 0
+
+    def _prune(self):
+        now = time.monotonic()
+        while self.entries:
+            key, (at, raw) = next(iter(self.entries.items()))
+            if now-at <= self.ttl and len(self.entries) <= self.max_records and self.bytes <= self.max_bytes:
+                break
+            self.entries.pop(key)
+            self.bytes -= len(raw)
+
+    def put(self, value):
+        raw = encode(value)
+        if len(raw) > self.max_bytes: return
+        with self.lock:
+            old = self.entries.pop(value["operation_id"], None)
+            if old: self.bytes -= len(old[1])
+            self.entries[value["operation_id"]] = (time.monotonic(), raw)
+            self.bytes += len(raw)
+            self._prune()
+
+    def get(self, key):
+        with self.lock:
+            self._prune()
+            entry = self.entries.get(key)
+            return json.loads(entry[1]) if entry else None
+
+
 class PrefixCache:
     def __init__(self, config):
         self.config = config
@@ -71,6 +110,7 @@ class PrefixCache:
             directory.chmod(0o700)
         self.key = Path(config["api_key_file"]).read_text().strip()
         self.lock = threading.Lock()
+        self.telemetry = TelemetryRing()
         self.active = None
         self.pid = None
         self.fingerprint = None
@@ -218,18 +258,21 @@ class PrefixCache:
             if SNAPSHOT_NAME.fullmatch(path.name) and path.name not in referenced:
                 path.unlink(missing_ok=True)
 
-    def prepare(self, body, *, invalidate_on_bypass=True):
+    def prepare(self, body, *, invalidate_on_bypass=True, observe=None):
         started = time.monotonic()
+        emit = observe or (lambda **kwargs: None)
+        emit(stage="template")
         runtime = self.runtime()
         tokens = self.prefix(body)
+        template_ms = (time.monotonic()-started)*1000
         if tokens is None:
             # A prepare-only bypass never forwards inference or changes the slot.
             # Keep newer live state instead of forcing a later disk restoration.
             if invalidate_on_bypass:
                 self.active = None
-            return {"event": "bypass", "seconds": time.monotonic() - started, "prime_tokens": 0}
+            return {"event": "bypass", "seconds": time.monotonic() - started, "template_ms": template_ms, "prime_tokens": 0}
         key = digest(encode(tokens))
-        result = {"prefix_sha256": key, "fixed_tokens": len(tokens), "prime_tokens": 0}
+        result = {"prefix_sha256": key, "fixed_tokens": len(tokens), "prime_tokens": 0, "template_ms": template_ms}
         if self.active == (key, runtime):
             return {**result, "event": "hot", "seconds": time.monotonic() - started}
         self.active = None
@@ -237,9 +280,12 @@ class PrefixCache:
         restore_attempted = False
         if path.exists():
             try:
+                emit(stage="restore")
+                restore_started = time.monotonic()
                 manifest = self.validate(path, key, tokens, runtime)
                 restore_attempted = True
                 self.post("/slots/0?action=restore", {"filename": manifest["files"][0]["name"]})
+                result["restore_ms"] = (time.monotonic()-restore_started)*1000
                 self.active = (key, runtime)
                 os.utime(path, None)
                 return {**result, "event": "disk", "seconds": time.monotonic() - started}
@@ -247,6 +293,8 @@ class PrefixCache:
                 if isinstance(error, urllib.error.HTTPError) and error.code not in (400, 404):
                     raise
                 LOG.warning("cache_miss prefix=%s reason=%s", key, str(error) if isinstance(error, ValueError) else type(error).__name__)
+                result["restore_ms"] = (time.monotonic()-restore_started)*1000
+                result["restore_error"] = type(error).__name__
                 # Remove only this manifest; old immutable data is pruned below.
                 path.unlink(missing_ok=True)
                 # A rejected restore may have loaded only part of target/draft state.
@@ -255,9 +303,15 @@ class PrefixCache:
                     self.post("/slots/0?action=erase", {})
         # A new snapshot key is not a native cache miss. Keep the live sequence
         # so llama.cpp can match actual tokens and restore its own checkpoint.
+        emit(stage="prime")
+        prime_started = time.monotonic()
         primed = self.post("/completion", {"prompt": tokens, "n_predict": 0, "cache_prompt": True, "stream": False})
-        result["prime_tokens"] = primed.get("timings", {}).get("prompt_n", len(tokens))
-        result["reused_tokens"] = primed.get("timings", {}).get("cache_n", 0)
+        result["prime_tokens"] = measured_number(primed.get("timings", {}).get("prompt_n"))
+        result["prime_ms"] = (time.monotonic()-prime_started)*1000
+        result["prime_native_ms"] = measured_number(primed.get("timings", {}).get("prompt_ms"))
+        result["reused_tokens"] = measured_number(primed.get("timings", {}).get("cache_n"))
+        emit(stage="save", cache=result)
+        save_started = time.monotonic()
         name = "prefix-" + uuid.uuid4().hex + ".bin"
         try:
             saved = self.post("/slots/0?action=save", {"filename": name})
@@ -279,6 +333,7 @@ class PrefixCache:
                 (self.data / (name + suffix)).unlink(missing_ok=True)
             self.prune(None)
             event = "miss_memory_only"
+        result["save_ms"] = (time.monotonic()-save_started)*1000
         self.active = (key, runtime)
         return {**result, "event": event, "seconds": time.monotonic() - started}
 
@@ -310,6 +365,20 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/health" and not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + cache.key):
             self.error_json(401, "unauthorized")
             return
+        if self.command == "GET" and self.path.startswith("/cache/telemetry/"):
+            operation = self.path.removeprefix("/cache/telemetry/")
+            value = cache.telemetry.get(operation)
+            if value is None:
+                self.error_json(404, "telemetry_not_available")
+            else:
+                output = encode(value)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(output)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(output)
+            return
         started = time.monotonic()
         raw = None
         if self.command == "POST":
@@ -340,10 +409,32 @@ class Handler(BaseHTTPRequestHandler):
         usage = None
         timing = None
         first = None
+        first_text = None
+        json_buffer = bytearray()
+        operation_id = self.headers.get("X-1Panel-Operation-ID", "")
+        if not re.fullmatch(r"[0-9a-f]{32}", operation_id): operation_id = uuid.uuid4().hex
+        request_id = self.headers.get("X-Request-ID", "")
+        if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request_id): request_id = None
+        attempt = self.headers.get("X-1Panel-Attempt", "1")
+        attempt = int(attempt) if attempt.isdigit() and len(attempt) < 5 else 1
+        event = {"operation_id": operation_id, "request_id": request_id, "attempt": attempt,
+                 "kind": "prewarm" if self.path.split("?")[0] == "/cache/prepare" else "foreground",
+                 "stage": "queue", "terminal": False, "status": "running"}
+        def publish(**fields):
+            event.update(fields)
+            event["elapsed_ms"] = (time.monotonic()-started)*1000
+            if not readonly:
+                try:
+                    cache.telemetry.put(event)
+                except Exception as error:
+                    LOG.warning("telemetry_unavailable type=%s", type(error).__name__)
+        publish()
         try:
             if not readonly:
                 locked = cache.lock.acquire(timeout=0 if self.path.split("?")[0] == "/cache/prepare" else cache.config.get("queue_timeout", 1800))
+                publish(queue_ms=(time.monotonic()-started)*1000)
                 if not locked:
+                    publish(status="failed", error="cache_worker_busy")
                     self.error_json(503, "cache_worker_busy")
                     return
                 if self.path.split("?")[0] in {"/v1/chat/completions", "/chat/completions", "/cache/prepare"}:
@@ -356,12 +447,14 @@ class Handler(BaseHTTPRequestHandler):
                         self.error_json(400, "request_body_must_be_object")
                         return
                     prepared = cache.prepare(
-                        body, invalidate_on_bypass=self.path.split("?")[0] != "/cache/prepare",
+                        body, invalidate_on_bypass=self.path.split("?")[0] != "/cache/prepare", observe=publish,
                     )
+                    publish(stage="prefill", cache=prepared)
                     LOG.info("cache_prepare %s", encode(prepared).decode())
                     if self.path.split("?")[0] == "/cache/prepare":
                         output = encode(prepared)
                         self.send_response(200)
+                        self.send_header("X-Prefix-Telemetry", "1")
                         self.send_header("Content-Type", "application/json")
                         self.send_header("Content-Length", str(len(output)))
                         self.send_header("Connection", "close")
@@ -383,6 +476,7 @@ class Handler(BaseHTTPRequestHandler):
                     if name.lower() not in HOP:
                         self.send_header(name, value)
                 self.send_header("Connection", "close")
+                self.send_header("X-Prefix-Telemetry", "1")
                 self.send_header("X-Prefix-Cache", prepared["event"])
                 self.end_headers()
                 sent = True
@@ -392,6 +486,8 @@ class Handler(BaseHTTPRequestHandler):
                     block = response.readline() if sse else response.read(64 * 1024)
                     if not block:
                         break
+                    if not sse and len(json_buffer) <= 4*1024**2:
+                        json_buffer.extend(block)
                     if sse and block.startswith(b"data:") and block[5:].strip() != b"[DONE]":
                         try:
                             value = json.loads(block[5:])
@@ -401,25 +497,49 @@ class Handler(BaseHTTPRequestHandler):
                                 timing = value["timings"] or timing
                             if first is None and any(any((choice.get("delta") or {}).get(k) for k in ("content", "reasoning_content", "reasoning", "tool_calls")) for choice in value.get("choices", [])):
                                 first = time.monotonic() - started
+                                publish(stage="output", ttft_ms=first*1000)
+                            if first_text is None and any((choice.get("delta") or {}).get("content") for choice in value.get("choices", [])):
+                                first_text = time.monotonic() - started
+                                publish(first_text_ms=first_text*1000)
                         except (ValueError, AttributeError, TypeError):
                             pass
                     self.wfile.write(block)
                     self.wfile.flush()
+                if not sse and len(json_buffer) <= 4*1024**2:
+                    try:
+                        value = json.loads(json_buffer)
+                        usage = value.get("usage") if isinstance(value.get("usage"), dict) else None
+                        timing = value.get("timings") if isinstance(value.get("timings"), dict) else None
+                    except (ValueError, AttributeError):
+                        pass
+                publish(status="failed" if response.status >= 400 else "completed", status_code=response.status)
                 if response.status >= 400:
                     cache.active = None
         except (BrokenPipeError, ConnectionResetError):
             cache.active = None
+            publish(status="interrupted", error="client_disconnected")
             LOG.warning("client_disconnected")
         except Exception as error:
             cache.active = None
+            publish(status="failed", error=type(error).__name__)
             LOG.error("request_failed type=%s", type(error).__name__)
             if not sent:
                 self.error_json(502, "cache_backend_unavailable")
         finally:
-            if locked:
-                cache.lock.release()
+            total_prefill = None
+            try:
+                safe_timing = {k: v for k,v in (timing or {}).items() if k in {"cache_n", "prompt_n", "prompt_ms", "prompt_per_second", "predicted_n", "predicted_ms", "predicted_per_second"} and measured_number(v) is not None}
+                work = measured_number(prepared.get("prime_tokens"))
+                prompt_n = safe_timing.get("prompt_n")
+                total_prefill = work + prompt_n if work is not None and prompt_n is not None else None
+                publish(terminal=True, stage="finished", cache=prepared, timings=safe_timing,
+                        total_prefill_tokens=total_prefill,
+                        status=event["status"] if event["status"] != "running" else ("completed" if sent else "failed"))
+            finally:
+                if locked:
+                    cache.lock.release()
             if not readonly:
-                LOG.info("request_finished %s", encode({"request_sha256": digest(raw or b""), "cache": prepared, "ttft_seconds": first, "total_seconds": time.monotonic() - started, "usage": usage, "timings": timing, "total_prefill_tokens": prepared.get("prime_tokens", 0) + (timing or {}).get("prompt_n", 0)}).decode())
+                LOG.info("request_finished %s", encode({"request_sha256": digest(raw or b""), "cache": prepared, "ttft_seconds": first, "total_seconds": time.monotonic() - started, "usage": usage, "timings": timing, "total_prefill_tokens": total_prefill}).decode())
 
 
 def main():

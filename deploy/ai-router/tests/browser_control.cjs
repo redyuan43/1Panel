@@ -33,6 +33,10 @@ async function run() {
   const selectTrace = async id => {
     await page.locator(`#trace-list [data-trace-id="${id}"]`).click();
     await page.waitForFunction(value => state.selectedTrace?.request_id === value, id);
+    await page.evaluate(async () => {
+      if (cacheView.stage !== 'routing') await selectPipelineStage('routing');
+      document.querySelectorAll('#trace-detail > details').forEach(x => { x.open = true; });
+    });
   };
   try {
     page = await browser.newPage({viewport: {width: 1440, height: 1000}});
@@ -106,6 +110,7 @@ async function run() {
       await page.unroute('**/api/route-traces/preview-local');
     });
     await check('simple and detailed graph modes and cached labels', async () => {
+      await page.evaluate(async () => {if(cacheView.stage !== 'routing') await selectPipelineStage('routing');});
       await page.locator('#trace-graph-mode-detailed').click();
       await graphReady(17);
       await page.locator('#trace-graph-mode-simple').click();
@@ -280,6 +285,7 @@ async function run() {
       assert.equal((await saved).status(), 200);
       assert.equal(await page.evaluate(() => state.settings.routing.prompt_directives.revision), revision + 1);
       assert.equal(await page.evaluate(() => state.settings.routing.prompt_directives.routes.beichen.generation), generation + 1);
+      await page.waitForFunction(() => !document.querySelector("#settings-form button[type=submit]").disabled);
     });
     await check('strategy branches and fallback-order controls', async () => {
       await page.locator('#routing-strategy').selectOption('legacy_v1');

@@ -258,6 +258,29 @@
       </section>
 
       <section id="audit-view" class="view">
+        <div class="audit-subviews" role="group" aria-label="审计视图">
+          <button class="secondary" type="button" data-audit-view="overview">统计总览</button>
+          <button class="secondary active" type="button" data-audit-view="conversation">会话详情</button>
+        </div>
+        <section id="cache-overview" class="section-block" hidden>
+          <form id="cache-filter-form" class="cache-filters">
+            <label>时间范围<select id="cache-hours"><option value="1">最近 1 小时</option><option value="24" selected>最近 24 小时</option><option value="168">最近 7 天</option><option value="720">最近 30 天</option></select></label>
+            <label>客户端范围<select id="cache-client-group"><option value="workbuddy">WorkBuddy 全部账号</option><option value="">全部客户端</option></select></label><label>指定账号<input id="cache-client" placeholder="可留空，或指定账号 ID"></label>
+            <label>设备<input id="cache-device" placeholder="全部设备"></label>
+            <label>模型<input id="cache-model" placeholder="全部模型"></label>
+            <label>会话 ID<input id="cache-conversation" placeholder="全部会话"></label>
+            <label>状态<select id="cache-status"><option value="">全部</option><option value="succeeded">成功</option><option value="running">运行中</option><option value="failed">失败</option><option value="interrupted">中断</option></select></label>
+            <label>缓存状态<select id="cache-event"><option value="">全部</option><option value="hot">内存可用</option><option value="disk">磁盘恢复</option><option value="miss_saved">计算后保存</option><option value="miss_memory_only">计算后保留内存</option><option value="bypass">未使用快照</option></select></label>
+            <button type="submit">筛选</button><button id="cache-refresh" type="button" class="secondary">刷新</button>
+          </form>
+          <p id="cache-overview-state" class="section-meta">准备加载统计</p>
+          <div id="cache-metrics" class="cache-metrics"></div>
+          <p class="section-meta">耗时与复用统计仅使用成功请求的有效样本。净复用扣除本请求准备阶段重算；固定前缀复用达到 95% 才计入达标。没有冷请求对照时不推算节省时间。</p>
+          <div id="cache-trend" class="cache-trend"></div>
+          <div class="cache-table-wrap"><table><thead><tr><th>请求 / 时间</th><th>设备 / 模型</th><th>状态</th><th>缓存 / 净复用</th><th>本次尝试重算</th><th>Router 排队</th><th>首个输出</th></tr></thead><tbody id="cache-request-rows"></tbody></table></div>
+          <div class="cache-paging"><button id="cache-prev" type="button" class="secondary">上一页</button><span id="cache-page-state"></span><button id="cache-next" type="button" class="secondary">下一页</button></div>
+        </section>
+        <div id="audit-conversation">
         <section class="section-block first audit-section">
           <div class="audit-toolbar">
             <div class="audit-filters">
@@ -266,7 +289,7 @@
                 <select id="trace-mode-filter">
                   <option value="auto">Auto</option>
                   <option value="explicit">显式模型</option>
-                  <option value="all">全部请求</option>
+                  <option value="all" selected>全部请求</option>
                 </select>
               </label>
               <label>
@@ -363,19 +386,7 @@
                     <div id="trace-detail-meta" class="trace-detail-meta"></div>
                     <div id="trace-routing-state" class="trace-routing-state" hidden></div>
                   </div>
-                  <div class="trace-graph-controls" aria-label="流程图控制">
-                    <div class="trace-graph-mode" role="group" aria-label="流程图详细程度">
-                      <button id="trace-graph-mode-simple" type="button" class="active">简明</button>
-                      <button id="trace-graph-mode-detailed" type="button">详细</button>
-                    </div>
-                    <button id="trace-pan-left" class="secondary icon-control" type="button" title="向左查看" aria-label="向左查看">‹</button>
-                    <button id="trace-zoom-out" class="secondary icon-control" type="button" title="缩小" aria-label="缩小">−</button>
-                    <button id="trace-fit" class="secondary icon-control" type="button" title="适应画布" aria-label="适应画布">↔</button>
-                    <button id="trace-zoom-in" class="secondary icon-control" type="button" title="放大" aria-label="放大">+</button>
-                    <button id="trace-current" class="secondary icon-control" type="button" title="定位最终节点" aria-label="定位最终节点">◎</button>
-                    <button id="trace-fullscreen" class="secondary icon-control" type="button" title="全屏查看" aria-label="全屏查看">⛶</button>
-                    <button id="trace-pan-right" class="secondary icon-control" type="button" title="向右查看" aria-label="向右查看">›</button>
-                  </div>
+
                 </div>
 
                 <section id="trace-timeline-section" class="trace-timeline-section" hidden>
@@ -387,6 +398,13 @@
                   <button id="trace-timeline-earlier" class="secondary compact" type="button" hidden>加载更早轮次</button>
                 </section>
 
+                <div id="audit-pipeline" class="audit-pipeline" aria-label="请求执行阶段"></div>
+                <section id="audit-stage-detail" class="audit-stage-detail" hidden>
+                  <div id="audit-stage-values"></div>
+                  <div id="cache-content" hidden></div>
+                </section>
+
+                <details class="audit-fold"><summary>隐私旁路审核</summary>
                 <section class="privacy-assessment-section">
                   <h4>隐私旁路审核 <span class="badge neutral">仅观察</span></h4>
                   <div id="trace-privacy-result" class="trace-detail-meta"></div>
@@ -411,6 +429,21 @@
                   <div id="privacy-feedback-history" class="trace-detail-meta"></div>
                 </section>
 
+                </details>
+                <div id="audit-routing-detail" hidden>
+                  <div class="trace-graph-controls" aria-label="流程图控制">
+                    <div class="trace-graph-mode" role="group" aria-label="流程图详细程度">
+                      <button id="trace-graph-mode-simple" type="button" class="active">简明</button>
+                      <button id="trace-graph-mode-detailed" type="button">详细</button>
+                    </div>
+                    <button id="trace-pan-left" class="secondary icon-control" type="button" title="向左查看" aria-label="向左查看">‹</button>
+                    <button id="trace-zoom-out" class="secondary icon-control" type="button" title="缩小" aria-label="缩小">−</button>
+                    <button id="trace-fit" class="secondary icon-control" type="button" title="适应画布" aria-label="适应画布">↔</button>
+                    <button id="trace-zoom-in" class="secondary icon-control" type="button" title="放大" aria-label="放大">+</button>
+                    <button id="trace-current" class="secondary icon-control" type="button" title="定位最终节点" aria-label="定位最终节点">◎</button>
+                    <button id="trace-fullscreen" class="secondary icon-control" type="button" title="全屏查看" aria-label="全屏查看">⛶</button>
+                    <button id="trace-pan-right" class="secondary icon-control" type="button" title="向右查看" aria-label="向右查看">›</button>
+                  </div>
                 <div id="trace-core-heading" class="trace-core-heading">
                   <strong>智能路由核心</strong>
                   <span>完整上下文 → 会话亲和 → 本地充分性 / 云端专家 → 容量 → 历史预检</span>
@@ -434,6 +467,8 @@
                   <div id="trace-node-evidence" class="trace-node-evidence"></div>
                 </section>
 
+                </div>
+                <details class="audit-fold"><summary>人工审核与备注</summary>
                 <form id="trace-review-form" class="trace-review-form">
                   <div class="trace-review-heading">
                     <div>
@@ -446,8 +481,8 @@
                       <span>审核结论</span>
                       <select id="trace-review-verdict" required>
                         <option value="">请选择</option>
-                        <option value="correct">路由正确</option>
-                        <option value="incorrect">路由错误</option>
+                        <option value="correct">检查正确</option>
+                        <option value="incorrect">发现错误</option>
                         <option value="needs_review">待进一步复核</option>
                       </select>
                     </label>
@@ -476,10 +511,12 @@
                     <button id="trace-review-submit" type="submit">提交审核</button>
                   </div>
                 </form>
+                </details>
               </div>
             </section>
           </div>
         </section>
+        </div>
       </section>
 
       <section id="clients-view" class="view">
@@ -1065,6 +1102,7 @@
     </dialog>
 
     <script src="/assets/vendor/mermaid/mermaid.min.js"></script>
+    <script src="/assets/cache-audit.js"></script>
     <script src="/assets/app.js"></script>
   </body>
 </html>

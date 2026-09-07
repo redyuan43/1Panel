@@ -196,6 +196,13 @@ services:
 
   router-control-local:
     <<: *host-service
+    environment:
+      <<: *router-environment
+      AI_ROUTER_TRAINING_ENABLED: "false"
+    volumes:
+      - /opt/1panel/ai-router:/data
+      - /opt/1panel/ai-router/tokenizer:/models/tokenizer:ro
+      - /opt/1panel/ai-router-training:/training:ro
     command:
       - uvicorn
       - ai_router.control:app
@@ -212,10 +219,14 @@ services:
 
   router-control-tail:
     <<: *host-service
+    environment:
+      <<: *router-environment
+      AI_ROUTER_TRAINING_ENABLED: "false"
     volumes:
       - /opt/1panel/ai-router:/data
       - /opt/1panel/ai-router/tokenizer:/models/tokenizer:ro
       - /opt/1panel/ai-router-control-tls:/tls:ro
+      - /opt/1panel/ai-router-training:/training:ro
     command:
       - /bin/sh
       - -c

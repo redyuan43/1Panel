@@ -67,7 +67,7 @@ const weightLabels = {
 const reasonLabels = {
   quality_score: "质量评分",
   explicit_model: "显式模型",
-  conversation_affinity: "会话亲和",
+  conversation_affinity: "沿用会话路由",
   capacity_spillover: "容量分流",
   affinity_spillover: "亲和迁移",
   cloud_capacity_fallback: "云端容量兜底",
@@ -86,8 +86,8 @@ const reasonLabels = {
 
 const affinityLabels = {
   new: "新链路",
-  hit: "亲和命中",
-  "logical-hit": "逻辑命中",
+  hit: "沿用会话设备",
+  "logical-hit": "沿用会话模型",
   explicit: "显式",
   migrated: "已迁移",
   "physical-failover": "同模型迁移",
@@ -1391,7 +1391,7 @@ function requestRoundTable(items) {
             <th>部署</th>
             <th>任务</th>
             <th>协议</th>
-            <th>亲和</th>
+            <th>路由延续</th>
             <th>网络/容量尝试</th>
             <th>容量等待</th>
             <th>Token</th>
@@ -2021,7 +2021,7 @@ async function selectRouteTrace(requestId, silent = false, submittedReview = nul
     if (state.selectedTrace.conversation_id) {
       void loadTraceTimeline(state.selectedTrace.conversation_id);
     }
-    if (traceEnteredRouting(state.selectedTrace)) {
+    if (cacheView.stage === "routing" && traceEnteredRouting(state.selectedTrace)) {
       await ensureTraceGraphRendered();
     }
   } catch (error) {
@@ -2078,6 +2078,7 @@ function renderTraceDetail(preserveReviews = {}) {
   renderPrivacyAssessment(trace, preserveReviews.privacy);
   renderTraceAttempts();
   renderTraceCurrentReview(preserveReviews.routing);
+  renderUnifiedAudit();
 }
 
 function renderTraceTimeline() {
@@ -2113,27 +2114,15 @@ function renderTraceTimeline() {
 
 function traceTimelineCard(item, turnIndex) {
   const selected = item.request_id === state.selectedTraceId;
-  return `
-    <button class="trace-timeline-card${selected ? " selected" : ""}" type="button"
-      data-trace-id="${escapeHtml(item.request_id)}">
-      <span class="trace-timeline-index">#${turnIndex}</span>
-      ${statusBadge(
-        item.status,
-        item.status_code,
-        item.error?.code,
-        Boolean(item.task || item.selected_model),
-      )}
-      <span class="trace-timeline-route">
-        <strong title="${escapeHtml(item.requested_model || "auto")}">${escapeHtml(shortModel(item.requested_model || "auto"))}</strong>
-        <span aria-hidden="true">→</span>
-        <strong title="${escapeHtml(item.selected_model || "")}">${escapeHtml(item.identity_intercepted ? "身份直答" : shortModel(item.selected_model || "—"))}</strong>
-      </span>
-      <span class="trace-timeline-meta">
-        <span>${escapeHtml(requestLineageLabel(item))}</span>
-        ${privacyBadge(item.privacy_assessment)}
-      </span>
-      <span class="trace-timeline-time">${formatTime(item.started_at)}</span>
-    </button>`;
+  const m = selected ? state.selectedTrace?.cache_audit?.request : item.cache_audit;
+  return `<button class="trace-timeline-card${selected ? " selected" : ""}" type="button" data-trace-id="${escapeHtml(item.request_id)}">
+    <span class="trace-timeline-index">#${turnIndex}</span>
+    ${statusBadge(item.status,item.status_code,item.error?.code,Boolean(item.task||item.selected_model))}
+    <strong>${escapeHtml(m?.device||item.node||item.deployment_id||item.selected_model||"未确定设备")}</strong>
+    <span class="trace-timeline-meta">首个输出 ${escapeHtml(cacheFormat(m?.ttft_ms))}</span>
+    <span class="trace-timeline-meta">净复用 ${escapeHtml(cacheFormat(m?.net_cache_ratio,"ratio"))}</span>
+    <span class="trace-timeline-time">${formatTime(item.started_at)}</span>
+  </button>`;
 }
 
 function bindTraceTimeline() {
@@ -3574,7 +3563,7 @@ function switchView(view) {
   });
   byId("view-title").textContent = viewTitles[view];
   if (view === "requests") void loadRequestTraces();
-  if (view === "audit") return loadRouteAudit();
+  if (view === "audit") return cacheView.view === "overview" ? loadCacheOverview() : loadRouteAudit();
   if (view === "clients") loadClients(true);
 }
 
@@ -3586,7 +3575,10 @@ function startPolling() {
       loadDashboard(true);
       if (state.view === "clients") loadClients(true);
       if (state.view === "requests") loadRequestTraces(true);
-      if (state.view === "audit") loadRouteTraces(true);
+      if (state.view === "audit") {
+        if (cacheView.view === "overview") void loadCacheOverview();
+        else loadRouteTraces(true);
+      }
     }
   }, 5000);
 }
@@ -3996,4 +3988,5 @@ byId("admin-key").addEventListener("keydown", (event) => {
   if (event.key === "Enter") connect();
 });
 
+initializeCacheAudit();
 if (state.key) connect();

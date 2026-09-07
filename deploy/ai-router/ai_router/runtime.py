@@ -23,6 +23,7 @@ from .history import history_identities
 from .policy import ConversationRepository, RoutingPolicy
 from .prefix_affinity import PrefixAffinityRepository
 from .prefix_prewarm import PrefixPrewarmer
+from .cache_audit import TelemetryCollector
 from .prompt_directives import PromptDirectiveStore, configured_phrases
 from .privacy_review import PrivacyReviewer
 from .route_trace import RouteTraceStore, registry_fingerprint
@@ -428,6 +429,8 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        if getattr(self, "cache_collector", None):
+            await self.cache_collector.close()
         if self.prefix_prewarmer is not None:
             await self.prefix_prewarmer.close()
         if self.privacy_reviewer is not None:

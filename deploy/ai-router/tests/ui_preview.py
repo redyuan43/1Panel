@@ -109,6 +109,29 @@ async def prepare(directory):
         trace.set_request_context(conversation_id="preview-long-conversation", lineage_relation="continuation")
         trace.finish_identity_intercept(status_code=200, input_tokens=10, output_tokens=20)
         await runtime.route_traces.save(trace)
+    # Cache observation fixtures: local CPU data, no model calls.
+    from ai_router.cache_audit import CacheAudit
+    from ai_router.content_audit import ContentObservation
+    from ai_router.training_archive import TrainingArchive
+    from ai_router.protocol import move_workbuddy_dynamic_context
+    key_path = directory / "training.key"
+    if not key_path.exists(): key_path.write_bytes(Fernet.generate_key())
+    os.environ["AI_ROUTER_TRAINING_DB_PATH"] = str(directory / "training.sqlite3")
+    os.environ["AI_ROUTER_TRAINING_KEY_PATH"] = str(key_path)
+    archive = TrainingArchive(os.environ["AI_ROUTER_TRAINING_DB_PATH"], str(key_path))
+    body = {"model": "siyuan/qwen36-shared", "messages": [
+        {"role": "system", "content": "CPU fixture stable rules"},
+        {"role": "user", "content": "CPU fixture <script>window.promptInjected=true</script> " + "多字节测试 " * 6000}],
+        "tools": [{"type": "function", "function": {"name": "Agent", "description": "CPU fixture dynamic catalog", "parameters": {"type": "object"}}}]}
+    content = ContentObservation(); content.capture("received", body); content.capture("after_directives", body)
+    moved = move_workbuddy_dynamic_context(body, "chat", client_id="workbuddy-qwen36-shared")
+    content.check_workbuddy(body, moved.body, moved); content.capture("workbuddy_reordered", moved.body); content.capture("forwarded_1", moved.body)
+    token = await archive.begin(request_id="preview-local", conversation_id="preview-conversation", conversation_mode="inferred", client_id="1panel", key_id="preview", protocol="chat", received_body=body, instance_id="ui-preview", boot_id="preview")
+    await archive.record_pipeline(token, content.archive())
+    payload = await runtime.route_traces.get("preview-local")
+    payload["observation"] = {"content": content.metadata(), "ttft_ms": 7290, "first_text_ms": 7410, "queue_wait_ms": 81.5}
+    await asyncio.to_thread(runtime.route_traces._save, payload)
+    await CacheAudit(runtime.route_traces.database_path).save_operation({"operation_id": "preview-operation", "request_id": "preview-local", "attempt": 1, "kind": "foreground", "deployment_id": "preview-nx3", "terminal": True, "status": "completed", "ttft_ms": 7200, "queue_ms": 1.5, "cache": {"event": "hot", "fixed_tokens": 33028, "prime_tokens": 0, "template_ms": 112, "seconds": .112}, "timings": {"cache_n": 50211, "prompt_n": 986, "prompt_ms": 6376.6, "prompt_per_second": 154.6}})
     return runtime
 
 

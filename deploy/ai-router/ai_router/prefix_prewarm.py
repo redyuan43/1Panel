@@ -6,6 +6,7 @@ import json
 import os
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
+from .cache_audit import CacheAudit
 
 import httpx
 
@@ -102,11 +103,18 @@ class PrefixPrewarmer:
             root = urlunsplit((parts.scheme, parts.netloc, parts.path.removesuffix("/v1").rstrip("/"), "", ""))
             response = await current.internal_client.post(
                 root + "/cache/prepare", content=raw,
-                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json",
+                         "X-Request-ID": request_id, "X-1Panel-Operation-ID": tracking_id.removeprefix("prefix-prepare:"),
+                         "X-1Panel-Attempt": str(decision.attempts), "X-1Panel-Operation-Kind": "prewarm"},
                 timeout=httpx.Timeout(180, connect=10),
             )
             response.raise_for_status()
             result = response.json()
+            if hasattr(current, "route_traces"):
+                await CacheAudit(current.route_traces.database_path).save_operation({
+                    "request_id": request_id, "operation_id": tracking_id.removeprefix("prefix-prepare:"),
+                    "attempt": decision.attempts, "kind": "prewarm", "deployment_id": target_id,
+                    "cache": result, "terminal": True, "status": "completed"})
             current.audit.write(
                 "prefix_overflow_prepared", request_id=request_id, client_id=client_id,
                 deployment_id=target_id,
