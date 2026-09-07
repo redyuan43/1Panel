@@ -259,6 +259,33 @@ class CacheTests(unittest.TestCase):
         self.assertEqual(result["prime_tokens"], result["fixed_tokens"])
         self.assertEqual(result["reused_tokens"], 0)
 
+
+    def test_prepare_only_bypass_keeps_hot_state_and_newer_native_tokens(self):
+        self.cache.prepare(self.body())
+        active = self.cache.active
+        # Simulate the live conversation extending beyond the saved fixed prefix.
+        self.state["cached_tokens"].extend([90, 91, 92])
+        live_tokens = self.state["cached_tokens"][:]
+        cases = [
+            {**self.body(), "cache_prompt": False},
+            {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}}]}]},
+            {"messages": []},
+        ]
+        for body in cases:
+            with self.subTest(body_type=list(body)):
+                self.state["calls"] = []
+                status, _, payload = self.request(gateway.encode(body), path="/cache/prepare")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(payload)["event"], "bypass")
+                self.assertEqual(self.cache.active, active)
+                self.assertEqual(self.cache.prepare(self.body())["event"], "hot")
+                self.assertEqual(self.state["cached_tokens"], live_tokens)
+                self.assertFalse(any("action=restore" in path or path == "/completion" for path, _, _ in self.state["calls"]))
+        # A real uncacheable chat may mutate the backend, so still invalidate.
+        status, _, _ = self.request(gateway.encode({**self.body(), "cache_prompt": False}))
+        self.assertEqual(status, 200)
+        self.assertIsNone(self.cache.active)
+
     def test_hot_then_gateway_restart_uses_valid_disk(self):
         self.assertEqual(self.cache.prepare(self.body())["event"], "miss_saved")
         self.assertEqual(self.cache.prepare(self.body())["event"], "hot")
@@ -371,6 +398,9 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(cache.runtime(), fingerprint)
                 self.assertIsNotNone(cache.active)
                 get_pid.return_value = "456\n"
+                result = cache.prepare({"cache_prompt": False}, invalidate_on_bypass=False)
+                self.assertEqual(result["event"], "bypass")
+                self.assertIsNone(cache.active)
                 self.assertEqual(cache.runtime(), fingerprint)
                 self.assertIsNone(cache.active)
                 cache.active = ("prefix", fingerprint)

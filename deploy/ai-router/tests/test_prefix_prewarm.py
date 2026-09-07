@@ -104,3 +104,59 @@ def test_irrelevant_requests_never_start_model_preparation(environment, monkeypa
         assert not manager.tasks
         await runtime.internal_client.aclose()
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("failure", ["release", "start_publish", "cancel_registration"])
+def test_failed_prewarm_lifecycle_always_removes_active_tracking(environment, monkeypatch, failure):
+    async def scenario():
+        runtime, _ = setup_runtime(environment, monkeypatch, lambda request: httpx.Response(200, json={"event": "hot"}))
+        active = set()
+        published = []
+        async def started(tracking_id, *args):
+            active.add(tracking_id)
+            if failure == "start_publish":
+                raise ConnectionError("injected publication failure")
+            if failure == "cancel_registration":
+                raise asyncio.CancelledError()
+        async def finished(tracking_id):
+            active.discard(tracking_id)
+            published.append(len(active))
+        runtime.track_request_started = AsyncMock(side_effect=started)
+        runtime.track_request_finished = AsyncMock(side_effect=finished)
+        begin = runtime.scheduler.begin_request
+        async def begin_with_release_failure(*args):
+            lease = await begin(*args)
+            release = lease.release
+            async def fail_release():
+                await release()
+                raise ConnectionError("injected lost release acknowledgement")
+            lease.release = fail_release
+            return lease
+        if failure == "release":
+            monkeypatch.setattr(runtime.scheduler, "begin_request", begin_with_release_failure)
+        manager = PrefixPrewarmer(runtime)
+        decision = await choose(runtime.policy)
+        manager.submit(decision, {"messages": [{"role": "user", "content": "request"}]}, client_id="workbuddy-qwen36-shared", request_id="parent", api_kind="chat")
+        results = await asyncio.gather(*manager.tasks, return_exceptions=True)
+        assert not active
+        assert published == [0]
+        assert runtime.track_request_finished.await_count == 1
+        if failure == "cancel_registration":
+            assert isinstance(results[0], asyncio.CancelledError)
+        await runtime.internal_client.aclose()
+    asyncio.run(scenario())
+
+
+def test_image_request_does_not_schedule_text_prefix_preparation(environment, monkeypatch):
+    async def scenario():
+        runtime, _ = setup_runtime(environment, monkeypatch, lambda request: pytest.fail("image prewarm must not reach backend"))
+        manager = PrefixPrewarmer(runtime)
+        decision = await choose(runtime.policy)
+        body = {"messages": [{"role": "user", "content": [
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,fixture"}},
+        ]}]}
+        manager.submit(decision, body, client_id="workbuddy-qwen36-shared", request_id="image", api_kind="chat")
+        assert not manager.tasks
+        await runtime.internal_client.aclose()
+    asyncio.run(scenario())

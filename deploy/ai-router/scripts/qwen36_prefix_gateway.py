@@ -218,12 +218,15 @@ class PrefixCache:
             if SNAPSHOT_NAME.fullmatch(path.name) and path.name not in referenced:
                 path.unlink(missing_ok=True)
 
-    def prepare(self, body):
+    def prepare(self, body, *, invalidate_on_bypass=True):
         started = time.monotonic()
         runtime = self.runtime()
         tokens = self.prefix(body)
         if tokens is None:
-            self.active = None
+            # A prepare-only bypass never forwards inference or changes the slot.
+            # Keep newer live state instead of forcing a later disk restoration.
+            if invalidate_on_bypass:
+                self.active = None
             return {"event": "bypass", "seconds": time.monotonic() - started, "prime_tokens": 0}
         key = digest(encode(tokens))
         result = {"prefix_sha256": key, "fixed_tokens": len(tokens), "prime_tokens": 0}
@@ -352,7 +355,9 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(body, dict):
                         self.error_json(400, "request_body_must_be_object")
                         return
-                    prepared = cache.prepare(body)
+                    prepared = cache.prepare(
+                        body, invalidate_on_bypass=self.path.split("?")[0] != "/cache/prepare",
+                    )
                     LOG.info("cache_prepare %s", encode(prepared).decode())
                     if self.path.split("?")[0] == "/cache/prepare":
                         output = encode(prepared)

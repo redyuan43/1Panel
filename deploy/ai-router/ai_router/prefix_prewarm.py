@@ -24,13 +24,36 @@ class PrefixPrewarmer:
             or decision.prompt_tokens < threshold
             or not pin.get("context_overflow_deployment_id")):
             return
+        # The snapshot gateway accepts text content only. Avoid taking a worker
+        # lease/rate slot for image, audio, or other unsupported content blocks.
+        messages = body.get("messages", [])
+        if not isinstance(messages, list) or any(
+            not isinstance(message, dict)
+            or (isinstance(message.get("content"), list) and any(
+                not isinstance(block, dict) or block.get("type") != "text"
+                or not isinstance(block.get("text"), str)
+                for block in message["content"]
+            ))
+            for message in messages
+        ):
+            return
         # The gateway validates the native template and token boundary. A missing
         # Router tokenizer signature must not disable that independent preparation.
         # Retain only bytes from this live, already-routed request, never a fabricated prompt.
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
         task = asyncio.create_task(self._prepare(decision, raw, client_id, request_id))
         self.tasks.add(task)
-        task.add_done_callback(self.tasks.discard)
+        def completed(done):
+            self.tasks.discard(done)
+            if not done.cancelled():
+                error = done.exception()
+                if error is not None:
+                    self.runtime.audit.write(
+                        "prefix_overflow_prepare_task_failed",
+                        request_id=request_id, client_id=client_id,
+                        error_type=type(error).__name__,
+                    )
+        task.add_done_callback(completed)
 
     async def _prepare(self, decision, raw, client_id, request_id):
         current = self.runtime
@@ -63,8 +86,10 @@ class PrefixPrewarmer:
                 f"router:prefix-prepare-rate:{client_id}:{target_id}", tracking_id, 120,
             ):
                 return
-            await current.track_request_started(tracking_id, request_id + ":prefix-prepare", None)
+            # Registration updates local bookkeeping before publishing to the
+            # store; publication failure/cancellation must still remove it.
             tracked = True
+            await current.track_request_started(tracking_id, request_id + ":prefix-prepare", None)
             await current.track_request_routed(
                 tracking_id, requested_model=decision.requested_model,
                 selected_model=decision.endpoint.public_model,
@@ -96,10 +121,12 @@ class PrefixPrewarmer:
                 deployment_id=target_id, error_type=type(error).__name__,
             )
         finally:
-            if lease is not None:
-                await lease.release()
-            if tracked:
-                await current.track_request_finished(tracking_id)
+            try:
+                if lease is not None:
+                    await lease.release()
+            finally:
+                if tracked:
+                    await current.track_request_finished(tracking_id)
 
     async def close(self):
         tasks = list(self.tasks)

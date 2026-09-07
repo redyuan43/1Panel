@@ -330,3 +330,74 @@ def test_invalid_overflow_configuration_is_rejected(environment, overflow):
     rules[0]["context_overflow_deployment_id"] = overflow
     with pytest.raises(ValueError, match="overflow deployment"):
         settings.write_runtime({"routing": {"client_deployment_pins": rules}})
+
+
+@pytest.mark.parametrize("tail_kind", ["user", "assistant", "tool"])
+def test_workbuddy_api_normalizes_continuations_and_audits_only_metadata(environment, tmp_path, monkeypatch, tail_kind):
+    from test_workbuddy_prefix import _raw_body
+
+    settings, registry, health, store, _ = environment
+    settings.write_runtime({
+        "identity": {"enabled": False},
+        "clients": {"policies": [{
+            "id": CLIENT, "key_env": "TEST_WORKBUDDY_KEY", "models": [MODEL],
+            "rpm_limit": 60, "tpm_limit": 6000000, "max_parallel_requests": 2,
+        }]},
+    })
+    audit_path = tmp_path / "audit.jsonl"
+    for name, value in {
+        "TEST_WORKBUDDY_KEY": "test-client-key",
+        "AI_ROUTER_LITELLM_MASTER_KEY": "test-internal-key",
+        "AI_ROUTER_STATE_KEY": Fernet.generate_key().decode(),
+        "AI_ROUTER_AUDIT_PATH": str(audit_path),
+        "AI_ROUTER_TRAINING_ENABLED": "false",
+    }.items():
+        monkeypatch.setenv(name, value)
+    runtime = build_runtime(settings=settings, registry=registry, store=store, token_counter=SimpleTokenCounter())
+    runtime.health = health
+    runtime.policy = RoutingPolicy(registry, settings, health, store=store)
+    forwarded = []
+    def respond(request):
+        forwarded.append(json.loads(request.content))
+        return httpx.Response(200, json={
+            "id": "test-output", "model": MODEL,
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 100, "completion_tokens": 1, "total_tokens": 101},
+        })
+    asyncio.run(runtime.internal_client.aclose())
+    runtime.internal_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    body = _raw_body("PRIVATE_MEMORY_SENTINEL", "PRIVATE_CATALOG_SENTINEL", "PRIVATE_USER_SENTINEL")
+    tail = []
+    if tail_kind == "assistant":
+        tail = [{"role": "assistant", "content": "continue"}]
+    elif tail_kind == "tool":
+        tail = [
+            {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "preserved-call", "type": "function",
+                "function": {"name": "Read", "arguments": '{"path":"fixture"}'},
+            }]},
+            {"role": "tool", "tool_call_id": "preserved-call", "content": "PRIVATE_RESULT_SENTINEL"},
+        ]
+    body["messages"].extend(copy.deepcopy(tail))
+    body.update(max_tokens=16, stream=False)
+    before = copy.deepcopy(body)
+    with TestClient(create_app(runtime)) as client:
+        response = client.post("/v1/chat/completions", headers={"Authorization": "Bearer test-client-key"}, json=body)
+    assert response.status_code == 200, response.text
+    assert len(forwarded) == 1
+    output = forwarded[0]
+    assert output["messages"][2:] == tail
+    assert output["messages"][1]["content"].endswith("PRIVATE_USER_SENTINEL")
+    assert "PRIVATE_MEMORY_SENTINEL" in output["messages"][1]["content"]
+    assert "PRIVATE_CATALOG_SENTINEL" in output["messages"][1]["content"]
+    assert "PRIVATE_MEMORY_SENTINEL" not in output["messages"][0]["content"]
+    assert "PRIVATE_CATALOG_SENTINEL" not in json.dumps(output["tools"])
+    assert [t["function"]["parameters"] for t in output["tools"]] == [t["function"]["parameters"] for t in before["tools"]]
+    assert body == before
+    audit_text = audit_path.read_text()
+    moves = [json.loads(line) for line in audit_text.splitlines() if json.loads(line).get("event") == "workbuddy_dynamic_context_moved"]
+    assert len(moves) == 1
+    assert moves[0]["moved"] and moves[0]["target_user_index"] == 1
+    assert len(moves[0]["stable_prefix_sha256"]) == 64
+    assert moves[0]["skip_reason"] is None
+    assert "PRIVATE_" not in audit_text
