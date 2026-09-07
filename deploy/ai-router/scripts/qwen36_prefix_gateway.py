@@ -351,6 +351,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.send_header("Connection", "close")
+        if getattr(self, "telemetry_available", False):
+            self.send_header("X-Prefix-Telemetry", "1")
         self.end_headers()
         self.wfile.write(raw)
 
@@ -361,6 +363,7 @@ class Handler(BaseHTTPRequestHandler):
         self.handle_request()
 
     def handle_request(self):
+        self.telemetry_available = False
         cache = self.server.cache
         if self.path != "/health" and not hmac.compare_digest(self.headers.get("Authorization", ""), "Bearer " + cache.key):
             self.error_json(401, "unauthorized")
@@ -420,6 +423,7 @@ class Handler(BaseHTTPRequestHandler):
         event = {"operation_id": operation_id, "request_id": request_id, "attempt": attempt,
                  "kind": "prewarm" if self.path.split("?")[0] == "/cache/prepare" else "foreground",
                  "stage": "queue", "terminal": False, "status": "running"}
+        self.telemetry_available = not readonly
         def publish(**fields):
             event.update(fields)
             event["elapsed_ms"] = (time.monotonic()-started)*1000

@@ -44,10 +44,13 @@ def metrics(trace, operations):
     c = number(timing.get("cache_n"))
     q = number(prepared.get("prime_tokens"))
     f = number(prepared.get("fixed_tokens"))
-    actual_input = p + c if p is not None and c is not None else number(evidence.get("input_tokens"))
+    native_input = p + c if p is not None and c is not None else None
+    actual_input = native_input if native_input is not None else number(evidence.get("input_tokens"))
     total_work = p + q if p is not None and q is not None else None
     fixed_ratio = max(0, min(f, c) - q) / f if f and c is not None and q is not None else None
-    net_ratio = max(0, actual_input - total_work) / actual_input if actual_input and total_work is not None else None
+    # Trace input_tokens may be the Router's estimate when usage is absent.
+    # Only same-attempt native counters can prove preparation-adjusted reuse.
+    net_ratio = max(0, native_input - total_work) / native_input if native_input and total_work is not None else None
     queue = observer.get("queue_wait_ms")
     if queue is None:
         waits = [number(s.get("evidence", {}).get("queue_wait_ms")) for a in trace.get("attempts", []) for s in a.get("steps", []) if "queue_wait_ms" in s.get("evidence", {})]
@@ -66,7 +69,7 @@ def metrics(trace, operations):
         "reported_cache_ratio": (c if c is not None else number(evidence.get("cached_prompt_tokens"))) / actual_input if actual_input and (c is not None or number(evidence.get("cached_prompt_tokens")) is not None) else None,
         "prime_tokens": q, "prompt_tokens": p, "total_prefill_tokens": total_work,
         "fixed_tokens": f, "fixed_reuse_ratio": fixed_ratio, "net_cache_ratio": net_ratio,
-        "dynamic_tokens": max(0, actual_input - f) if actual_input is not None and f is not None else None,
+        "dynamic_tokens": max(0, native_input - f) if native_input is not None and f is not None else None,
         "prefill_ms": number(timing.get("prompt_ms")), "prefill_tps": number(timing.get("prompt_per_second")),
         "queue_ms": number(queue), "gateway_queue_ms": number(final.get("queue_ms")),
         "restore_ms": number(prepared.get("restore_ms")),

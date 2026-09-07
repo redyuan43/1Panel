@@ -24,8 +24,12 @@ function cacheQuery() {
   return p;
 }
 
-async function loadCacheOverview() {
-  if (cacheView.loading || !state.key) return;
+async function loadCacheOverview({force=false}={}) {
+  if (!state.key) return;
+  if (cacheView.loading) {
+    if(force) {cacheView.sequence++;cacheView.pendingRefresh=true;}
+    return;
+  }
   const seq=++cacheView.sequence;
   cacheView.loading=true;
   const params=cacheQuery();
@@ -46,8 +50,11 @@ async function loadCacheOverview() {
     byId("cache-next").disabled=page.next_offset==null;
     byId("cache-page-state").textContent=`${cacheView.offset+1}–${cacheView.offset+page.items.length} / ${page.total}`;
     byId("cache-request-rows").querySelectorAll("[data-cache-request]").forEach(b=>b.addEventListener("click",()=>{setAuditSubview("conversation"); void selectRouteTrace(b.dataset.cacheRequest);}));
-  } catch(e) {byId("cache-overview-state").textContent=e.message;}
-  finally {cacheView.loading=false;}
+  } catch(e) {if(seq===cacheView.sequence)byId("cache-overview-state").textContent=e.message;}
+  finally {
+    cacheView.loading=false;
+    if(cacheView.pendingRefresh) {cacheView.pendingRefresh=false;void loadCacheOverview();}
+  }
 }
 
 function cacheTrend(rows) {
@@ -165,8 +172,8 @@ function renderContentDifference(left,right) {
 
 function initializeCacheAudit() {
   document.querySelectorAll("[data-audit-view]").forEach(b=>b.addEventListener("click",()=>setAuditSubview(b.dataset.auditView)));
-  byId("cache-refresh").addEventListener("click",()=>{cacheView.offset=0;void loadCacheOverview();});
-  byId("cache-prev").addEventListener("click",()=>{cacheView.offset=Math.max(0,cacheView.offset-50);void loadCacheOverview();});
-  byId("cache-next").addEventListener("click",()=>{if(cacheView.next!=null){cacheView.offset=cacheView.next;void loadCacheOverview();}});
-  byId("cache-filter-form").addEventListener("submit",e=>{e.preventDefault();cacheView.offset=0;void loadCacheOverview();});
+  byId("cache-refresh").addEventListener("click",()=>{cacheView.offset=0;void loadCacheOverview({force:true});});
+  byId("cache-prev").addEventListener("click",()=>{cacheView.offset=Math.max(0,cacheView.offset-50);void loadCacheOverview({force:true});});
+  byId("cache-next").addEventListener("click",()=>{if(cacheView.next!=null){cacheView.offset=cacheView.next;void loadCacheOverview({force:true});}});
+  byId("cache-filter-form").addEventListener("submit",e=>{e.preventDefault();cacheView.offset=0;void loadCacheOverview({force:true});});
 }

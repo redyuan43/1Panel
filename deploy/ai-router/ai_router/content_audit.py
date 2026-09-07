@@ -7,6 +7,7 @@ import json
 import sqlite3
 import time
 import zlib
+from collections import Counter
 from contextlib import closing
 from pathlib import Path
 
@@ -49,8 +50,16 @@ class ContentObservation:
         findings = []
         def check(name, passed):
             findings.append({"check": name, "status": "passed" if passed else "failed"})
+        if not all(isinstance(m, dict) for m in a + b) or not isinstance(index, int) or not 0 <= index < min(len(a), len(b)):
+            check("message_order_and_tool_history", False)
+            self.checks = findings
+            return
+        def preserved_message(i, old, new):
+            if i == index or str(old.get("role", "")).lower() == "system":
+                return {k: v for k, v in old.items() if k != "content"} == {k: v for k, v in new.items() if k != "content"}
+            return old == new
         check("message_order_and_tool_history", len(a) == len(b) and all(
-            old == new for i, (old, new) in enumerate(zip(a, b)) if i != index and old.get("role") != "system"))
+            preserved_message(i, old, new) for i, (old, new) in enumerate(zip(a, b))))
         old_user, new_user = a[index].get("content"), b[index].get("content")
         if isinstance(old_user, list) and isinstance(new_user, list):
             check("user_content_and_images", new_user[1:] == old_user)
@@ -59,20 +68,25 @@ class ContentObservation:
             check("user_content_and_images", isinstance(new_user, str) and new_user.endswith("\n\n" + old_user) if old_user else True)
             dynamic = new_user[:-len(old_user)] if old_user else new_user
         old_tools, new_tools = copy.deepcopy(before.get("tools", [])), copy.deepcopy(after.get("tools", []))
-        moved_descriptions = []
-        if len(old_tools) == len(new_tools):
+        moved_descriptions = Counter()
+        if isinstance(old_tools, list) and isinstance(new_tools, list) and len(old_tools) == len(new_tools):
             for old, new in zip(old_tools, new_tools):
+                if not isinstance(old, dict) or not isinstance(new, dict):
+                    continue
                 of, nf = old.get("function", {}), new.get("function", {})
+                if not isinstance(of, dict) or not isinstance(nf, dict):
+                    continue
                 if of.get("name") in {"Agent", "Skill", "ToolSearch"} and of.get("description") != nf.get("description"):
                     desc = of.get("description", "")
-                    moved_descriptions.append(isinstance(dynamic, str) and dynamic.count(desc) == 1 if desc else True)
+                    block = f'<workbuddy_tool_description name="{of["name"]}">\n{desc}\n</workbuddy_tool_description>'
+                    moved_descriptions[block] += 1
                     of["description"] = nf.get("description")
         check("tool_definitions_and_parameters", old_tools == new_tools)
-        check("dynamic_tool_content_once", all(moved_descriptions))
-        from .protocol import _WORKBUDDY_MEMORY_HEADING, _WORKBUDDY_MEMORY_END
+        check("dynamic_tool_content_once", all(isinstance(dynamic, str) and dynamic.count(block) == count for block, count in moved_descriptions.items()))
+        from .protocol import _WORKBUDDY_MEMORY_HEADING, _WORKBUDDY_MEMORY_END, _WORKBUDDY_MEMORY_PLACEHOLDER
         memory_ok = True
         for old, new in zip(a, b):
-            if old.get("role") != "system" or old == new: continue
+            if str(old.get("role", "")).lower() != "system" or old == new: continue
             text = old.get("content", "")
             if "<workbuddy_dynamic_context>" in text:
                 left, moved = text.split("<workbuddy_dynamic_context>", 1)
@@ -81,7 +95,9 @@ class ContentObservation:
             elif _WORKBUDDY_MEMORY_HEADING in text:
                 left, rest = text.split(_WORKBUDDY_MEMORY_HEADING, 1)
                 moved, right = rest.split(_WORKBUDDY_MEMORY_END, 1)
-                memory_ok &= dynamic.count(moved.strip()) == 1 and new.get("content", "").startswith(left + _WORKBUDDY_MEMORY_HEADING) and new.get("content", "").endswith(_WORKBUDDY_MEMORY_END + right)
+                block = "<workbuddy_workspace_memory>\n" + moved.strip() + "\n</workbuddy_workspace_memory>"
+                expected = (left + _WORKBUDDY_MEMORY_HEADING).rstrip() + "\n\n" + _WORKBUDDY_MEMORY_PLACEHOLDER + "\n\n" + _WORKBUDDY_MEMORY_END + right
+                memory_ok &= dynamic.count(block) == 1 and new.get("content") == expected
             else:
                 memory_ok = False
         check("workspace_memory_and_stable_content", memory_ok)

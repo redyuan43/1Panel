@@ -3845,6 +3845,9 @@ async def _stream_response(
         else:
             for public_chunk in sanitizer.finish():
                 accumulator.feed(public_chunk)
+                output_clock.feed(public_chunk)
+                if decision.trace:
+                    decision.trace.payload.setdefault("observation", {}).update(output_clock.values)
                 yield public_chunk
             completed = True
     finally:
