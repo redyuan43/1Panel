@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 from ai_router.api import _capacity_wait_seconds, create_app
 from ai_router.config import Registry, Settings
-from ai_router.errors import NoEligibleModelError, QueueTimeoutError
+from ai_router.errors import NoCompatibleModelError, NoEligibleModelError, QueueTimeoutError
 from ai_router.policy import RoutingPolicy
 from ai_router.prefix_affinity import PrefixAffinityLocation, PrefixAffinityRecord
 from ai_router.runtime import build_runtime
@@ -272,3 +272,61 @@ def test_api_passes_authenticated_client_scope_without_changing_body(environment
         response = client.post("/v1/chat/completions", headers={"Authorization": "Bearer test-client-key"}, json=body)
     assert response.status_code == upstream_status, response.text
     assert sent == [(NX3, body)]
+
+
+def agx_worker(state="available"):
+    value = worker("qwen36-agx", state)
+    value.update(profile_id="large-q8-vision", tier="local-large",
+                 context_size=262144, safe_context_tokens=255000,
+                 cache_type_k="q8_0", cache_type_v="q8_0")
+    return value
+
+
+@pytest.mark.parametrize("prompt,expected", [(53248, NX3), (53249, "qwen36-agx"), (55619, "qwen36-agx")])
+def test_context_overflow_respects_output_reserve_and_keeps_busy_primary(environment, prompt, expected):
+    settings, _, health, _, policy = environment
+    health.value.detail["workers"][0]["state"] = "busy"
+    health.value.detail["workers"].append(agx_worker("busy"))
+    decision = asyncio.run(choose(policy, prompt_tokens=prompt, output_reserve_tokens=4096))
+    assert decision.deployment_id == expected
+    assert decision.prompt_tokens == prompt and decision.output_reserve_tokens == 4096
+    assert decision.deployment_candidates == ((expected, f"http://{expected}/v1"),)
+    assert decision.reason == ("client_deployment_pin" if expected == NX3 else "client_context_overflow")
+    assert _capacity_wait_seconds(settings.section("routing"), requested_model=MODEL, decision=decision) == 900
+
+
+def test_unready_primary_is_not_a_context_overflow(environment):
+    _, _, health, _, policy = environment
+    health.value.detail["workers"][0]["ready"] = False
+    health.value.detail["workers"].append(agx_worker())
+    with pytest.raises(NoEligibleModelError):
+        asyncio.run(choose(policy, prompt_tokens=55619))
+
+
+def test_unready_overflow_never_falls_back_to_another_worker(environment):
+    _, _, health, _, policy = environment
+    value = agx_worker(); value["ready"] = False
+    health.value.detail["workers"].append(value)
+    with pytest.raises(NoEligibleModelError):
+        asyncio.run(choose(policy, prompt_tokens=55619))
+
+
+def test_disabled_overflow_reports_context_incompatibility_without_transient_503(environment):
+    settings, _, health, _, policy = environment
+    rules = copy.deepcopy(settings.section("routing")["client_deployment_pins"])
+    rules[0].pop("context_overflow_deployment_id")
+    rules[0].pop("prewarm_min_prompt_tokens", None)
+    settings.write_runtime({"routing": {"client_deployment_pins": rules}})
+    health.value.detail["workers"].append(agx_worker())
+    with pytest.raises(NoCompatibleModelError, match="59715") as result:
+        asyncio.run(choose(policy, prompt_tokens=55619, output_reserve_tokens=4096))
+    assert result.value.status_code == 422
+
+
+@pytest.mark.parametrize("overflow", [None, "", " qwen36-agx", NX3, 123])
+def test_invalid_overflow_configuration_is_rejected(environment, overflow):
+    settings = environment[0]
+    rules = copy.deepcopy(settings.section("routing")["client_deployment_pins"])
+    rules[0]["context_overflow_deployment_id"] = overflow
+    with pytest.raises(ValueError, match="overflow deployment"):
+        settings.write_runtime({"routing": {"client_deployment_pins": rules}})

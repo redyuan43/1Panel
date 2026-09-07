@@ -231,9 +231,11 @@ class PrefixCache:
             return {**result, "event": "hot", "seconds": time.monotonic() - started}
         self.active = None
         path = self.manifests / (key + ".json")
+        restore_attempted = False
         if path.exists():
             try:
                 manifest = self.validate(path, key, tokens, runtime)
+                restore_attempted = True
                 self.post("/slots/0?action=restore", {"filename": manifest["files"][0]["name"]})
                 self.active = (key, runtime)
                 os.utime(path, None)
@@ -244,9 +246,15 @@ class PrefixCache:
                 LOG.warning("cache_miss prefix=%s reason=%s", key, str(error) if isinstance(error, ValueError) else type(error).__name__)
                 # Remove only this manifest; old immutable data is pruned below.
                 path.unlink(missing_ok=True)
-        self.post("/slots/0?action=erase", {})
+                # A rejected restore may have loaded only part of target/draft state.
+                # Invalid metadata alone has not touched the running slot.
+                if restore_attempted:
+                    self.post("/slots/0?action=erase", {})
+        # A new snapshot key is not a native cache miss. Keep the live sequence
+        # so llama.cpp can match actual tokens and restore its own checkpoint.
         primed = self.post("/completion", {"prompt": tokens, "n_predict": 0, "cache_prompt": True, "stream": False})
         result["prime_tokens"] = primed.get("timings", {}).get("prompt_n", len(tokens))
+        result["reused_tokens"] = primed.get("timings", {}).get("cache_n", 0)
         name = "prefix-" + uuid.uuid4().hex + ".bin"
         try:
             saved = self.post("/slots/0?action=save", {"filename": name})
@@ -331,11 +339,11 @@ class Handler(BaseHTTPRequestHandler):
         first = None
         try:
             if not readonly:
-                locked = cache.lock.acquire(timeout=cache.config.get("queue_timeout", 1800))
+                locked = cache.lock.acquire(timeout=0 if self.path.split("?")[0] == "/cache/prepare" else cache.config.get("queue_timeout", 1800))
                 if not locked:
                     self.error_json(503, "cache_worker_busy")
                     return
-                if self.path.split("?")[0] in {"/v1/chat/completions", "/chat/completions"}:
+                if self.path.split("?")[0] in {"/v1/chat/completions", "/chat/completions", "/cache/prepare"}:
                     try:
                         body = json.loads(raw)
                     except ValueError:
@@ -346,6 +354,17 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     prepared = cache.prepare(body)
                     LOG.info("cache_prepare %s", encode(prepared).decode())
+                    if self.path.split("?")[0] == "/cache/prepare":
+                        output = encode(prepared)
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(output)))
+                        self.send_header("Connection", "close")
+                        self.end_headers()
+                        sent = True
+                        self.close_connection = True
+                        self.wfile.write(output)
+                        return
                 else:
                     cache.active = None
             headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP | {"host", "authorization"}}

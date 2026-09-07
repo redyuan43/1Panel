@@ -50,12 +50,25 @@ class FakeBackend(BaseHTTPRequestHandler):
             action = self.path.split("action=")[-1]
             if state.get(action + "_status"):
                 return self.respond(state[action + "_status"], b'{"error":"injected"}')
+            if action == "erase":
+                state["cached_tokens"] = []
             if action == "save":
+                state.setdefault("saved_tokens", {})[body["filename"]] = state.get("cached_tokens", [])[:]
                 for suffix in ("", ".draft", ".checkpoints"):
                     (state["data"] / (body["filename"] + suffix)).write_bytes(b"state" + suffix.encode())
+            if action == "restore":
+                state["cached_tokens"] = state.get("saved_tokens", {}).get(body["filename"], [])[:]
             return self.respond(200, b'{"ok":true}')
         if self.path == "/completion":
-            return self.respond(200, gateway.encode({"timings": {"prompt_n": len(body["prompt"])}}))
+            previous = state.get("cached_tokens", []) if body.get("cache_prompt") else []
+            tokens = body["prompt"]
+            matched = 0
+            for old, new in zip(previous, tokens):
+                if old != new:
+                    break
+                matched += 1
+            state["cached_tokens"] = tokens[:]
+            return self.respond(200, gateway.encode({"timings": {"prompt_n": len(tokens) - matched, "cache_n": matched}}))
         with state["guard"]:
             state["active"] += 1
             state["peak"] = max(state["peak"], state["active"])
@@ -105,6 +118,31 @@ class CacheTests(unittest.TestCase):
             return response.status, dict(response.getheaders()), response.read()
         finally:
             connection.close()
+
+    def test_prepare_only_creates_snapshot_without_forwarding_chat_or_generating(self):
+        raw = gateway.encode(self.body())
+        status, _, payload = self.request(raw, path="/cache/prepare")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(payload)["event"], "miss_saved")
+        completions = [json.loads(value) for path, value, _ in self.state["calls"] if path == "/completion"]
+        self.assertEqual(len(completions), 1)
+        self.assertEqual(completions[0]["n_predict"], 0)
+        self.assertFalse(any(path in {"/v1/chat/completions", "/cache/prepare"} for path, _, _ in self.state["calls"]))
+        status, _, payload = self.request(raw, path="/cache/prepare")
+        self.assertEqual(json.loads(payload)["event"], "hot")
+        self.assertEqual(len([x for x in self.state["calls"] if x[0] == "/completion"]), 1)
+
+    def test_prepare_only_is_authenticated_and_does_not_queue_behind_chat(self):
+        raw = gateway.encode(self.body())
+        self.assertEqual(self.request(raw, path="/cache/prepare", authorization="wrong")[0], 401)
+        self.cache.lock.acquire()
+        try:
+            started = time.monotonic()
+            self.assertEqual(self.request(raw, path="/cache/prepare")[0], 503)
+            self.assertLess(time.monotonic() - started, 1)
+        finally:
+            self.cache.lock.release()
+        self.assertEqual(self.state["calls"], [])
 
     def test_json_raw_body_and_reply_unchanged(self):
         raw = json.dumps(self.body(), indent=2).encode() + b"\n"
@@ -180,6 +218,46 @@ class CacheTests(unittest.TestCase):
         with self.cache.lock:
             self.assertEqual(self.request(gateway.encode(self.body()))[0], 503)
         self.assertFalse(self.state["calls"])
+
+    def test_changed_boundaries_preserve_native_prefix_matching(self):
+        # A protocol backend exposes its token state/counters; this does not
+        # model llama.cpp checkpoint selection or claim a GPU speed result.
+        previous = [1, 2, 3, 4, 5, 6]
+        cases = [([1, 2, 3, 4, 5, 6, 7, 8], 6),  # extend
+                 ([1, 2, 3, 4], 4),               # shorten
+                 ([1, 2, 3, 9, 10], 3),           # fork
+                 ([9, 8, 7], 0)]                  # unrelated
+        for tokens, matched in cases:
+            with self.subTest(tokens=tokens):
+                self.state["cached_tokens"] = previous[:]
+                self.state["calls"] = []
+                self.cache.prefix = lambda body: tokens
+                result = self.cache.prepare({})
+                self.assertEqual(result["reused_tokens"], matched)
+                self.assertEqual(result["prime_tokens"], len(tokens) - matched)
+                self.assertEqual(self.state["cached_tokens"], tokens)
+                self.assertFalse(any("action=erase" in path for path, _, _ in self.state["calls"]))
+                completion = next(json.loads(raw) for path, raw, _ in self.state["calls"] if path == "/completion")
+                self.assertEqual(completion, {"prompt": tokens, "n_predict": 0, "cache_prompt": True, "stream": False})
+
+    def test_bad_manifest_preserves_memory_but_failed_restore_resets_partial_state(self):
+        result = self.cache.prepare(self.body())
+        self.cache.active = None
+        manifest = self.cache.manifests / (result["prefix_sha256"] + ".json")
+        manifest.write_text("[]")
+        self.state["calls"] = []
+        result = self.cache.prepare(self.body())
+        self.assertEqual(result["prime_tokens"], 0)
+        self.assertFalse(any("action=erase" in path for path, _, _ in self.state["calls"]))
+        self.cache.active = None
+        self.state["restore_status"] = 400
+        self.state["calls"] = []
+        result = self.cache.prepare(self.body())
+        paths = [path for path, _, _ in self.state["calls"]]
+        self.assertLess(paths.index("/slots/0?action=restore"), paths.index("/slots/0?action=erase"))
+        self.assertLess(paths.index("/slots/0?action=erase"), paths.index("/completion"))
+        self.assertEqual(result["prime_tokens"], result["fixed_tokens"])
+        self.assertEqual(result["reused_tokens"], 0)
 
     def test_hot_then_gateway_restart_uses_valid_disk(self):
         self.assertEqual(self.cache.prepare(self.body())["event"], "miss_saved")

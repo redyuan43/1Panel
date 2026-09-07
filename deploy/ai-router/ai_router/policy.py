@@ -1607,32 +1607,61 @@ class RoutingPolicy:
                     )
                 )
             ]
+        pin = endpoint.metadata.get("client_deployment_pin")
+        context_overflow = False
+        pinned_target_id = pin["deployment_id"] if pin else None
+        if pin is not None and endpoint.backend_type == "ai_pool":
+            capacity_candidates = await self._eligible_physical_deployments(
+                endpoint, status, required_context=1,
+                modalities=modalities, image_count=image_count,
+                excluded_deployment_ids=excluded_deployment_ids,
+                require_available=False,
+            )
+            primary = next(
+                (item for item in capacity_candidates
+                 if item.worker_id == pin["deployment_id"]), None,
+            )
+            if primary is not None and required_context > primary.safe_context_tokens:
+                overflow_id = pin.get("context_overflow_deployment_id")
+                if not overflow_id:
+                    raise NoCompatibleModelError(
+                        f"the configured client deployment {primary.worker_id} supports "
+                        f"{primary.safe_context_tokens} context tokens, but this request "
+                        f"requires {required_context} including output reservation"
+                    )
+                pinned_target_id = overflow_id
+                context_overflow = True
         if not workers:
             raise NoEligibleModelError(
                 "the local model pool has no physical worker with sufficient context"
             )
         selected = None
         available: list[PhysicalDeployment] = []
-        pin = endpoint.metadata.get("client_deployment_pin")
         if pin is not None:
             selected = next(
                 (
                     item
                     for item in workers
-                    if item.worker_id == pin["deployment_id"]
+                    if item.worker_id == pinned_target_id
                     and item.state in {"available", "busy", "leased"}
                 ),
                 None,
             )
             if selected is None:
+                if context_overflow:
+                    raise NoEligibleModelError(
+                        f"the request requires {required_context} context tokens; "
+                        f"the configured overflow deployment {pinned_target_id} "
+                        "is currently unavailable or incompatible"
+                    )
                 raise NoEligibleModelError(
                     f"the configured client deployment {pin['deployment_id']} "
                     "is unavailable or incompatible with this request"
                 )
             # Keep even a busy worker as the sole candidate for the shared queue.
             available = [selected]
-            decision.affinity = "client-pinned"
-            decision.reason = "client_deployment_pin"
+            decision.affinity = "client-context-overflow" if context_overflow else "client-pinned"
+            decision.reason = "client_context_overflow" if context_overflow else "client_deployment_pin"
             if (
                 decision.prefix_affinity_deployment_id != selected.worker_id
                 or (

@@ -683,7 +683,11 @@ def validate_settings(value: dict[str, Any]) -> None:
         "capacity_wait_seconds",
     }
     for pin in pins:
-        if not isinstance(pin, dict) or set(pin) != pin_fields:
+        if (
+            not isinstance(pin, dict)
+            or not pin_fields.issubset(pin)
+            or set(pin) - pin_fields - {"context_overflow_deployment_id", "prewarm_min_prompt_tokens"}
+        ):
             raise ValueError("routing.client_deployment_pins has invalid fields")
         for field in pin_fields - {"capacity_wait_seconds"}:
             text = pin[field]
@@ -691,6 +695,17 @@ def validate_settings(value: dict[str, Any]) -> None:
                 raise ValueError(
                     "routing.client_deployment_pins requires nonempty strings"
                 )
+        overflow = pin.get("context_overflow_deployment_id")
+        if "context_overflow_deployment_id" in pin and (
+            not isinstance(overflow, str) or not overflow.strip()
+            or overflow != overflow.strip() or overflow == pin["deployment_id"]
+        ):
+            raise ValueError("routing.client_deployment_pins has invalid context overflow deployment")
+        if "prewarm_min_prompt_tokens" in pin:
+            threshold = pin["prewarm_min_prompt_tokens"]
+            if (not overflow or isinstance(threshold, bool)
+                or not isinstance(threshold, int) or not 4096 <= threshold <= 250000):
+                raise ValueError("routing.client_deployment_pins has invalid prewarm threshold")
         if pin["model"] == "auto":
             raise ValueError("routing.client_deployment_pins requires an explicit model")
         scope = (pin["client_id"], pin["model"])

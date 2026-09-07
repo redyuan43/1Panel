@@ -1,0 +1,24 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "backend_url": "http://127.0.0.1:18080",
+  "backend_unit": "agx-cerebellum.service",
+  "api_key_file": "/home/agx/.config/qwen36-shared/api-key",
+  "cache_directory": "/data/agx-runtimes/qwen36-prefix-cache",
+  "minimum_prefix_tokens": 4096,
+  "max_snapshots": 3,
+  "max_disk_bytes": 12884901888,
+  "queue_timeout": 1800,
+  "backend_timeout": 1800,
+  "expected_server_impl_sha256": "4619e0827ae6abddd8345cedb9bed7bff0a72997a29849f7eb557a7233247661",
+  "runtime_files": {
+    "server_impl": "/data/agx-runtimes/qwen36-prefix-cache-production/lib/libllama-server-impl.so",
+    "llama": "/data/src/llama.cpp-dflash2-pr27342/build-agx-no-vmm/bin/libllama.so.0.1.2",
+    "common": "/data/src/llama.cpp-dflash2-pr27342/build-agx-no-vmm/bin/libllama-common.so.0.1.2",
+    "cuda": "/data/src/llama.cpp-dflash2-pr27342/build-agx-no-vmm/bin/libggml-cuda.so.0.20.2",
+    "binary": "/data/src/llama.cpp-dflash2-pr27342/build-agx-no-vmm/bin/llama-server",
+    "model": "/data/agx-runtimes/qwen36-ud-iq2m-20260906/Qwen3.6-35B-A3B-UD-IQ2_M.gguf",
+    "projector": "/data/agx-runtimes/qwen36-ud-iq2m-20260906/Cerebellum-mmproj-Q8_0.gguf",
+    "launcher": "/data/agx-runtimes/qwen36-prefix-cache-production/run-server.py"
+  }
+}

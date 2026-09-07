@@ -675,13 +675,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         client_id=authenticated.policy.id,
     )
     body = dynamic_context_move.body
-    if dynamic_context_move.moved:
+    if dynamic_context_move.skip_reason != "not_applicable":
         current.audit.write(
-            "workbuddy_dynamic_context_moved",
+            "workbuddy_dynamic_context_moved" if dynamic_context_move.moved
+            else "workbuddy_dynamic_context_skipped",
             request_id=request_id,
             client_id=authenticated.policy.id,
+            moved=dynamic_context_move.moved,
             moved_chars=dynamic_context_move.moved_chars,
             mode=dynamic_context_move.mode,
+            target_user_index=dynamic_context_move.target_user_index,
+            stable_prefix_sha256=dynamic_context_move.stable_prefix_sha256,
+            skip_reason=dynamic_context_move.skip_reason,
         )
     normalized = normalize_request(
         body,
@@ -1479,6 +1484,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         ),
                     )
 
+                current.prepare_overflow_prefix(
+                    decision, routed_body, client_id=authenticated.policy.id,
+                    request_id=request_id, api_kind=api_kind,
+                )
                 await current.budget.commit(budget_reservation)
                 budget_reservation = None
                 state = await _save_conversation(

@@ -62,6 +62,8 @@ routing:
       model: siyuan/qwen36-shared
       endpoint_id: qwen36-shared-fleet
       deployment_id: qwen36-nx3
+      context_overflow_deployment_id: qwen36-agx
+      prewarm_min_prompt_tokens: 45000
       capacity_wait_seconds: 900
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429

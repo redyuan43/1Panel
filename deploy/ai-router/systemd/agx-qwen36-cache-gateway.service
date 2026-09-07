@@ -1,0 +1,16 @@
+[Unit]
+Description=AGX Qwen3.6 persistent prefix cache gateway
+Requires=agx-cerebellum.service
+After=agx-cerebellum.service
+PartOf=agx-cerebellum.service
+[Service]
+Type=simple
+User=agx
+WorkingDirectory=/data/agx-runtimes/qwen36-prefix-cache-production
+ExecStart=/usr/bin/python3 /data/agx-runtimes/qwen36-prefix-cache-production/qwen36_prefix_gateway.py --config /data/agx-runtimes/qwen36-prefix-cache-production/config.json
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=60
+UMask=0077
+[Install]
+WantedBy=multi-user.target

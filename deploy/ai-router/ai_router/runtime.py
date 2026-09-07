@@ -22,6 +22,7 @@ from .health import HealthMonitor
 from .history import history_identities
 from .policy import ConversationRepository, RoutingPolicy
 from .prefix_affinity import PrefixAffinityRepository
+from .prefix_prewarm import PrefixPrewarmer
 from .prompt_directives import PromptDirectiveStore, configured_phrases
 from .privacy_review import PrivacyReviewer
 from .route_trace import RouteTraceStore, registry_fingerprint
@@ -61,6 +62,7 @@ class RouterRuntime:
     boot_id: str
     state_encryption_key: str = field(repr=False)
     privacy_reviewer: PrivacyReviewer | None = field(default=None, init=False)
+    prefix_prewarmer: PrefixPrewarmer | None = field(default=None, init=False, repr=False)
     track_instance: bool = False
     draining: bool = False
     started_at: float = field(default_factory=time.time)
@@ -426,6 +428,8 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        if self.prefix_prewarmer is not None:
+            await self.prefix_prewarmer.close()
         if self.privacy_reviewer is not None:
             await self.privacy_reviewer.close()
         if self.track_instance:
@@ -442,6 +446,13 @@ class RouterRuntime:
         close = getattr(self.store, "close", None)
         if close:
             await close()
+
+    def prepare_overflow_prefix(self, decision, body, *, client_id, request_id, api_kind):
+        if self.prefix_prewarmer is None:
+            self.prefix_prewarmer = PrefixPrewarmer(self)
+        self.prefix_prewarmer.submit(
+            decision, body, client_id=client_id, request_id=request_id, api_kind=api_kind,
+        )
 
     def review_privacy(self, body: dict[str, Any], api_kind: str, *, request_id: str, client_id: str) -> None:
         settings = self.settings.section("identity").get("review", {})
