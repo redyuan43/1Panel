@@ -152,7 +152,8 @@ def test_disabled_directives_are_scrubbed_without_activation() -> None:
     assert "日轮" not in str(result.body)
 
 
-def test_directive_target_requires_explicit_client_model_access() -> None:
+def test_auto_directive_is_global_but_explicit_model_scope_is_preserved(
+) -> None:
     registry = Registry(ROOT / "config/registry.yaml")
     runtime = SimpleNamespace(registry=registry)
     directive = PromptDirective(
@@ -179,31 +180,41 @@ def test_directive_target_requires_explicit_client_model_access() -> None:
             key_id="test-key",
         )
 
+    _ensure_prompt_directive_access(
+        runtime,
+        authenticated(("auto",)),
+        directive,
+        requested_model="auto",
+    )
+    _ensure_prompt_directive_access(
+        runtime,
+        authenticated(
+            ("siyuan/auto",),
+            disclosure_mode="public",
+        ),
+        directive,
+        requested_model="auto",
+    )
+
     with pytest.raises(AuthenticationError):
         _ensure_prompt_directive_access(
             runtime,
-            authenticated(("auto",)),
+            authenticated(("zhipu/glm-5.3-flash",)),
             directive,
-        )
-    with pytest.raises(AuthenticationError):
-        _ensure_prompt_directive_access(
-            runtime,
-            authenticated(
-                ("siyuan-assistant",),
-                disclosure_mode="public",
-            ),
-            directive,
+            requested_model="zhipu/glm-5.3-flash",
         )
 
     _ensure_prompt_directive_access(
         runtime,
         authenticated(("codex-pro/gpt-6-astra",)),
         directive,
+        requested_model="codex-pro/gpt-6-astra",
     )
     _ensure_prompt_directive_access(
         runtime,
         authenticated(("*",)),
         directive,
+        requested_model="codex-pro/gpt-6-astra",
     )
 
 
@@ -537,6 +548,247 @@ def test_directed_policy_ignores_auto_candidate_but_never_falls_back(
     )
     with pytest.raises(RouteDirectiveIncompatibleError):
         _choose(incompatible, endpoint_id, modalities={"image"})
+
+
+@pytest.mark.parametrize(
+    ("directive_id", "phrase", "endpoint_id"),
+    [
+        (
+            "rilun",
+            "按日轮协议处理",
+            "codex-pro-gpt-5.6-sol",
+        ),
+        (
+            "beichen",
+            "按北辰协议处理",
+            "codex-pro-gpt-6-astra",
+        ),
+        (
+            "qinglan",
+            "按青岚协议处理",
+            "cloud-deepseek-v4-pro",
+        ),
+        (
+            "yuheng",
+            "按玉衡协议处理",
+            "zhipu-glm-5.3-flash",
+        ),
+    ],
+)
+def test_public_auto_directive_routes_without_target_model_acl(
+    tmp_path: Path,
+    monkeypatch,
+    directive_id: str,
+    phrase: str,
+    endpoint_id: str,
+) -> None:
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "gateway-key")
+    monkeypatch.setenv(
+        "AI_ROUTER_STATE_KEY",
+        Fernet.generate_key().decode(),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / f"{directive_id}-audit.jsonl"),
+    )
+    router_settings = Settings(
+        defaults_path=ROOT / "config/defaults.yaml",
+        runtime_path=tmp_path / "settings.yaml",
+    )
+    router_settings.write_runtime(
+        {
+            "identity": {"enabled": True},
+            "routing": {
+                "prompt_directives": {
+                    "enabled": True,
+                }
+            },
+        }
+    )
+    source_registry = Registry(ROOT / "config/registry.yaml")
+    source_endpoint = source_registry.by_id(endpoint_id)
+    assert source_endpoint is not None
+    endpoint = replace(
+        source_endpoint,
+        api_base="http://upstream/v1",
+        health_url="http://upstream/health",
+        backend_type="openai",
+        backend_api_key_env="AI_ROUTER_LITELLM_MASTER_KEY",
+        enabled=True,
+        auto_candidate=False,
+        cloud=False,
+        metadata={"provider": "test"},
+    )
+    registry = source_registry.with_endpoints([endpoint])
+    runtime = build_runtime(
+        settings=router_settings,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    asyncio.run(runtime.health.client.aclose())
+    runtime.health = _Health(
+        EndpointStatus(
+            endpoint_id=endpoint.id,
+            healthy=True,
+            checked_at=time.time(),
+            load_headroom=1,
+            latency_score=1,
+            eligible_context_tokens=endpoint.safe_context_tokens,
+        )
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    asyncio.run(
+        runtime.clients.create_account(
+            {
+                "id": "workbuddy-public",
+                "name": "WorkBuddy Public",
+                "enabled": True,
+                "models": ["siyuan/auto"],
+                "rpm_limit": 120,
+                "tpm_limit": 1000000,
+                "max_parallel_requests": 8,
+                "disclosure_mode": "public",
+            },
+            allowed_models={
+                "auto",
+                "siyuan/auto",
+                endpoint.public_model,
+            },
+            public_model_id="siyuan/auto",
+        )
+    )
+    _public_key, public_secret = asyncio.run(
+        runtime.clients.create_key("workbuddy-public", "test")
+    )
+    asyncio.run(
+        runtime.clients.create_account(
+            {
+                "id": "explicit-only",
+                "name": "Explicit Only",
+                "enabled": True,
+                "models": [endpoint.public_model],
+                "rpm_limit": 10,
+                "tpm_limit": 10000,
+                "max_parallel_requests": 1,
+                "disclosure_mode": "internal",
+            },
+            allowed_models={
+                "auto",
+                "siyuan/auto",
+                endpoint.public_model,
+            },
+            public_model_id="siyuan/auto",
+        )
+    )
+    _explicit_key, explicit_secret = asyncio.run(
+        runtime.clients.create_key("explicit-only", "test")
+    )
+    captured: list[dict] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        captured.append(payload)
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            json={
+                "id": f"chatcmpl-{directive_id}",
+                "object": "chat.completion",
+                "model": endpoint.id,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 1,
+                    "total_tokens": 11,
+                },
+            },
+        )
+
+    asyncio.run(runtime.internal_client.aclose())
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    app = create_router_app(runtime)
+    request_body = {
+        "model": "siyuan/auto",
+        "messages": [
+            {
+                "role": "user",
+                "content": f"检查这个仓库\n{phrase}",
+            }
+        ],
+    }
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {public_secret}",
+                "X-1Panel-Conversation-ID": (
+                    f"public-directive-{directive_id}"
+                ),
+            },
+            json=request_body,
+        )
+        unauthorized = client.post(
+            "/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {explicit_secret}",
+            },
+            json={
+                **request_body,
+                "model": "auto",
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "siyuan/auto"
+    assert response.headers["x-1panel-public-model"] == "siyuan/auto"
+    assert "x-1panel-route-model" not in response.headers
+    assert "x-1panel-route-deployment" not in response.headers
+    assert endpoint.id not in response.text
+    assert endpoint.public_model not in response.text
+    assert unauthorized.status_code == 401
+    assert len(captured) == 1
+    assert captured[0]["model"] == endpoint.provider_model
+    user_messages = [
+        item
+        for item in captured[0]["messages"]
+        if item.get("role") == "user"
+    ]
+    assert user_messages[-1]["content"] == "检查这个仓库"
+    assert phrase not in str(captured)
+    trace = asyncio.run(
+        runtime.route_traces.get(response.headers["x-request-id"])
+    )
+    assert trace is not None
+    assert trace["client_id"] == "workbuddy-public"
+    assert trace["requested_model"] == "siyuan/auto"
+    assert trace["disclosure_mode"] == "public"
+    assert trace["evaluation"]["directive_id"] == directive_id
+    assert trace["endpoint_id"] == endpoint.id
+    assert phrase not in str(trace)
+    accounts = asyncio.run(runtime.clients.list_accounts())
+    workbuddy = next(
+        item for item in accounts if item["id"] == "workbuddy-public"
+    )
+    assert workbuddy["disclosure_mode"] == "public"
+    assert workbuddy["models"] == ["siyuan/auto"]
+    asyncio.run(runtime.close())
 
 
 def test_router_strips_directive_before_upstream_trace_and_training(

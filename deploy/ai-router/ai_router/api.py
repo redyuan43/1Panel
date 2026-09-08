@@ -534,13 +534,13 @@ def _ensure_prompt_directive_access(
     current: RouterRuntime,
     authenticated: Any,
     directive: Any,
+    *,
+    requested_model: str,
 ) -> None:
     if directive is None:
         return
-    if authenticated.policy.disclosure_mode == "public":
-        raise AuthenticationError(
-            "API key does not permit prompt-directed routing"
-        )
+    if requested_model == "auto":
+        return
     endpoint = current.registry.by_id(str(directive.endpoint_id or ""))
     if endpoint is None:
         return
@@ -755,6 +755,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         current,
         authenticated,
         resolved_directive,
+        requested_model=requested_model,
     )
     trace.set_request_context(
         conversation_id=conversation_id,
