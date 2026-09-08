@@ -30,14 +30,14 @@ class ReviewReproductions(unittest.TestCase):
     def test_sanitizer_finish_output_receives_first_output_timing(self):
         async def run():
             current=SimpleNamespace(compactor=None,conversations=None,training=None)
-            trace=SimpleNamespace(payload={})
+            trace=SimpleNamespace(payload={}, record=mock.Mock(), fail=mock.Mock())
             decision=SimpleNamespace(trace=trace,attempts=1,native_or_adapter='native',endpoint=SimpleNamespace(public_model='synthetic-model'))
             finalizer=SimpleNamespace(begin_stream=mock.AsyncMock(),finish_stream=mock.Mock())
             # Q is a partial prefix of the hidden identifier Qwen. The real
             # sanitizer buffers it until EOF, then emits a complete public frame.
             upstream=httpx.Response(200,content=b'data: {"choices":[{"index":0,"delta":{"content":"Q"}}]}\n\n')
             profile=IdentityProfile.from_settings({'enabled':True,'public_model_id':'synthetic-public'})
-            with mock.patch.object(api,'persist_history',new=mock.AsyncMock()),mock.patch.object(api,'_audit',new=mock.AsyncMock()),mock.patch.object(api,'_run_stream_resource_finalizer',new=mock.AsyncMock()):
+            with mock.patch.object(api,'_save_request_trace',new=mock.AsyncMock()),mock.patch.object(api,'persist_history',new=mock.AsyncMock()),mock.patch.object(api,'_audit',new=mock.AsyncMock()),mock.patch.object(api,'_run_stream_resource_finalizer',new=mock.AsyncMock()):
                 parts=[chunk async for chunk in api._stream_response(current,upstream,resource_finalizer=finalizer,client_id='synthetic-client',key_id='synthetic-key',request_id='synthetic-request',conversation_id=None,decision=decision,state=None,body={},api_kind='chat',training_token=None,started_at=time.monotonic()-.01,cache_snapshot=None,identity=profile,identifiers=('Qwen',))]
             output=b''.join(parts)
             self.assertIn(b'"content":"Q"',output)

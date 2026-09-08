@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .content_audit import ContentObservation, ArchiveReader
 from .cache_audit import TelemetryCollector, OutputClock
+from .usage_evidence import UsageOnlyFilter, token_count, usage_dict, usage_measurement
 
 import asyncio
 import json
@@ -1607,6 +1608,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
 
                 payload = await upstream.aread()
                 await upstream.aclose()
+                raw_usage = usage_dict(payload)
                 if (
                     api_kind == "responses"
                     and decision.native_or_adapter == "adapter"
@@ -1650,6 +1652,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     status_code=upstream.status_code,
                     started_at=request.state.started_at,
                     response_payload=payload,
+                    usage=raw_usage,
                     cache_snapshot=cache_snapshot,
                 )
                 return Response(
@@ -2965,6 +2968,13 @@ async def _send_upstream(
     headers["X-1Panel-Operation-ID"] = operation_id
     headers["X-1Panel-Attempt"] = str(attempt)
     headers["X-1Panel-Operation-Kind"] = "foreground"
+    internal_usage = False
+    if (decision.endpoint.metadata.get("cache_usage") == "per_request"
+            and payload.get("stream") and (api_kind == "chat" or responses_adapter)):
+        options = payload.get("stream_options")
+        if options is None or isinstance(options, dict):
+            internal_usage = api_kind == "chat" and not bool((options or {}).get("include_usage"))
+            payload["stream_options"] = {**(options or {}), "include_usage": True}
     observation = getattr(request.state, "content_observation", None)
     if observation:
         observation.capture("forwarded_" + str(attempt), payload)
@@ -2982,6 +2992,7 @@ async def _send_upstream(
         timeout=timeout,
     )
     response = await current.internal_client.send(upstream_request, stream=True)
+    response.extensions["internal_cache_usage"] = internal_usage
     if direct and response.headers.get("X-Prefix-Telemetry") == "1":
         if not getattr(current, "cache_collector", None):
             current.cache_collector = TelemetryCollector(current)
@@ -3809,6 +3820,11 @@ async def _stream_response(
     accumulator = SSEAccumulator(api_kind)
     private_accumulator = SSEAccumulator(api_kind)
     output_clock = OutputClock(api_kind, started_at)
+    usage_filter = UsageOnlyFilter() if upstream.extensions.get("internal_cache_usage") and api_kind == "chat" else None
+    adapter_usage = {}
+    def capture_adapter_usage(value):
+        adapter_usage.clear()
+        adapter_usage.update(value)
     sanitizer = IdentityStreamSanitizer(
         api_kind,
         identity,
@@ -3821,6 +3837,7 @@ async def _stream_response(
             chat_stream_to_responses(
                 upstream,
                 model=decision.endpoint.public_model,
+                usage_observer=capture_adapter_usage,
             )
             if (
                 api_kind == "responses"
@@ -3831,7 +3848,8 @@ async def _stream_response(
         async for chunk in source:
             private_accumulator.feed(chunk)
             batch_completed = False
-            for public_chunk in sanitizer.feed(chunk):
+            visible = b"".join(usage_filter.feed(chunk)) if usage_filter else chunk
+            for public_chunk in sanitizer.feed(visible):
                 accumulator.feed(public_chunk)
                 output_clock.feed(public_chunk)
                 if decision.trace:
@@ -3843,21 +3861,19 @@ async def _stream_response(
                 completed = True
                 break
         else:
-            for public_chunk in sanitizer.finish():
+            trailing = b"".join(usage_filter.finish()) if usage_filter else b""
+            for public_chunk in sanitizer.feed(trailing) + sanitizer.finish():
                 accumulator.feed(public_chunk)
                 output_clock.feed(public_chunk)
                 if decision.trace:
                     decision.trace.payload.setdefault("observation", {}).update(output_clock.values)
                 yield public_chunk
-            completed = True
+            # A clean EOF still needs a protocol terminal marker. Cancellation
+            # or transport failure must never promote partial usage to success.
+            completed = bool(accumulator.terminal or private_accumulator.terminal)
     finally:
         accumulator.finish()
         private_accumulator.finish()
-        completed = bool(
-            completed
-            or accumulator.terminal
-            or private_accumulator.terminal
-        )
 
         async def finalize_stream() -> None:
             try:
@@ -3936,7 +3952,8 @@ async def _stream_response(
                     decision=decision,
                     status_code=status_code if completed else 499,
                     started_at=started_at,
-                    usage=private_accumulator.usage,
+                    usage=adapter_usage if api_kind == "responses" and decision.native_or_adapter == "adapter" else private_accumulator.usage,
+                    usage_complete=not private_accumulator.usage_incomplete,
                     cache_snapshot=cache_snapshot,
                 )
             finally:
@@ -4024,6 +4041,7 @@ async def _audit(
     started_at: float,
     response_payload: bytes | None = None,
     usage: dict[str, Any] | None = None,
+    usage_complete: bool = True,
     cache_snapshot: dict[str, float] | None = None,
 ) -> None:
     cached_prompt_tokens_fallback = await _prefix_cache_delta(
@@ -4038,6 +4056,16 @@ async def _audit(
         prompt_tokens_fallback=decision.prompt_tokens,
     )
     explicit_cached, _ = _cache_metrics(response_payload, usage, prompt_tokens_fallback=decision.prompt_tokens)
+    backend_usage = usage_measurement(response_payload, usage)
+    if response_payload:
+        try:
+            response_value = json.loads(response_payload)
+            if isinstance(response_value, dict) and response_value.get("status") in {"incomplete", "failed", "cancelled", "in_progress", "queued"}:
+                usage_complete = False
+        except (ValueError, TypeError):
+            pass
+    if not usage_complete:
+        backend_usage = {**backend_usage, "state": "incomplete", "cached_tokens": None}
     cache_measurement_source = "upstream_usage" if explicit_cached is not None else "backend_counter_delta" if cached_prompt_tokens_fallback is not None else "unavailable"
     decision.actual_cached_tokens = cached_prompt_tokens
     if decision.trace:
@@ -4067,6 +4095,7 @@ async def _audit(
                 "output_tokens": output_tokens,
                 "cached_prompt_tokens": cached_prompt_tokens,
                 "cache_measurement_source": cache_measurement_source,
+                "backend_usage": backend_usage,
                 "cache_hit_ratio": cache_hit_ratio,
                 "prefix_match_type": decision.prefix_match_type,
                 "predicted_cached_tokens": (
@@ -4123,6 +4152,8 @@ async def _audit(
         status_code=status_code,
         latency_ms=round((time.monotonic() - started_at) * 1000, 2),
         cached_prompt_tokens=cached_prompt_tokens,
+        cache_measurement_source=cache_measurement_source,
+        backend_usage=backend_usage,
         cache_hit_ratio=cache_hit_ratio,
         prefix_match_type=decision.prefix_match_type,
         predicted_cached_tokens=decision.predicted_cached_tokens,
@@ -4252,33 +4283,13 @@ def _usage_totals(
     *,
     prompt_tokens_fallback: int,
 ) -> tuple[int, int]:
-    current = usage
-    if current is None and response_payload:
-        try:
-            value = json.loads(response_payload)
-        except Exception:
-            value = {}
-        if isinstance(value, dict):
-            current = value.get("usage")
-            if not isinstance(current, dict):
-                response = value.get("response")
-                current = (
-                    response.get("usage")
-                    if isinstance(response, dict)
-                    else None
-                )
-    current = current if isinstance(current, dict) else {}
-    input_tokens = int(
-        current.get("prompt_tokens")
-        or current.get("input_tokens")
-        or prompt_tokens_fallback
-    )
-    output_tokens = int(
-        current.get("completion_tokens")
-        or current.get("output_tokens")
-        or 0
-    )
-    return max(0, input_tokens), max(0, output_tokens)
+    current = usage_dict(response_payload, usage)
+    measured = usage_measurement(usage=current)
+    input_tokens = measured["input_tokens"]
+    if input_tokens is None:
+        input_tokens = token_count(prompt_tokens_fallback) or 0
+    output_tokens = token_count(current.get("completion_tokens", current.get("output_tokens")))
+    return input_tokens, output_tokens if output_tokens is not None else 0
 
 
 def _cache_metrics(
@@ -4288,53 +4299,20 @@ def _cache_metrics(
     cached_prompt_tokens_fallback: int | None = None,
     prompt_tokens_fallback: int = 0,
 ) -> tuple[int | None, float | None]:
-    current = usage
-    if current is None and response_payload:
-        try:
-            value = json.loads(response_payload)
-        except Exception:
-            value = {}
-        if isinstance(value, dict):
-            current = value.get("usage")
-            if not isinstance(current, dict):
-                response = value.get("response")
-                current = (
-                    response.get("usage")
-                    if isinstance(response, dict)
-                    else None
-                )
-    if not isinstance(current, dict) and cached_prompt_tokens_fallback is None:
+    measured = usage_measurement(response_payload, usage)
+    if measured["state"] == "invalid":
         return None, None
-    current = current if isinstance(current, dict) else {}
-    prompt_tokens = int(
-        current.get("prompt_tokens")
-        or current.get("input_tokens")
-        or prompt_tokens_fallback
-    )
-    details = current.get("prompt_tokens_details")
-    cached_values = [
-        current.get("prompt_cache_hit_tokens"),
-        current.get("cache_read_input_tokens"),
-    ]
-    if isinstance(details, dict):
-        cached_values.append(details.get("cached_tokens"))
-    explicit_cached_values = [
-        int(value)
-        for value in cached_values
-        if isinstance(value, (int, float))
-    ]
-    if explicit_cached_values:
-        cached_prompt_tokens = max(explicit_cached_values)
-    elif cached_prompt_tokens_fallback is not None:
-        cached_prompt_tokens = int(cached_prompt_tokens_fallback)
-    else:
+    cached = measured["cached_tokens"]
+    if cached is None:
+        cached = token_count(cached_prompt_tokens_fallback)
+    if cached is None:
         return None, None
-    ratio = (
-        round(cached_prompt_tokens / prompt_tokens, 6)
-        if prompt_tokens > 0
-        else None
-    )
-    return cached_prompt_tokens, ratio
+    total = measured["input_tokens"]
+    if total is None:
+        total = token_count(prompt_tokens_fallback)
+    if total is not None and cached > total:
+        return None, None
+    return cached, round(cached / total, 6) if total else None
 
 
 async def _prefix_cache_snapshot(

@@ -166,6 +166,7 @@ args=(
     --max-num-seqs "$MAX_NUM_SEQS"
     --enable-chunked-prefill
     --enable-prefix-caching
+    --enable-prompt-tokens-details
     --mamba-cache-mode align
     --enable-auto-tool-choice
     --tool-call-parser qwen3_coder

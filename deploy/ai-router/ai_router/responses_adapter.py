@@ -100,6 +100,7 @@ async def chat_stream_to_responses(
     upstream: httpx.Response,
     *,
     model: str,
+    usage_observer=None,
 ) -> AsyncIterator[bytes]:
     response_id = f"resp_{uuid4().hex}"
     message_id = f"msg_{uuid4().hex}"
@@ -148,14 +149,20 @@ async def chat_stream_to_responses(
             ),
         ]
 
+    saw_done = False
     async for block in _iter_sse_blocks(upstream):
         raw = _sse_data(block)
-        if not raw or raw == "[DONE]":
+        if raw == "[DONE]":
+            saw_done = True
+            continue
+        if not raw:
             continue
         try:
             event = json.loads(raw)
         except json.JSONDecodeError:
             continue
+        if isinstance(event, dict) and (event.get("error") or event.get("type") == "error"):
+            raise httpx.RemoteProtocolError("Chat upstream returned a stream error")
         if not started:
             started = True
             for item in start_events():
@@ -163,6 +170,8 @@ async def chat_stream_to_responses(
         current_usage = event.get("usage")
         if isinstance(current_usage, dict):
             usage = current_usage
+            if usage_observer is not None:
+                usage_observer(current_usage)
         choices = event.get("choices")
         if not isinstance(choices, list) or not choices:
             continue
@@ -246,6 +255,8 @@ async def chat_stream_to_responses(
                     },
                 )
 
+    if not saw_done and finish_reason is None:
+        raise httpx.RemoteProtocolError("Chat stream ended without a terminal marker")
     if not started:
         for item in start_events():
             yield item

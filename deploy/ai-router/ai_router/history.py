@@ -583,6 +583,7 @@ class SSEAccumulator:
         self.response_id: str | None = None
         self.usage: dict[str, Any] | None = None
         self.terminal = False
+        self.usage_incomplete = False
         self.completed = False
 
     def feed(self, chunk: bytes) -> None:
@@ -686,6 +687,9 @@ class SSEAccumulator:
             usage = response.get("usage")
         if isinstance(usage, dict):
             self.usage = usage
+        if (payload.get("error") or payload.get("type") in {"response.incomplete", "response.failed", "error"}
+                or (isinstance(response, dict) and response.get("status") in {"incomplete", "failed", "cancelled"})):
+            self.usage_incomplete = True
         choices = payload.get("choices")
         if isinstance(choices, list) and choices:
             if choices[0].get("finish_reason") is not None:

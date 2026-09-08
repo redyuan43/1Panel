@@ -2321,7 +2321,7 @@ function traceTimelineCard(item, turnIndex) {
     ${statusBadge(item.status,item.status_code,item.error?.code,Boolean(item.task||item.selected_model))}
     <strong>${escapeHtml(m?.device||item.node||item.deployment_id||item.selected_model||"未确定设备")}</strong>
     <span class="trace-timeline-meta">首个输出 ${escapeHtml(cacheFormat(m?.ttft_ms))}</span>
-    <span class="trace-timeline-meta">净复用 ${escapeHtml(cacheFormat(m?.net_cache_ratio,"ratio"))}</span>
+    <span class="trace-timeline-meta">${escapeHtml(cacheBrief(m))}</span>
     <span class="trace-timeline-time">${formatTime(item.started_at)}</span>
   </button>`;
 }

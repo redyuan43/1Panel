@@ -62,6 +62,10 @@ else
     KV_TRANSFER_CONFIG=""
 fi
 
+# Fail closed on an upgraded or unpatched response implementation.
+package_root="$(find "$VLLM_VENV/lib" -path '*/site-packages/vllm' -type d -print -quit)"
+"$BASE_VLLM_VENV/bin/python" "$SCRIPT_DIR/patch-vllm-cache-usage.py" check --package-root "$package_root"
+
 if ! docker info >/dev/null 2>&1; then
     printf 'Docker daemon is unavailable\n' >&2
     exit 1

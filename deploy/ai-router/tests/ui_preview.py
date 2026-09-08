@@ -135,6 +135,21 @@ async def prepare(directory):
     await asyncio.to_thread(runtime.route_traces._save, payload)
     await CacheAudit(runtime.route_traces.database_path).save_operation({"operation_id": "preview-operation", "request_id": "preview-local", "attempt": 1, "kind": "foreground", "deployment_id": "preview-nx3", "terminal": True, "status": "completed", "ttft_ms": 7200, "queue_ms": 1.5, "cache": {"event": "hot", "fixed_tokens": 33028, "prime_tokens": 0, "template_ms": 112, "seconds": .112}, "timings": {"cache_n": 50211, "prompt_n": 986, "prompt_ms": 6376.6, "prompt_per_second": 154.6}})
 
+    # Per-request AI usage fixtures. No inference or production telemetry.
+    import copy
+    for label, count in (("hit", 42000), ("miss", 0), ("unknown", None), ("estimated", None), ("running", 42000)):
+        item = copy.deepcopy(payload)
+        item.update(boot_id=runtime.boot_id, request_id="preview-ai-" + label, selected_model="ai-qwen38-27b",
+                    conversation_id="preview-ai-conversation", status="running" if label == "running" else "succeeded")
+        evidence = {"input_tokens": 46768, "output_tokens": 71,
+                    "backend_usage": {"state": "complete" if count is not None else "missing",
+                                      "input_tokens": 46768, "cached_tokens": count}}
+        if label == "estimated":
+            evidence.update(cached_prompt_tokens=32000, cache_measurement_source="backend_counter_delta")
+        item["attempts"] = [{"number": 1, "steps": [{"node_id": "upstream_request", "evidence": evidence}]}]
+        item["observation"] = {"ttft_ms": 38900, "first_text_ms": 38900, "queue_wait_ms": 0}
+        await asyncio.to_thread(runtime.route_traces._save, item)
+
     lineage_fixture = json.loads(
         (
             ROOT

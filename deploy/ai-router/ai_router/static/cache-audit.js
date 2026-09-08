@@ -3,7 +3,20 @@ const cacheView = {view: "conversation", stage: null, request: null, offset: 0, 
 const cacheStageNames = {received:"入口摘要（正文未归档）",after_directives:"指令清理后",workbuddy_reordered:"WorkBuddy 重排后",effective:"有效上下文",legacy_after_directives:"旧归档：指令清理后"};
 const cacheCheckNames = {workbuddy_reorder:"WorkBuddy 重排",message_order_and_tool_history:"消息顺序与工具历史",user_content_and_images:"用户内容与图片",tool_definitions_and_parameters:"工具定义与参数",dynamic_tool_content_once:"工具动态说明保全",workspace_memory_and_stable_content:"工作区记忆与稳定内容",single_dynamic_block:"动态内容未重复插入"};
 const cacheEventNames = {hot:"内存状态可用",disk:"磁盘恢复",miss_saved:"计算后保存",miss_memory_only:"计算后保留内存",bypass:"未使用快照"};
-const cacheFormat = (value, unit="ms") => value == null ? "未采集" : unit === "ratio" ? `${(value*100).toFixed(1)}%` : unit === "ms" ? `${(value/1000).toFixed(2)} 秒` : `${Number(value).toLocaleString(undefined,{maximumFractionDigits:1})}${unit === "tokens" ? " tokens" : unit}`;
+const cacheStatusNames = {hit:"已命中",miss:"未命中",estimated:"仅有估算",unknown:"数据不足",running:"执行中"};
+function cacheBrief(m) {
+  if(!m)return "数据不足";
+  const label=cacheStatusNames[m.cache_status]||"数据不足";
+  if(m.backend_cached_tokens!=null)return `${label} · 复用 ${cacheFormat(m.backend_cached_tokens,"tokens")}${m.backend_reuse_ratio!=null?` / ${cacheFormat(m.backend_reuse_ratio,"ratio")}`:""}${m.prime_tokens>0?" · 含准备阶段重算":""}`;
+  if(m.estimated_cached_tokens!=null)return `${label} · ${cacheFormat(m.estimated_cached_tokens,"tokens")}${m.estimated_reuse_ratio!=null?` / ${cacheFormat(m.estimated_reuse_ratio,"ratio")}`:""}`;
+  return label;
+}
+function cacheDisclosure(key,title,body,defaultOpen=false) {
+  cacheView.disclosures ||= new Map();
+  const open=cacheView.disclosures.has(key)?cacheView.disclosures.get(key):defaultOpen;
+  return `<details class="audit-fold" data-cache-detail="${escapeHtml(key)}" ${open?"open":""}><summary>${escapeHtml(title)}</summary>${body}</details>`;
+}
+const cacheFormat = (value, unit="ms") => value == null ? "后端未提供" : unit === "ratio" ? `${(value*100).toFixed(1)}%` : unit === "ms" ? `${(value/1000).toFixed(2)} 秒` : `${Number(value).toLocaleString(undefined,{maximumFractionDigits:1})}${unit === "tokens" ? " tokens" : unit}`;
 const cacheCell = (label,value,unit="ms") => `<div class="cache-value"><span>${escapeHtml(label)}</span><strong>${escapeHtml(cacheFormat(value,unit))}</strong></div>`;
 
 function setAuditSubview(view) {
@@ -38,14 +51,14 @@ async function loadCacheOverview({force=false}={}) {
     if(seq!==cacheView.sequence) return;
     cacheView.next=page.next_offset;
     cacheView.rows=new Map(page.items.map(x=>[x.request_id,x]));
-    const units={net_cache_ratio:"ratio",fixed_reuse_ratio:"ratio",prefill_tps:" tokens/s"};
-    const labels={ttft_ms:"首个输出等待",first_text_ms:"首段正文等待",queue_ms:"Router 排队",prefill_ms:"正式 prefill",restore_ms:"磁盘恢复",net_cache_ratio:"净 token 复用率",fixed_reuse_ratio:"固定前缀复用率",prefill_tps:"Prefill 速度"};
+    const units={backend_reuse_ratio:"ratio",net_cache_ratio:"ratio",fixed_reuse_ratio:"ratio",prefill_tps:" tokens/s"};
+    const labels={backend_reuse_ratio:"后端逐请求复用率",ttft_ms:"首个输出等待",first_text_ms:"首段正文等待",queue_ms:"Router 排队",prefill_ms:"正式 prefill",restore_ms:"磁盘恢复",net_cache_ratio:"净 token 复用率",fixed_reuse_ratio:"固定前缀复用率",prefill_tps:"Prefill 速度"};
     byId("cache-metrics").innerHTML=Object.entries(labels).map(([k,label])=>{
-      const v=summary.metrics[k];return `<article class="cache-metric"><span>${label}</span><strong>${escapeHtml(cacheFormat(v.median,units[k]||"ms"))}</strong><small>中位数 · P95 ${escapeHtml(cacheFormat(v.p95,units[k]||"ms"))} · ${v.n} 个有效样本</small></article>`;
+      const v=summary.metrics[k]||{n:0,median:null,p95:null};return `<article class="cache-metric"><span>${label}</span><strong>${escapeHtml(cacheFormat(v.median,units[k]||"ms"))}</strong><small>中位数 · P95 ${escapeHtml(cacheFormat(v.p95,units[k]||"ms"))} · ${v.n} 个有效样本</small></article>`;
     }).join("");
     byId("cache-overview-state").textContent=`${summary.total} 条请求 · ${summary.succeeded} 条成功 · 固定前缀达标 ${summary.fixed_pass.passed}/${summary.fixed_pass.n} 个有效样本${summary.truncated?" · 已达 10,000 条分析上限，请缩短时间范围":""}`;
     byId("cache-trend").innerHTML=cacheTrend(summary.trend);
-    byId("cache-request-rows").innerHTML=page.items.map(x=>`<tr><td><button class="text-button" data-cache-request="${escapeHtml(x.request_id)}">${escapeHtml(x.request_id.slice(0,12))}</button><small>${formatTime(x.started_at)}</small></td><td>${escapeHtml(x.device||"未确定")}<small>${escapeHtml(x.model||"")}</small></td><td>${escapeHtml(statusLabels[x.status]||x.status)}<small>${escapeHtml(x.request_kind||"")}</small></td><td>${escapeHtml(cacheEventNames[x.event]||"未采集")}<small>${x.net_cache_ratio!=null?`净复用 ${escapeHtml(cacheFormat(x.net_cache_ratio,"ratio"))}`:x.reported_cache_ratio!=null?`后端报告 ${escapeHtml(cacheFormat(x.reported_cache_ratio,"ratio"))}`:"复用未采集"}</small></td><td>${escapeHtml(cacheFormat(x.total_prefill_tokens,"tokens"))}</td><td>${escapeHtml(cacheFormat(x.queue_ms))}</td><td>${escapeHtml(cacheFormat(x.ttft_ms))}</td></tr>`).join("")||'<tr><td colspan="7" class="empty">此筛选下没有请求</td></tr>';
+    byId("cache-request-rows").innerHTML=page.items.map(x=>`<tr><td><button class="text-button" data-cache-request="${escapeHtml(x.request_id)}">${escapeHtml(x.request_id.slice(0,12))}</button><small>${formatTime(x.started_at)}</small></td><td>${escapeHtml(x.device||"未确定")}<small>${escapeHtml(x.model||"")}</small></td><td>${escapeHtml(statusLabels[x.status]||x.status)}<small>${escapeHtml(x.request_kind||"")}</small></td><td>${escapeHtml(cacheBrief(x))}<small>${escapeHtml(x.cache_measurement==="measured"?"逐请求实测":x.cache_measurement==="estimated"?"全局差值估算":"缺少完整计数")}</small></td><td>${escapeHtml(cacheFormat(x.total_prefill_tokens,"tokens"))}</td><td>${escapeHtml(cacheFormat(x.queue_ms))}</td><td>${escapeHtml(cacheFormat(x.ttft_ms))}</td></tr>`).join("")||'<tr><td colspan="7" class="empty">此筛选下没有请求</td></tr>';
     byId("cache-prev").disabled=cacheView.offset===0;
     byId("cache-next").disabled=page.next_offset==null;
     byId("cache-page-state").textContent=`${cacheView.offset+1}–${cacheView.offset+page.items.length} / ${page.total}`;
@@ -59,18 +72,18 @@ async function loadCacheOverview({force=false}={}) {
 
 function cacheTrend(rows) {
   if(!rows.length) return '<p class="empty">暂无趋势样本</p>';
-  const keys=[["ttft_ms","首个输出"],["queue_ms","排队"],["prefill_ms","Prefill"],["fixed_reuse_ratio","固定前缀复用"]];
+  const keys=[["backend_reuse_ratio","后端逐请求复用"],["ttft_ms","首个输出"],["queue_ms","排队"],["prefill_ms","Prefill"],["fixed_reuse_ratio","固定前缀复用"]];
   return keys.map(([key,label])=>{
-    const values=rows.map(r=>r[key].median); const max=Math.max(...values.filter(v=>v!=null),1);
+    const values=rows.map(r=>r[key]?.median??null); const max=Math.max(...values.filter(v=>v!=null),1);
     const points=values.map((v,i)=>v==null?null:[20+i*320/Math.max(1,rows.length-1),65-v/max*50]);
     let segments=[], part=[]; points.forEach(p=>{if(p)part.push(p.join(","));else if(part.length){segments.push(part.join(" "));part=[];}});if(part.length)segments.push(part.join(" "));
-    return `<article class="cache-trend-item"><strong>${label}</strong><svg viewBox="0 0 360 85" role="img" aria-label="${label}每小时中位数">${segments.map(p=>`<polyline points="${p}" fill="none" stroke="var(--cyan)" stroke-width="2"/>`).join("")}${points.map((p,i)=>p?`<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="var(--cyan)"><title>${escapeHtml(formatTime(rows[i].at))} · ${escapeHtml(cacheFormat(values[i],key.endsWith("ratio")?"ratio":"ms"))} · ${rows[i][key].n} 样本</title></circle>`:"").join("")}</svg><small>${formatTime(rows[0].at)} — ${formatTime(rows.at(-1).at)}</small></article>`;
+    return `<article class="cache-trend-item"><strong>${label}</strong><svg viewBox="0 0 360 85" role="img" aria-label="${label}每小时中位数">${segments.map(p=>`<polyline points="${p}" fill="none" stroke="var(--cyan)" stroke-width="2"/>`).join("")}${points.map((p,i)=>p?`<circle cx="${p[0]}" cy="${p[1]}" r="3" fill="var(--cyan)"><title>${escapeHtml(formatTime(rows[i].at))} · ${escapeHtml(cacheFormat(values[i],key.endsWith("ratio")?"ratio":"ms"))} · ${rows[i][key]?.n??0} 样本</title></circle>`:"").join("")}</svg><small>${formatTime(rows[0].at)} — ${formatTime(rows.at(-1).at)}</small></article>`;
   }).join("");
 }
 
 function renderUnifiedAudit() {
   const trace=state.selectedTrace; if(!trace)return;
-  if(cacheView.request!==trace.request_id){cacheView.request=trace.request_id;cacheView.stage=null;cacheView.contentSequence++;byId("cache-content").replaceChildren();}
+  if(cacheView.request!==trace.request_id){cacheView.request=trace.request_id;cacheView.stage=null;cacheView.disclosures=new Map();cacheView.contentSequence++;byId("cache-content").replaceChildren();}
   const m=trace.cache_audit?.request||{};
   const terminal=["succeeded","failed","interrupted"].includes(trace.status);
   const labels=[["received","接收",null],["content","内容整理",null],["routing","路由选择",null],["queue","排队",m.queue_ms],["execution","模型执行",m.prefill_ms],["completed","完成",m.total_ms]];
@@ -79,7 +92,7 @@ function renderUnifiedAudit() {
     if(id==="content") status=trace.observation?.content?"可查看转换":"阶段未采集";
     if(id==="routing") status=trace.route_selected?"已选择设备":trace.task?"查看判断":"未进入";
     if(id==="queue") status=m.queue_ms==null?"未采集":cacheFormat(m.queue_ms);
-    if(id==="execution") status=m.measurement==="measured"?`重算 ${cacheFormat(m.total_prefill_tokens,"tokens")}`:trace.route_selected?(terminal?"计数未采集":"执行中"):"未进入";
+    if(id==="execution") status=cacheBrief(m);
     if(id==="completed") status=terminal?(statusLabels[trace.status]||trace.status):"等待完成";
     return `<button type="button" class="pipeline-node ${cacheView.stage===id?"selected":""}" data-pipeline-stage="${id}" aria-expanded="${cacheView.stage===id}"><span class="pipeline-index">0${i+1}</span><strong>${label}</strong><small>${escapeHtml(status)}</small>${duration!=null&&id!=="queue"?`<small>${escapeHtml(cacheFormat(duration))}</small>`:""}</button>`;
   }).join("");
@@ -100,7 +113,17 @@ function renderPipelineDetail() {
   const trace=state.selectedTrace, audit=trace.cache_audit||{}, m=audit.request||{}, stage=cacheView.stage;
   const target=byId("audit-stage-values");
   if(stage==="execution") {
-    target.innerHTML=`<p class="section-meta">缓存状态：${escapeHtml(cacheEventNames[m.event]||"未采集")}。计数和计时分别采集；缺失数据不能证明命中。</p><div class="cache-value-grid">${cacheCell("固定前缀复用",m.fixed_reuse_ratio,"ratio")}${cacheCell("净 token 复用",m.net_cache_ratio,"ratio")}${cacheCell("准备阶段重算",m.prime_tokens,"tokens")}${cacheCell("正式请求重算",m.prompt_tokens,"tokens")}${cacheCell("本次尝试总 prefill",m.total_prefill_tokens,"tokens")}${cacheCell("所有尝试总 prefill",m.all_attempts_prefill_tokens,"tokens")}${cacheCell("后端缓存 token",m.cached_tokens,"tokens")}${cacheCell("后端报告复用比例",m.reported_cache_ratio,"ratio")}${cacheCell("动态尾部",m.dynamic_tokens,"tokens")}${cacheCell("正式 prefill",m.prefill_ms)}${cacheCell("Prefill 速度",m.prefill_tps," tokens/s")}${cacheCell("Router 首个输出",m.ttft_ms)}${cacheCell("Router 首段正文",m.first_text_ms)}${cacheCell("网关首个输出",m.gateway_ttft_ms)}</div><p class="section-meta">缓存计数来源：${escapeHtml(({gateway_native:"网关原生计数",upstream_usage:"后端 usage 报告",backend_counter_delta:"全局计数差值估算",legacy_unspecified:"旧记录未注明"})[m.cache_source]||"未采集")}。后端报告复用比例没有扣除准备阶段计算，不能等同于净复用。首个输出包括推理、正文或工具调用；Router 时间包括入口处理和排队。网关时间从网关接收请求开始。非流式的首个输出不可用。</p>${(audit.operations||[]).map(o=>`<details class="audit-fold"><summary>${o.kind==="prewarm"?"后台预热（独立操作）":"前台执行"} · 尝试 ${Number(o.attempt)} · ${escapeHtml(o.deployment_id||"")} · ${escapeHtml(o.status||"")}</summary><div class="cache-value-grid">${cacheCell("模板与运行版本检查",o.cache?.template_ms)}${cacheCell("磁盘校验及恢复",o.cache?.restore_ms)}${cacheCell("预热计算",o.cache?.prime_ms)}${cacheCell("保存",o.cache?.save_ms)}${cacheCell("准备阶段合计",o.cache?.seconds==null?null:o.cache.seconds*1000)}${cacheCell("网关等待",o.queue_ms)}</div><p class="section-meta">操作 ${escapeHtml(o.operation_id)} · ${escapeHtml(o.error||o.cache?.restore_error||"")}</p></details>`).join("")}`;
+    const measured=m.cache_measurement==="measured", estimated=m.cache_measurement==="estimated";
+    const source=measured?(m.backend_usage_source==="gateway_native"?"网关原生实测":"后端逐请求 usage 实测"):estimated?"全局计数差值估算":"无完整逐请求计数";
+    const cached=measured?m.backend_cached_tokens:estimated?m.estimated_cached_tokens:null;
+    const ratio=measured?m.backend_reuse_ratio:estimated?m.estimated_reuse_ratio:null;
+    const input=m.backend_input_tokens??m.input_tokens;
+    const inputSource=m.input_measurement==="measured"?"实测":m.input_measurement==="estimated"?"估算":"未知";
+    const native=`<p class="section-meta">${audit.operations?.length?"包含准备阶段的计算量单独核算。":"该后端尚未提供固定边界、准备、恢复与原生 prefill 阶段遥测。"}</p><div class="cache-value-grid">${cacheCell("固定前缀复用",m.fixed_reuse_ratio,"ratio")}${cacheCell("净 token 复用",m.net_cache_ratio,"ratio")}${cacheCell("准备阶段重算",m.prime_tokens,"tokens")}${cacheCell("正式请求重算",m.prompt_tokens,"tokens")}${cacheCell("本次尝试总 prefill",m.total_prefill_tokens,"tokens")}${cacheCell("所有尝试总 prefill",m.all_attempts_prefill_tokens,"tokens")}${cacheCell("动态尾部",m.dynamic_tokens,"tokens")}${cacheCell("正式 prefill",m.prefill_ms)}${cacheCell("Prefill 速度",m.prefill_tps," tokens/s")}${cacheCell("网关首个输出",m.gateway_ttft_ms)}</div>`;
+    const operations=(audit.operations||[]).map(o=>cacheDisclosure(o.operation_id,`${o.kind==="prewarm"?"后台预热（独立操作）":"前台执行"} · 尝试 ${Number(o.attempt)} · ${o.deployment_id||""} · ${o.status||""}`,`<div class="cache-value-grid">${cacheCell("模板与运行版本检查",o.cache?.template_ms)}${cacheCell("磁盘校验及恢复",o.cache?.restore_ms)}${cacheCell("预热计算",o.cache?.prime_ms)}${cacheCell("保存",o.cache?.save_ms)}${cacheCell("准备阶段合计",o.cache?.seconds==null?null:o.cache.seconds*1000)}${cacheCell("网关等待",o.queue_ms)}</div><p class="section-meta">操作 ${escapeHtml(o.operation_id)} · ${escapeHtml(o.error||o.cache?.restore_error||"")}</p>`)).join("");
+    target.innerHTML=`<div class="cache-verdict ${measured?"measured":estimated?"estimated":"unknown"}"><strong>${escapeHtml(cacheBrief(m))}</strong><p>${escapeHtml(m.cache_reason||"后端未提供完整逐请求计数")} · ${escapeHtml(source)}</p></div><div class="cache-value-grid">${cacheCell(`总输入 · ${inputSource}`,input,"tokens")}${cacheCell(`缓存复用 · ${measured?"实测":estimated?"估算":"未知"}`,cached,"tokens")}${cacheCell(`后端复用比例 · ${measured?"实测":estimated?"估算":"未知"}`,ratio,"ratio")}${cacheCell("未复用输入 · 总输入减复用",m.uncached_input_tokens,"tokens")}${cacheCell("Router 首个输出 · 实测",m.ttft_ms)}${cacheCell("Router 首段正文 · 实测",m.first_text_ms)}${cacheCell("Router 排队 · 实测",m.queue_ms)}${cacheCell("总耗时 · 实测",m.total_ms)}</div><p class="section-meta">未复用输入仅表示本次输入中尚需计算的 token，不包含准备、重试或抢占带来的全部重算。后端复用汇总本地及外部缓存，不区分 GPU 与 LMCache。首个输出等待包括入口处理和排队，不能作为 prefill 耗时；非流式请求没有首个输出计时。</p>${m.prime_tokens>0?`<p class="section-meta">本次准备阶段还重算了 ${escapeHtml(cacheFormat(m.prime_tokens,"tokens"))}，扣除后的净复用为 ${escapeHtml(cacheFormat(m.net_cache_ratio,"ratio"))}。</p>`:""}${cacheDisclosure("native","固定前缀、准备与 Prefill 详情",native,m.measurement==="measured")}${operations}`;
+    target.querySelectorAll("details[data-cache-detail]").forEach(el=>el.addEventListener("toggle",()=>cacheView.disclosures.set(el.dataset.cacheDetail,el.open)));
+
   } else if(stage==="queue")target.innerHTML=`<div class="cache-value-grid">${cacheCell("Router 排队",m.queue_ms)}${cacheCell("网关排队",m.gateway_queue_ms)}</div>`;
   else if(stage==="completed")target.innerHTML=`<div class="cache-value-grid">${cacheCell("请求总耗时",m.total_ms)}${cacheCell("输入",m.input_tokens,"tokens")}${cacheCell("输出",m.output_tokens,"tokens")}</div><p>${escapeHtml(trace.error?.message||statusLabels[trace.status]||trace.status)}</p>`;
   else if(stage==="received")target.innerHTML=`<p>请求 ${escapeHtml(trace.request_id)}</p><p>客户端 ${escapeHtml(trace.client_id)} · ${escapeHtml(trace.protocol)} · ${formatTime(trace.started_at)}</p>`;

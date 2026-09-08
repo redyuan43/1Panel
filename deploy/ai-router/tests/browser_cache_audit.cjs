@@ -59,13 +59,28 @@ const output=process.env.UI_TEST_OUTPUT||path.resolve('browser-artifacts/cache-a
     await page.locator('#cache-client-group').selectOption('');await page.locator('#cache-client').fill('');await page.locator('#cache-filter-form button[type="submit"]').click();
     await page.waitForFunction(()=>document.querySelectorAll('#cache-request-rows [data-cache-request]').length>0);
     await page.waitForFunction(()=>!cacheView.loading);
-    assert.equal(await page.locator('#cache-metrics .cache-metric').count(),8);
+    assert.equal(await page.locator('#cache-metrics .cache-metric').count(),9);
     assert.match(await page.locator('#cache-overview-state').innerText(),/有效样本/);checks.push('summary coverage, percentiles, charts and request list');
     await page.screenshot({path:path.join(output,'overview.png'),fullPage:true});
     await page.locator('#cache-conversation').fill('preview-conversation');await page.locator('#cache-filter-form button[type="submit"]').click();
     await page.waitForFunction(()=>!cacheView.loading&&cacheView.rows.size===4);
     await page.locator('[data-cache-request="preview-local"]').click();
     assert.equal(await page.locator('#audit-conversation').isVisible(),true);checks.push('statistics return to shared conversation detail');
+    for (const [kind,label] of [['hit','已命中'],['miss','未命中'],['unknown','数据不足'],['estimated','仅有估算'],['running','执行中']]) {
+      await page.evaluate(id=>selectRouteTrace(id),'preview-ai-'+kind);
+      await page.locator('[data-pipeline-stage="execution"]').click();
+      assert.match(await page.locator('.cache-verdict').innerText(),new RegExp(label));
+      assert.equal(await page.locator('[data-cache-detail="native"]').getAttribute('open'),null);
+      if (kind==='hit') {
+        const text=await page.locator('#audit-stage-values').innerText();
+        assert.match(text,/42,000/);assert.match(text,/4,768/);assert.match(text,/89.8%/);
+        await page.locator('[data-cache-detail="native"] summary').click();
+        await page.evaluate(()=>selectRouteTrace('preview-ai-hit',{silent:true}));
+        assert.notEqual(await page.locator('[data-cache-detail="native"]').getAttribute('open'),null);
+        await page.screenshot({path:path.join(output,'ai-hit.png'),fullPage:true});
+      }
+    }
+    checks.push('AI hit/miss/unknown/estimated/running verdicts, exact counts and persistent disclosure');
     await page.setViewportSize({width:720,height:1000});await page.screenshot({path:path.join(output,'compact.png'),fullPage:true});
     assert.deepEqual(errors,[]);
     await fs.writeFile(path.join(output,'result.json'),JSON.stringify({checks,errors},null,2));

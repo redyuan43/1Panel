@@ -180,6 +180,7 @@ endpoints:
       runtime_patch: 1cat-vllm-pr517-nvfp4-output-alignment32
       topology: v100-gpu4-gpu5-tp2-no-nvlink
       service_unit: qwen38-v100-tp2-vllm.service
+      cache_usage: per_request
       quantization: QUASAR-NVFP4
       kv_cache: fp8_e5m2
       speculative_method: mtp

@@ -9,6 +9,7 @@ import sqlite3
 import time
 from contextlib import closing
 from urllib.parse import urlsplit, urlunsplit
+from ai_router.usage_evidence import token_count
 
 
 def initialize(connection):
@@ -28,14 +29,17 @@ def number(value):
 def metrics(trace, operations):
     request = trace.get("request", {})
     evidence = {}
+    last_attempt = max((a.get("number", 0) for a in trace.get("attempts", [])), default=0)
     for attempt in trace.get("attempts", []):
+        if attempt.get("number") != last_attempt:
+            continue
         for step in attempt.get("steps", []):
             if step.get("node_id") == "upstream_request":
                 evidence.update(step.get("evidence", {}))
     observer = trace.get("observation", {})
     content_stages = observer.get("content", {}).get("stages", [])
     tail = content_stages[0].get("last_role") if content_stages else None
-    foreground = sorted((o for o in operations if o.get("kind") == "foreground"), key=lambda x: x.get("attempt", 0))
+    foreground = sorted((o for o in operations if o.get("kind") == "foreground" and o.get("request_id") == trace["request_id"]), key=lambda x: x.get("attempt", 0))
     last_attempt = max((a.get("number", 0) for a in trace.get("attempts", [])), default=0)
     final = next((o for o in reversed(foreground) if o.get("attempt") == last_attempt), {})
     timing = final.get("timings") or {}
@@ -56,7 +60,40 @@ def metrics(trace, operations):
         waits = [number(s.get("evidence", {}).get("queue_wait_ms")) for a in trace.get("attempts", []) for s in a.get("steps", []) if "queue_wait_ms" in s.get("evidence", {})]
         queue = sum(x for x in waits if x is not None) if any(x is not None for x in waits) else None
     completed = trace.get("completed_at")
+    reported = evidence.get("backend_usage") or {}
+    reported_input = token_count(reported.get("input_tokens"))
+    reported_cached = token_count(reported.get("cached_tokens"))
+    success = trace.get("status") == "succeeded"
+    backend_input = reported_input if success and reported.get("state") != "invalid" else None
+    backend_cached = None
+    source = "unavailable"
+    if success and native_input is not None and token_count(p) is not None and token_count(c) is not None and final.get("terminal") and final.get("status") in {"completed", "succeeded"}:
+        backend_input, backend_cached, source = int(native_input), int(c), "gateway_native"
+    elif success and reported.get("state") == "complete" and reported_input is not None and reported_cached is not None and reported_cached <= reported_input:
+        backend_input, backend_cached, source = reported_input, reported_cached, "upstream_usage"
+    estimated_cached = token_count(evidence.get("cached_prompt_tokens")) if success and reported.get("state") != "incomplete" and evidence.get("cache_measurement_source") == "backend_counter_delta" else None
+    estimated_input = token_count(evidence.get("input_tokens"))
+    if estimated_input is None or (estimated_cached is not None and estimated_cached > estimated_input):
+        estimated_cached = None
+    backend_ratio = backend_cached / backend_input if backend_input and backend_cached is not None else None
+    if trace.get("status") == "running":
+        cache_status, reason = "running", "等待请求完成"
+    elif backend_cached is not None:
+        cache_status, reason = ("hit" if backend_cached > 0 else "miss"), "同次执行的完整后端计数"
+    elif estimated_cached is not None:
+        cache_status, reason = "estimated", "仅有全局计数差值，不能确认本次命中"
+    else:
+        cache_status = "unknown"
+        reason = "请求未成功完成，不能判定命中" if not success else "后端计数无效" if reported.get("state") == "invalid" else "后端未提供完整逐请求计数"
     return {
+        "cache_status": cache_status, "cache_reason": reason,
+        "cache_measurement": "measured" if backend_cached is not None else "estimated" if estimated_cached is not None else "unavailable",
+        "backend_input_tokens": backend_input, "backend_cached_tokens": backend_cached,
+        "backend_reuse_ratio": backend_ratio, "backend_usage_source": source,
+        "uncached_input_tokens": backend_input - backend_cached if backend_cached is not None else None,
+        "estimated_cached_tokens": estimated_cached,
+        "estimated_reuse_ratio": estimated_cached / estimated_input if estimated_input and estimated_cached is not None else None,
+        "input_measurement": "measured" if backend_input is not None else "estimated" if actual_input is not None else "unavailable",
         "request_id": trace["request_id"], "started_at": trace["started_at"],
         "client_id": trace.get("client_id"), "conversation_id": trace.get("conversation_id"),
         "model": trace.get("selected_model") or trace.get("requested_model"),
@@ -155,7 +192,7 @@ class CacheAudit:
             n = len(values)
             return {"n": n, "median": (values[(n-1)//2] + values[n//2])/2 if n else None,
                     "p95": values[max(0, math.ceil(n*.95)-1)] if n else None}
-        keys = ("ttft_ms", "first_text_ms", "queue_ms", "prefill_ms", "prefill_tps", "restore_ms", "net_cache_ratio", "fixed_reuse_ratio")
+        keys = ("backend_reuse_ratio", "ttft_ms", "first_text_ms", "queue_ms", "prefill_ms", "prefill_tps", "restore_ms", "net_cache_ratio", "fixed_reuse_ratio")
         known = [x for x in complete if x["fixed_reuse_ratio"] is not None]
         buckets = {}
         for row in complete:
