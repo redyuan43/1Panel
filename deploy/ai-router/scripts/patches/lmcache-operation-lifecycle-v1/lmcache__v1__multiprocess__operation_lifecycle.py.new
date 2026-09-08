@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Bounded cache-operation outcomes. Never equate lost contact with a safe free."""
+from __future__ import annotations
+import os
+import time
+
+ERROR_FRAME = b"LMCACHE_OPERATION_ERROR_V1"
+
+class OperationNotStarted(RuntimeError):
+    """The server rejected an operation before accessing any GPU memory."""
+
+class RemoteOperationError(RuntimeError):
+    def __init__(self, code: str):
+        self.code = code
+        self.safe_to_release = code == "not_started"
+        super().__init__("LMCache operation failed: " + code)
+
+def operation_timeout() -> float:
+    value = float(os.environ.get("LMCACHE_OPERATION_TIMEOUT_SECONDS", "120"))
+    if not 1 <= value <= 3600:
+        raise ValueError("LMCACHE_OPERATION_TIMEOUT_SECONDS must be within 1..3600")
+    return value
+
+class StoreFutureGroup:
+    """Retain every batch and its IPC event until all device work is finished.
+
+    A rejected batch does not authorize releasing blocks used by another batch.
+    Unknown outcomes raise, so the caller cannot report finished_sending.
+    """
+    def __init__(self):
+        self.pending = []
+        self.success = True
+        self.registration_lost = False
+
+    def add(self, future, event):
+        self.pending.append((future, event))
+
+    def query(self):
+        remaining = []
+        for future, event in self.pending:
+            try:
+                if not future.query():
+                    remaining.append((future, event))
+                    continue
+                self.success = bool(future.result(timeout=0)) and self.success
+            except RemoteOperationError as error:
+                if not error.safe_to_release:
+                    raise
+                self.success = False
+                self.registration_lost = True
+        self.pending = remaining
+        return not remaining
+
+    def result(self, timeout=None):
+        if not self.query():
+            raise TimeoutError("STORE batches are still in flight")
+        return self.success
+
+def guard_context_operation(function):
+    """Prevent the idle reaper from removing a context during a handler."""
+    from functools import wraps
+    @wraps(function)
+    def guarded(self, key, instance_id, *args, **kwargs):
+        with self._lock:
+            entry = self._cache_contexts.get(instance_id)
+            if entry is None:
+                raise OperationNotStarted("GPU registration is missing")
+            entry.active_operations += 1
+            entry.last_seen = time.monotonic()
+        try:
+            return function(self, key, instance_id, *args, **kwargs)
+        finally:
+            with self._lock:
+                entry.active_operations -= 1
+                entry.last_seen = time.monotonic()
+    return guarded
+
+def context_is_idle(entry):
+    """Python handlers and already-enqueued device work must both be done."""
+    if entry.active_operations:
+        return False
+    stream = entry.cache_context.stream
+    query = getattr(stream, "query", None)
+    # CPU contexts with no asynchronous stream have no outstanding DMA.
+    return stream is None or (query is not None and bool(query()))

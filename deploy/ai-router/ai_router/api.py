@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from .workbuddy_history import WorkBuddyHistory
+import copy
+
 from .content_audit import ContentObservation, ArchiveReader
+from .protocol import stabilize_workbuddy_tools
+from .prefix_break import PrefixBreakCollector
 from .cache_audit import TelemetryCollector, OutputClock
 from .usage_evidence import UsageOnlyFilter, token_count, usage_dict, usage_measurement
 
@@ -37,6 +42,7 @@ from .history import (
     assistant_items_from_response,
     deepseek_history_requires_migration,
     history_lookup_identities,
+    history_identities,
     normalize_history_for_provider,
     persist_history,
     provider_family,
@@ -698,6 +704,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             code="router_draining",
             details={"instance_id": current.instance_id},
         )
+    lineage_body = copy.deepcopy(body)
     dynamic_context_move = move_workbuddy_dynamic_context(
         body,
         api_kind,
@@ -721,6 +728,29 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             stable_prefix_sha256=dynamic_context_move.stable_prefix_sha256,
             skip_reason=dynamic_context_move.skip_reason,
         )
+    if api_kind == "chat" and authenticated.policy.id in {"workbuddy-public", "workbuddy-qwen36-shared"}:
+        history_store = WorkBuddyHistory(current.route_traces.database_path)
+        restored, history_report = await history_store.apply(
+            lineage_body, authenticated.policy.id,
+            reset=_truthy_header(request.headers.get("x-1panel-context-compacted", "")),
+        )
+        if restored is not None:
+            body = restored
+        elif history_report.get("association") == "unconfirmed" and (
+            any(m.get("role") in {"assistant", "tool"} for m in lineage_body.get("messages", []) if isinstance(m, dict))
+            or sum(m.get("role") == "user" for m in lineage_body.get("messages", []) if isinstance(m, dict)) > 1
+        ):
+            body = copy.deepcopy(lineage_body)
+            history_report["reorder_bypassed"] = True
+        history_report["raw_identities"] = ["wb-raw-v1:" + key for key in history_identities(extract_messages(lineage_body, api_kind))]
+        history_report.setdefault("positions", list(range(len(lineage_body.get("messages", [])))))
+        observation.checks.append({"check":"workbuddy_history", **history_report})
+        observation.capture("workbuddy_history_preserved", body)
+        current.audit.write("workbuddy_history", request_id=request_id,
+            **{k:v for k,v in history_report.items() if k != "positions"})
+    body, tool_stability = stabilize_workbuddy_tools(body, api_kind, client_id=authenticated.policy.id)
+    observation.checks.append({"check": "tool_serialization_stability", **tool_stability})
+    observation.capture("tools_stabilized", body)
     normalized = normalize_request(
         body,
         api_kind,
@@ -730,6 +760,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         ),
     )
     body = normalized.body
+    observation.capture("normalized", body)
     tool_history_repairs = normalized.repairs
     client_compacted = _truthy_header(
         request.headers.get("x-1panel-context-compacted", "")
@@ -737,10 +768,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     lineage = await _lineage_context(
         current,
         request,
-        body,
+        lineage_body if api_kind == "chat" and authenticated.policy.id in {"workbuddy-public", "workbuddy-qwen36-shared"} else body,
         api_kind,
         authenticated.policy.id,
         force_new_inferred=client_compacted,
+        raw_identity_namespace=api_kind == "chat" and authenticated.policy.id in {"workbuddy-public", "workbuddy-qwen36-shared"},
     )
     conversation_id = lineage.lineage_id
     conversation_mode = lineage.mode
@@ -3602,6 +3634,7 @@ async def _lineage_context(
     client_id: str,
     *,
     force_new_inferred: bool = False,
+    raw_identity_namespace: bool = False,
 ) -> LineageContext:
     explicit_lineage_id = None
     for name in ("x-1panel-conversation-id", "x-litellm-session-id"):
@@ -3630,9 +3663,8 @@ async def _lineage_context(
         )
     return await current.conversations.lineage_context(
         client_id=client_id,
-        identities=history_lookup_identities(
-            extract_messages(body, api_kind)
-        ),
+        identities=tuple(("wb-raw-v1:" if raw_identity_namespace else "") + key
+                         for key in history_lookup_identities(extract_messages(body, api_kind))),
         explicit_lineage_id=explicit_lineage_id,
         previous_response_id=None,
         force_new=force_new_inferred,
@@ -4107,6 +4139,20 @@ async def _audit(
             },
         )
         await _save_request_trace(current, decision.trace)
+    if client_id in {"workbuddy-public", "workbuddy-qwen36-shared"} and decision.trace and decision.trace.terminal:
+        if decision.trace.payload.get("status") == "succeeded":
+            try:
+                await asyncio.to_thread(WorkBuddyHistory(current.route_traces.database_path).record, decision.trace.payload)
+                history = next((c for c in decision.trace.payload.get("observation", {}).get("content", {}).get("checks", []) if c.get("check") == "workbuddy_history"), {})
+                # Only metadata aliases are stored in Redis; raw content remains encrypted.
+                aliases = history.get("raw_identities", [])
+                if aliases and decision.trace.payload.get("branch_id"):
+                    await current.conversations.map_history(client_id, tuple(aliases), decision.trace.payload["branch_id"])
+            except Exception as error:
+                current.audit.write("workbuddy_history_index_unavailable", request_id=request_id, error_type=type(error).__name__)
+        if not getattr(current, "prefix_break_collector", None):
+            current.prefix_break_collector = PrefixBreakCollector(current)
+        current.prefix_break_collector.submit(decision.trace.payload, decision)
     current.audit.write(
         "request_completed",
         request_id=request_id,

@@ -1,0 +1,227 @@
+--- lmcache/integration/vllm/vllm_multi_process_adapter.py
++++ lmcache/integration/vllm/vllm_multi_process_adapter.py
+@@ -7,6 +7,8 @@
+ import enum
+ import os
+ import threading
++from lmcache.v1.multiprocess.operation_lifecycle import (ERROR_FRAME, OperationNotStarted, RemoteOperationError, StoreFutureGroup, operation_timeout)
++
+ import uuid
+ 
+ # Third Party
+@@ -449,8 +451,16 @@
+                 message="stop requested; skipping health update",
+             )
+ 
++        # A missing registration is different from a dead server. Probe
++        # service liveness separately so False(instance) can trigger recovery.
++        server_alive = healthy
++        if not healthy and self._instance_id is not None:
++            server_alive = send_ping(self._mq_client, timeout=self._interval, instance_id=None)
++        if not healthy:
++            self._health_event.clear()
+         need_trigger_recover = (
+-            healthy and not was_healthy and self._recover_callback is not None
++            server_alive and (not healthy or not was_healthy)
++            and self._recover_callback is not None
+         )
+ 
+         # Try to call recover callback
+@@ -1266,6 +1276,7 @@
+         self.kv_caches = kv_caches
+         self.engine_group_infos = list(engine_group_infos)
+         self._send_register_kv_caches_request(kv_caches)
++        self._ensure_heartbeat_started()
+ 
+     def _block_ids_per_group(self, op: LoadStoreOp) -> list[list[int]]:
+         return expand_engine_block_ids(self.engine_group_infos, op.block_ids)
+@@ -1443,7 +1454,9 @@
+             event,
+             self.blocks_in_chunk,
+         )
+-        self.store_futures[request_id] = future
++        self.finished_stores.discard(request_id)
++        group = self.store_futures.setdefault(request_id, StoreFutureGroup())
++        group.add(future, event)
+         self.store_events[request_id] = event
+ 
+     @_lmcache_nvtx_annotate
+@@ -1564,7 +1577,8 @@
+         for req_id in finished_req_ids_from_engine:
+             if req_id in self._returned_finished:
+                 continue
+-            if req_id in self.finished_stores or req_id in self.store_futures:
++            if (req_id in self.finished_stores or req_id in self.store_futures
++                    or req_id in self.retrieve_futures):
+                 self.previously_finished.add(req_id)
+             else:
+                 ret_stores.add(req_id)
+@@ -1601,41 +1615,7 @@
+         if self.dispatcher is not None:
+             dispatch(self.dispatcher, "reclaim")
+ 
+-        # If unhealthy, drain all pending futures immediately
+-        if not self.is_healthy:
+-            finished_stores = set(self.store_futures.keys())
+-            finished_retrieves = set()
+-            for request_id, (
+-                _r_future,
+-                r_block_ids,
+-            ) in self.retrieve_futures.items():
+-                finished_retrieves.add(request_id)
+-                self.error_block_ids.update(r_block_ids)
+-            self.store_futures.clear()
+-            self.retrieve_futures.clear()
+-            self.store_events.clear()
+-            self.retrieve_events.clear()
+-
+-            # Retrieves dropped at submit time still must be reported,
+-            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
+-            # Swap-drain (not update-then-clear): a concurrent
+-            # submit_retrieve_request add lands in the old set (reported now)
+-            # or the fresh set (reported next call), never lost.
+-            dropped = self._dropped_retrieves
+-            self._dropped_retrieves = set()
+-            finished_retrieves.update(dropped)
+-
+-            ret_stores = self._process_finished_stores(
+-                finished_stores, finished_req_ids_from_engine
+-            )
+-            # A request may have a pending retrieve AND appear in
+-            # finished_req_ids_from_engine (it ran without loading KV after
+-            # the server died).  The scheduler processes finished_recving
+-            # first and deletes the request, so we must not also report it
+-            # in finished_sending.
+-            ret_stores -= finished_retrieves
+-            return ret_stores, finished_retrieves
+-
++        # Poll real transfer outcomes even while degraded.
+         finished_stores = set()
+         finished_retrieves = set()
+         for request_id, s_future in self.store_futures.items():
+@@ -1643,6 +1623,8 @@
+                 continue
+ 
+             s_result = s_future.result(timeout=60)
++            if getattr(s_future, "registration_lost", False):
++                self._health_event.clear()
+             finished_stores.add(request_id)
+ 
+             if not s_result:
+@@ -1653,10 +1635,16 @@
+                 )
+ 
+         for request_id, (r_future, _) in self.retrieve_futures.items():
+-            if not r_future.query():
+-                continue
+-
+-            r_result = r_future.result(timeout=60)
++            try:
++                if not r_future.query():
++                    continue
++                r_result = r_future.result(timeout=60)
++            except RemoteOperationError as error:
++                if not error.safe_to_release:
++                    raise
++                r_result = False
++                self.error_block_ids.update(self.retrieve_futures[request_id][1])
++                self._health_event.clear()
+             finished_retrieves.add(request_id)
+ 
+             if not r_result:
+@@ -1685,10 +1673,17 @@
+         self._dropped_retrieves = set()
+         finished_retrieves.update(dropped)
+ 
++        # A cancelled receive releases through finished_recving only.
++        cancelled_receives = self.previously_finished.intersection(finished_retrieves)
++        self.previously_finished.difference_update(cancelled_receives)
++        self.finished_stores.difference_update(cancelled_receives)
++        self._returned_finished.update(cancelled_receives)
+         # Update the internal states
+         ret_stores = self._process_finished_stores(
+             finished_stores, finished_req_ids_from_engine
+         )
++
++        ret_stores.difference_update(finished_retrieves)
+ 
+         # the invocation of `get_finished` means that
+         # these requests' KV caches are already fully stored.
+@@ -1728,34 +1723,7 @@
+         if self.dispatcher is not None:
+             dispatch(self.dispatcher, "reclaim")
+ 
+-        # If unhealthy, drain all pending futures immediately
+-        if not self.is_healthy:
+-            finished_stores = set(self.store_futures.keys())
+-            finished_retrieves = set()
+-            for request_id, (
+-                _r_future,
+-                r_block_ids,
+-            ) in self.retrieve_futures.items():
+-                finished_retrieves.add(request_id)
+-                self.error_block_ids.update(r_block_ids)
+-            self.store_futures.clear()
+-            self.retrieve_futures.clear()
+-            self.store_events.clear()
+-            self.retrieve_events.clear()
+-
+-            # Retrieves dropped at submit time still must be reported,
+-            # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
+-            # Swap-drain (not update-then-clear): a concurrent
+-            # submit_retrieve_request add lands in the old set (reported now)
+-            # or the fresh set (reported next call), never lost.
+-            dropped = self._dropped_retrieves
+-            self._dropped_retrieves = set()
+-            finished_retrieves.update(dropped)
+-
+-            for req_id in finished_stores:
+-                self._completed_store_requests[req_id] = 1
+-            return None, finished_retrieves
+-
++        # Poll real transfer outcomes even while degraded.
+         finished_stores = set()
+         finished_retrieves = set()
+         for request_id, s_future in self.store_futures.items():
+@@ -1763,6 +1731,8 @@
+                 continue
+ 
+             s_result = s_future.result(timeout=60)
++            if getattr(s_future, "registration_lost", False):
++                self._health_event.clear()
+             finished_stores.add(request_id)
+ 
+             if not s_result:
+@@ -1773,10 +1743,16 @@
+                 )
+ 
+         for request_id, (r_future, _) in self.retrieve_futures.items():
+-            if not r_future.query():
+-                continue
+-
+-            r_result = r_future.result(timeout=60)
++            try:
++                if not r_future.query():
++                    continue
++                r_result = r_future.result(timeout=60)
++            except RemoteOperationError as error:
++                if not error.safe_to_release:
++                    raise
++                r_result = False
++                self.error_block_ids.update(self.retrieve_futures[request_id][1])
++                self._health_event.clear()
+             finished_retrieves.add(request_id)
+ 
+             if not r_result:
+@@ -1911,7 +1887,10 @@
+         """Converge the internal states about finished stores
+         and returns the 'safe finished store request ids' back
+         """
+-        safe_finished_s = self.finished_stores.intersection(self.previously_finished)
++        safe_finished_s = (
++            self.finished_stores.intersection(self.previously_finished)
++            - self.store_futures.keys() - self.retrieve_futures.keys()
++        )
+         self.finished_stores.difference_update(self.previously_finished)
+         self.previously_finished.difference_update(safe_finished_s)
+ 

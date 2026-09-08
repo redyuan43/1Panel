@@ -1,0 +1,21 @@
+--- lmcache/v1/multiprocess/modules/management.py
++++ lmcache/v1/multiprocess/modules/management.py
+@@ -143,12 +143,12 @@
+                 worker's last-seen time is refreshed on every liveness target.
+ 
+         Returns:
+-            Always True.
+-        """
+-        if instance_id is not None:
+-            for target in self._liveness_targets:
+-                target.touch_instance(instance_id)
+-        return True
++            True for an untracked probe, otherwise only for a registered worker.
++        """
++        if instance_id is None:
++            return True
++        tracked = [target.touch_instance(instance_id) for target in self._liveness_targets]
++        return any(tracked)
+ 
+     def _reap_cycle(self) -> ThreadRunSummary:
+         """Run one reaper scan: reap stale workers, drop mirrored state.

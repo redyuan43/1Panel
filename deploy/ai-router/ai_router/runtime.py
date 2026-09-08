@@ -450,6 +450,11 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        close_health = getattr(self.health, "close", None)
+        if close_health is not None:
+            await close_health()
+        if getattr(self, "prefix_break_collector", None):
+            await self.prefix_break_collector.close()
         if getattr(self, "cache_collector", None):
             await self.cache_collector.close()
         if self.prefix_prewarmer is not None:

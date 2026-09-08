@@ -1,0 +1,55 @@
+{
+  "id": "lmcache-operation-lifecycle-v1",
+  "lmcache_base_version": "0.5.4",
+  "upstream_commit": "3e11b8ed191631e6f098b8038235823f1a410b24",
+  "files": [
+    {
+      "path": "lmcache/integration/vllm/vllm_multi_process_adapter.py",
+      "payload": "lmcache__integration__vllm__vllm_multi_process_adapter.py.patch",
+      "before_sha256": "6fe6598e77e7872829fd0f4b0dc0e23ed2c79a3294c61a69045f7e89bae31ecb",
+      "after_sha256": "c1bb1e5c598b21f8134a13c37c170fe790b8487b1d9f117ffe34f9068287c9c1"
+    },
+    {
+      "path": "lmcache/v1/multiprocess/engine_module.py",
+      "payload": "lmcache__v1__multiprocess__engine_module.py.patch",
+      "before_sha256": "280379d13a3833e8ee519a48b0ae33207d81d9ec9a1078a9cebce050fc31d55c",
+      "after_sha256": "58d32f017f0ad3cb001173efe13bdf254ff54815b1ea8e76c630dae6eb4c8e40"
+    },
+    {
+      "path": "lmcache/v1/multiprocess/futures.py",
+      "payload": "lmcache__v1__multiprocess__futures.py.patch",
+      "before_sha256": "49d51c202dc557fa4721676809d3d9f260ad2db782d81e085dedc066d076f7ac",
+      "after_sha256": "65592973340da77921782a59f3968a05e8668c41759bf5816e674ed33b60cd70"
+    },
+    {
+      "path": "lmcache/v1/multiprocess/modules/engine_driven_transfer.py",
+      "payload": "lmcache__v1__multiprocess__modules__engine_driven_transfer.py.patch",
+      "before_sha256": "b1cd08e347d613d0e14688a5bebc9bd8b1cec9df2f4efd5d7393ccf65bb92076",
+      "after_sha256": "b3ec3f82f56f7029d3ca073bc74f915bd066e6552db6677c87ed14db3ef0892f"
+    },
+    {
+      "path": "lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py",
+      "payload": "lmcache__v1__multiprocess__modules__lmcache_driven_transfer.py.patch",
+      "before_sha256": "7e42b2c1caeb88fd6a2416e0e193451bf83a8413daa3c8d00f31ff9b2a580da7",
+      "after_sha256": "87bab83efa6227ef5155777c8e8479fea4ab8040a5336ef73415886224f8dafe"
+    },
+    {
+      "path": "lmcache/v1/multiprocess/modules/management.py",
+      "payload": "lmcache__v1__multiprocess__modules__management.py.patch",
+      "before_sha256": "fe0db964f53bbd4f1d431e003e27a2d7c3d476452f763c35f235ac9d101b3818",
+      "after_sha256": "aa84f9b1d3fe1ea34945fa28fa2b3bf78f6a50feef4ccd593a1e64c8feef5b74"
+    },
+    {
+      "path": "lmcache/v1/multiprocess/mq.py",
+      "payload": "lmcache__v1__multiprocess__mq.py.patch",
+      "before_sha256": "22548dc2abf3d7fa88edabb672975e3cb6dbc0e4ffc3a2d9d00030beafc9c24d",
+      "after_sha256": "eb9d6bb72097bfae9a78f1f0187888aac50212923f629d51fcc182892a383b43"
+    },
+    {
+      "path": "lmcache/v1/multiprocess/operation_lifecycle.py",
+      "payload": "lmcache__v1__multiprocess__operation_lifecycle.py.new",
+      "before_sha256": null,
+      "after_sha256": "a528c5648d1b85c7a44ebda780f950b2862303d1185ff10e14cdc430e4a9c605"
+    }
+  ]
+}

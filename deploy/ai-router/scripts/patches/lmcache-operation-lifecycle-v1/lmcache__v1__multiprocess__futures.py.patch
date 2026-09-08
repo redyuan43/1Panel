@@ -1,0 +1,78 @@
+--- lmcache/v1/multiprocess/futures.py
++++ lmcache/v1/multiprocess/futures.py
+@@ -2,6 +2,9 @@
+ # Standard
+ from typing import Any, Generic, Optional, TypeVar, cast
+ import threading
++import time
++from lmcache.v1.multiprocess.operation_lifecycle import (ERROR_FRAME, OperationNotStarted, RemoteOperationError, StoreFutureGroup, operation_timeout)
++
+ 
+ # First Party
+ from lmcache import torch_dev
+@@ -16,6 +19,7 @@
+     def __init__(self) -> None:
+         self.is_done_ = threading.Event()
+         self.result_: T | None = None
++        self.exception_: BaseException | None = None
+         self._retained_references: list[object] = []
+ 
+     def query(self) -> bool:
+@@ -57,6 +61,8 @@
+         flag = self.wait(timeout)
+         if not flag:
+             raise LMCacheTimeoutError("Future result not available within timeout")
++        if self.exception_ is not None:
++            raise self.exception_
+         return cast(T, self.result_)
+ 
+     def set_result(self, result: T) -> None:
+@@ -69,6 +75,10 @@
+             result (T): The result to set.
+         """
+         self.result_ = result
++        self.is_done_.set()
++
++    def set_exception(self, error: BaseException) -> None:
++        self.exception_ = error
+         self.is_done_.set()
+ 
+     def retain_reference(self, value: object) -> None:
+@@ -130,6 +140,7 @@
+     ) -> None:
+         super().__init__()
+         self.raw_future_ = raw_future
++        self._completion_deadline = time.monotonic() + operation_timeout()
+         self.event_: Any | None = None
+         self.result_: T | None = None
+         self.device_ = device if device is not None else torch_dev.current_device()
+@@ -202,21 +213,17 @@
+         return self.result_
+ 
+     def query(self) -> bool:
+-        """
+-        Check if the future is done.
+-
+-        Returns:
+-            bool: True if the future is done, False otherwise.
+-        """
+         if self.event_:
+-            return self._event_backend.query_event(self.event_)
+-
+-        if self.raw_future_.query():
++            done = self._event_backend.query_event(self.event_)
++        elif self.raw_future_.query():
+             self._on_raw_future_complete()
+             assert self.event_ is not None
+-            return self._event_backend.query_event(self.event_)
+-
+-        return False
++            done = self._event_backend.query_event(self.event_)
++        else:
++            done = False
++        if not done and time.monotonic() >= self._completion_deadline:
++            raise RemoteOperationError("outcome_unknown_device_timeout")
++        return done
+ 
+     def set_result(self, result: T) -> None:
+         raise NotImplementedError(

@@ -87,8 +87,11 @@ def move_workbuddy_dynamic_context(
 
     if (
         api_kind != "chat"
-        or client_id != _WORKBUDDY_CLIENT_ID
-        or str(value.get("model", "")) != _WORKBUDDY_MODEL_ID
+        or not (
+            client_id == "workbuddy-public"
+            or (client_id == _WORKBUDDY_CLIENT_ID
+                and str(value.get("model", "")) == _WORKBUDDY_MODEL_ID)
+        )
     ):
         return result(skip_reason="not_applicable")
     messages = value.get("messages")
@@ -527,3 +530,24 @@ def _tool_name(tool_call: dict[str, Any]) -> str:
         if isinstance(function, dict)
         else ""
     )
+
+
+def stabilize_workbuddy_tools(body, api_kind, *, client_id):
+    """Canonical ordering only: never retain removed tools or alter schemas."""
+    if api_kind != "chat" or not (client_id == "workbuddy-public" or (client_id == _WORKBUDDY_CLIENT_ID and body.get("model") == _WORKBUDDY_MODEL_ID)):
+        return body, {"status": "skipped", "reason": "not_applicable"}
+    tools = body.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return body, {"status": "skipped", "reason": "no_tools"}
+    names = [t.get("function", {}).get("name") if isinstance(t, dict)
+             and isinstance(t.get("function"), dict) and t.get("type") == "function" else None for t in tools]
+    if not all(isinstance(n, str) and n for n in names) or len(set(names)) != len(names):
+        return body, {"status": "skipped", "reason": "unsupported_or_duplicate_tools"}
+    ordered = sorted(tools, key=lambda t: t["function"]["name"])
+    # JSON object key order is not part of function-call schemas. Arrays (enum,
+    # required, oneOf, etc.) and all values retain their original order/content.
+    ordered = json.loads(json.dumps(ordered, ensure_ascii=False, sort_keys=True))
+    value = {**body, "tools": ordered}
+    changed = json.dumps(tools, ensure_ascii=False) != json.dumps(ordered, ensure_ascii=False)
+    return value, {"status": "passed", "changed": changed, "tool_count": len(tools),
+                   "names_parameters_and_choice_preserved": True}

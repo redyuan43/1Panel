@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -87,6 +88,11 @@ class HealthMonitor:
         self.refresh_seconds = refresh_seconds
         self.stale_after_seconds = stale_after_seconds
         self.probe_timeout_seconds = probe_timeout_seconds
+        self._vllm_progress: dict[str, dict[str, Any]] = {}
+        self._vllm_watch_tasks: dict[str, asyncio.Task] = {}
+        self._vllm_watch_targets: dict[str, tuple] = {}
+        self._vllm_probe_locks: dict[str, asyncio.Lock] = {}
+        self._closing = False
         self._owns_client = client is None
         self.client = client or self._new_client()
 
@@ -150,9 +156,89 @@ class HealthMonitor:
                 value = EndpointStatus.from_dict(cached)
                 if now - value.checked_at <= self.refresh_seconds:
                     return value
-        value = await self._probe(endpoint)
-        await self.store.set_json(key, value.to_dict(), ttl_seconds=max(30, int(self.stale_after_seconds * 3)))
+        if endpoint.backend_type == "vllm":
+            value = await self._sample_vllm_status(endpoint)
+        else:
+            value = await self._probe(endpoint)
+            await self.store.set_json(key, value.to_dict(), ttl_seconds=max(30, int(self.stale_after_seconds * 3)))
+        self._manage_vllm_watch(endpoint, value)
         return value
+
+    async def close(self) -> None:
+        self._closing = True
+        current_task = asyncio.current_task()
+        tasks = [task for task in self._vllm_watch_tasks.values() if task is not current_task]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._vllm_watch_tasks.clear()
+        self._vllm_watch_targets.clear()
+        self._vllm_progress.clear()
+        if self._owns_client:
+            await self.client.aclose()
+
+    async def _sample_vllm_status(self, endpoint: Endpoint) -> EndpointStatus:
+        # Foreground and watch probes must publish in the same order they sample.
+        lock = self._vllm_probe_locks.setdefault(endpoint.id, asyncio.Lock())
+        async with lock:
+            value = await self._probe(endpoint)
+            await self.store.set_json(
+                f"router:health:{endpoint.id}", value.to_dict(),
+                ttl_seconds=max(30, int(self.stale_after_seconds * 3)),
+            )
+            return value
+
+    @staticmethod
+    def _vllm_watch_needed(value: EndpointStatus) -> bool:
+        progress = value.detail.get("backend_progress", {})
+        return bool(value.healthy and progress.get("running") == 0
+                    and progress.get("waiting", 0) > 0
+                    and progress.get("state") in {"observing", "counter_reset", "observation_reset"})
+
+    def _manage_vllm_watch(self, endpoint: Endpoint, value: EndpointStatus) -> None:
+        task = self._vllm_watch_tasks.get(endpoint.id)
+        target = (endpoint.health_url, endpoint.load_url, endpoint.safe_context_tokens,
+                  endpoint.max_concurrency, repr(endpoint.metadata))
+        needed = (not self._closing and endpoint.enabled and endpoint.backend_type == "vllm"
+                  and self._vllm_watch_needed(value))
+        if task is not None and not task.done():
+            if needed and self._vllm_watch_targets.get(endpoint.id) == target:
+                return
+            if task is not asyncio.current_task():
+                task.cancel()
+        if not needed:
+            return
+        task = asyncio.create_task(self._watch_vllm(endpoint), name=f"vllm-progress:{endpoint.id}")
+        self._vllm_watch_tasks[endpoint.id] = task
+        self._vllm_watch_targets[endpoint.id] = target
+        task.add_done_callback(lambda finished, key=endpoint.id: self._finish_vllm_watch(key, finished))
+
+    def _finish_vllm_watch(self, endpoint_id: str, task: asyncio.Task) -> None:
+        if self._vllm_watch_tasks.get(endpoint_id) is task:
+            self._vllm_watch_tasks.pop(endpoint_id, None)
+            self._vllm_watch_targets.pop(endpoint_id, None)
+
+    async def _watch_vllm(self, endpoint: Endpoint) -> None:
+        # No recursive status() calls: each suspicious endpoint owns one bounded
+        # observer. A terminal unhealthy sample is published before stopping;
+        # a later foreground probe can establish recovery.
+        state = self._vllm_progress.get(endpoint.id, {})
+        deadline = time.monotonic() + max(120.0, state.get("window", 30.0) + self.refresh_seconds * 2)
+        try:
+            while not self._closing and endpoint.enabled:
+                await asyncio.sleep(max(0.1, self.refresh_seconds))
+                if self._closing or time.monotonic() > deadline:
+                    break
+                value = await self._sample_vllm_status(endpoint)
+                if not self._vllm_watch_needed(value):
+                    break
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # HTTP failures are published by _probe. A store failure cannot leave
+            # an unobserved task exception or preserve a partial observation.
+            self._vllm_progress.pop(endpoint.id, None)
 
     async def mark_failure(self, endpoint_id: str, cooldown_seconds: int = 20) -> None:
         await self.store.set_json(
@@ -232,6 +318,8 @@ class HealthMonitor:
                 detail={"status_code": response.status_code},
             )
         except Exception as exc:
+            if endpoint.backend_type == "vllm":
+                self._vllm_progress.pop(endpoint.id, None)
             return EndpointStatus(
                 endpoint_id=endpoint.id,
                 healthy=False,
@@ -459,6 +547,61 @@ class HealthMonitor:
             },
         )
 
+    def _observe_vllm_progress(self, endpoint: Endpoint, metrics: str) -> dict[str, Any]:
+        # These observations are local to this monitor: monotonic timestamps must
+        # never be persisted/shared as wall-clock data between Router processes.
+        configured = endpoint.metadata.get("backend_no_progress_seconds", 30.0)
+        try:
+            window = float(configured) if not isinstance(configured, bool) else 0.0
+        except (TypeError, ValueError, OverflowError):
+            window = 0.0
+        if not math.isfinite(window) or window <= 0:
+            window = 30.0
+        now = time.monotonic()
+        samples = _vllm_progress_samples(metrics)
+        detail: dict[str, Any] = {"state": "unavailable", "window_seconds": window,
+                                  "no_progress_seconds": None}
+        if samples is None:
+            self._vllm_progress.pop(endpoint.id, None)
+            return detail
+        running, waiting, counters, process_start = samples
+        detail.update(running=running, waiting=waiting)
+        if running != 0 or waiting <= 0:
+            self._vllm_progress.pop(endpoint.id, None)
+            detail["state"] = "running" if running else "idle"
+            return detail
+        generation = (endpoint.health_url, endpoint.load_url,
+                      str(endpoint.metadata.get("runtime_generation", "")), process_start)
+        previous = self._vllm_progress.get(endpoint.id)
+        since = now
+        state = "observing"
+        max_gap = max(window, self.stale_after_seconds, self.refresh_seconds * 3,
+                      self.probe_timeout_seconds * 2)
+        if previous is not None:
+            comparable = (previous["generation"] == generation
+                          and previous["window"] == window
+                          and previous["counters"].keys() == counters.keys()
+                          and 0 <= now - previous["sampled_at"]
+                          and (previous.get("stalled") or now - previous["sampled_at"] <= max_gap))
+            if comparable:
+                old = previous["counters"]
+                if any(value < old[key] for key, value in counters.items()):
+                    state = "counter_reset"
+                elif any(value > old[key] for key, value in counters.items()):
+                    state = "progressing"
+                else:
+                    since = previous["since"]
+            else:
+                state = "observation_reset"
+        self._vllm_progress[endpoint.id] = {
+            "generation": generation, "counters": counters, "sampled_at": now,
+            "since": since, "window": window, "stalled": now - since >= window,
+        }
+        elapsed = max(0.0, now - since)
+        detail.update(state="backend_no_progress" if elapsed >= window else state,
+                      no_progress_seconds=elapsed)
+        return detail
+
     async def _probe_vllm(self, endpoint: Endpoint, checked_at: float) -> EndpointStatus:
         health_response, metrics_response, lmcache = await asyncio.gather(
             self.client.get(endpoint.health_url),
@@ -485,14 +628,18 @@ class HealthMonitor:
         lmcache["connector_active"] = bool(
             lmcache.get("healthy") and lmcache.get("registered")
         )
+        progress = self._observe_vllm_progress(endpoint, metrics)
+        running = progress.get("running", running)
+        waiting = progress.get("waiting", waiting)
+        stalled = progress["state"] == "backend_no_progress"
         capacity = max(1, endpoint.max_concurrency)
         load = min(1.0, (running + waiting) / capacity)
         return EndpointStatus(
             endpoint_id=endpoint.id,
-            healthy=True,
+            healthy=not stalled,
             checked_at=checked_at,
-            load_headroom=max(0.0, 1.0 - load),
-            latency_score=max(0.0, 1.0 - min(1.0, waiting / capacity)),
+            load_headroom=0.0 if stalled else max(0.0, 1.0 - load),
+            latency_score=0.0 if stalled else max(0.0, 1.0 - min(1.0, waiting / capacity)),
             cache_generation=_generation(
                 str(_metric(metrics, "process_start")),
                 str(endpoint.metadata.get("runtime_generation", "")),
@@ -523,6 +670,8 @@ class HealthMonitor:
                     prompt_tokens_external_transfer
                 ),
                 "lmcache": lmcache,
+                "backend_progress": progress,
+                **({"reason": "backend_no_progress"} if stalled else {}),
             },
         )
 
@@ -687,6 +836,46 @@ class HealthMonitor:
                 "cache_epoch": epoch,
             },
         )
+
+
+def _vllm_progress_samples(text: str):
+    # Unlike the display-only _metric helper, absence/invalid samples are never
+    # zero. Keep each engine/label series separate so one reset cannot be hidden
+    # by another engine's increase. At least one prefill counter is required;
+    # a decode-only counter cannot demonstrate a long prefill is not progressing.
+    names = ("num_requests_running", "num_requests_waiting", "prompt_tokens_total",
+             "generation_tokens_total", "prompt_tokens_by_source_total",
+             "process_start_time_seconds")
+    gauges: dict[str, dict[str, float]] = {}
+    counters: dict[str, float] = {}
+    process_start = None
+    for name in names:
+        metric_name = name if name == "process_start_time_seconds" else "vllm:" + name
+        pattern = r"^(" + re.escape(metric_name) + r"(?:\{[^}]*\})?)\s+(\S+)\s*$"
+        values = {}
+        for match in re.finditer(pattern, text, re.MULTILINE):
+            series, raw = match.groups()
+            if name == "prompt_tokens_by_source_total" and not re.search(r'(?:\{|,)\s*source="local_compute"(?:,|\})', series):
+                continue
+            try:
+                value = float(raw)
+            except ValueError:
+                return None
+            if not math.isfinite(value) or value < 0 or (name != "process_start_time_seconds" and not value.is_integer()):
+                return None
+            if series in values:
+                return None
+            values[series] = value
+        if name == "process_start_time_seconds":
+            process_start = tuple(sorted(values.items())) if values else None
+        elif name in {"num_requests_running", "num_requests_waiting"}:
+            gauges[name] = values
+        else:
+            counters.update(values)
+    if not all(gauges.values()) or not any(key.startswith(("vllm:prompt_tokens_total", "vllm:prompt_tokens_by_source_total")) for key in counters):
+        return None
+    return (sum(gauges["num_requests_running"].values()),
+            sum(gauges["num_requests_waiting"].values()), counters, process_start)
 
 
 def _metric(text: str, name: str) -> float:

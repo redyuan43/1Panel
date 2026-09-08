@@ -1,0 +1,459 @@
+--- lmcache/v1/multiprocess/mq.py
++++ lmcache/v1/multiprocess/mq.py
+@@ -8,6 +8,9 @@
+ import itertools
+ import queue
+ import threading
++import time
++from lmcache.v1.multiprocess.operation_lifecycle import (ERROR_FRAME, OperationNotStarted, RemoteOperationError, StoreFutureGroup, operation_timeout)
++
+ 
+ # Third Party
+ import msgspec
+@@ -214,21 +217,26 @@
+         self._notifier.notify()
+ 
+     def _process_ops(self) -> None:
+-        """Drain the ops queue and apply register/unregister to the poller."""
+-        try:
+-            while True:
++        while True:
++            try:
+                 op = self._ops_queue.get_nowait()
++            except queue.Empty:
++                return
++            try:
+                 if op.kind is _OpKind.REGISTER:
+                     self._poller.register(op.client.socket, zmq.POLLIN)
+                     self._socket_to_client[op.client.socket] = op.client
+-                    logger.debug("Registered client socket %s", op.client.socket)
+                 elif op.kind is _OpKind.UNREGISTER:
+-                    self._poller.unregister(op.client.socket)
+-                    self._socket_to_client.pop(op.client.socket, None)
+-                    logger.debug("Unregistered client socket %s", op.client.socket)
++                    if op.client.socket in self._socket_to_client:
++                        self._poller.unregister(op.client.socket)
++                        self._socket_to_client.pop(op.client.socket, None)
++                    op.client._close_on_owner()
++            except Exception as error:
++                logger.error("MQ socket lifecycle failed: %s", type(error).__name__)
++                self._socket_to_client.pop(op.client.socket, None)
++                op.client._close_on_owner()
++            finally:
+                 op.done.set()
+-        except queue.Empty:
+-            pass
+ 
+     def _main_loop(self) -> None:
+         """Unified poll loop for all registered clients."""
+@@ -238,6 +246,8 @@
+             self._process_ops()
+ 
+             socks = dict(self._poller.poll(1000))
++            for client in self._socket_to_client.values():
++                client.expire_pending()
+ 
+             # Outbound: shared notifier woke us — drain it, then flush
+             # all clients' output queues.
+@@ -280,116 +290,157 @@
+         # Pending job's futures
+         self._request_counter = itertools.count()
+         self.pending_futures: dict[int, MessagingFuture[Any]] = {}
++        self._pending_deadlines: dict[int, float] = {}
++        self._pending_request_types: dict[int, RequestType] = {}
++        self._operation_timeout = operation_timeout()
++        self._submission_lock = threading.Lock()
++        self._closing = False
++        self._close_requested = False
++        self._close_done = threading.Event()
+ 
+         # Register with the shared polling loop
+         self._polling_loop = ClientPollingLoop.get_instance()
+         self._polling_loop.register(self)
+ 
+     def process_outbound_task(self):
++        while True:
++            try:
++                wrapped = self.input_queue.get_nowait()
++            except queue.Empty:
++                return
++            try:
++                uid = wrapped.request_uid
++                payload_classes = get_payload_classes(wrapped.request_type)
++                if len(payload_classes) != len(wrapped.request_payloads):
++                    raise ValueError("Payload count mismatch")
++                frames = [msgspec_encode(uid, cls=RequestUID),
++                          msgspec_encode(wrapped.request_type, cls=RequestType)]
++                frames.extend(msgspec_encode(payload, cls=cls) for payload, cls
++                              in zip(wrapped.request_payloads, payload_classes, strict=True))
++            except Exception as error:
++                # Serialization/validation completed before touching the socket.
++                wrapped.future.set_exception(RemoteOperationError("not_started"))
++                logger.error("MQ request not sent: %s", type(error).__name__)
++                continue
++            with self._submission_lock:
++                if self._closing:
++                    wrapped.future.set_exception(RemoteOperationError("not_started"))
++                    continue
++                self.pending_futures[uid] = wrapped.future
++                self._pending_request_types[uid] = wrapped.request_type
++                self._pending_deadlines[uid] = time.monotonic() + self._operation_timeout
++                try:
++                    self.socket.send_multipart(frames, flags=zmq.DONTWAIT)
++                except Exception as error:
++                    # A send attempt has an unknown outcome; never retry blindly.
++                    wrapped.future.set_exception(RemoteOperationError("outcome_unknown_send"))
++                    self.pending_futures.pop(uid, None)
++                    self._pending_request_types.pop(uid, None)
++                    self._pending_deadlines.pop(uid, None)
++                    logger.error("MQ send failed: %s", type(error).__name__)
++
++    def expire_pending(self) -> None:
++        now = time.monotonic()
++        for uid, deadline in list(self._pending_deadlines.items()):
++            if deadline <= now:
++                self._pending_deadlines.pop(uid, None)
++                future = self.pending_futures.pop(uid, None)
++                self._pending_request_types.pop(uid, None)
++                if future is not None:
++                    future.set_exception(RemoteOperationError("outcome_unknown_timeout"))
++
++    def process_inbound(self) -> None:
++        # Unidentifiable frames leave pending operations under their deadline.
+         try:
+-            while wrapped_request := self.input_queue.get_nowait():
+-                # wrapped_request = self.input_queue.get_nowait()
+-
+-                # Update the pending futures
+-                request_uid = wrapped_request.request_uid
+-                self.pending_futures[request_uid] = wrapped_request.future
+-
+-                # Send the request
+-                b_request_uid = msgspec_encode(request_uid, cls=RequestUID)
+-                b_request_type = msgspec_encode(
+-                    wrapped_request.request_type, cls=RequestType
+-                )
+-                payload_classes = get_payload_classes(wrapped_request.request_type)
+-                if len(payload_classes) != len(wrapped_request.request_payloads):
+-                    expected_classes = [cls.__name__ for cls in payload_classes]
+-                    actual_classes = [
+-                        type(p).__name__ for p in wrapped_request.request_payloads
+-                    ]
+-                    raise ValueError(
+-                        f"Payload count mismatch for request "
+-                        f"{wrapped_request.request_type}: "
+-                        f"expected {len(payload_classes)} payloads "
+-                        f"{expected_classes}, "
+-                        f"got {len(wrapped_request.request_payloads)} payloads "
+-                        f"{actual_classes}. "
+-                        f"This is likely caused by a version mismatch between "
+-                        f"the lmcache client and lmcache server."
+-                    )
+-
+-                b_payloads = [
+-                    msgspec_encode(payload, cls=cls)
+-                    for payload, cls in zip(
+-                        wrapped_request.request_payloads,
+-                        payload_classes,
+-                        strict=False,
+-                    )
+-                ]
+-                self.socket.send_multipart([b_request_uid, b_request_type] + b_payloads)
+-        except queue.Empty:
+-            pass
+-
+-    def process_inbound(self) -> None:
+-        """Process one inbound response from the server.
+-
+-        Called by the shared ClientPollingLoop when the DEALER socket
+-        is readable.  Only touches ``pending_futures``, which is
+-        exclusively accessed from the loop thread.
+-        """
+-        msg = self.socket.recv_multipart()
+-        if len(msg) < 2:
+-            logger.error(
+-                "Malformed response: expected at least 2 message parts "
+-                "[request_uid, request_type, *response], got %d",
+-                len(msg),
+-            )
++            msg = self.socket.recv_multipart()
++            request_uid = decode_request_uid(msg[0])
++        except Exception:
++            logger.error("Malformed or unreadable MQ response identity")
+             return
+-        b_request_uid, b_request_type, *b_response = msg
+-        request_uid = msgspec_decode(b_request_uid, cls=RequestUID)
+-        request_type = msgspec_decode(b_request_type, cls=RequestType)
+-        response_cls = get_response_class(request_type)
+-
+-        if request_uid in self.pending_futures:
+-            future = self.pending_futures.pop(request_uid)
+-            if b_response:
+-                response = msgspec_decode(b_response[0], cls=response_cls)
+-                future.set_result(response)
++        future = self.pending_futures.get(request_uid)
++        if future is None:
++            # Ignore late/duplicate responses before decoding their payloads.
++            return
++        response = None
++        failure = None
++        try:
++            if len(msg) < 2:
++                raise ValueError("missing response type")
++            request_type = msgspec_decode(msg[1], cls=RequestType)
++            if request_type != self._pending_request_types[request_uid]:
++                raise ValueError("response type does not match request")
++            response_cls = get_response_class(request_type)
++            frames = msg[2:]
++            if frames and frames[0] == ERROR_FRAME:
++                if len(frames) != 2:
++                    raise ValueError("invalid error frame count")
++                code = frames[1].decode("ascii", errors="strict")
++                if code not in {"not_started", "outcome_unknown_remote_error"}:
++                    raise ValueError("unknown remote error code")
++                failure = RemoteOperationError(code)
++            elif len(frames) == 1:
++                response = msgspec_decode(frames[0], cls=response_cls)
++            elif not frames and response_cls in (None, type(None)):
++                response = None
+             else:
+-                future.set_result(None)
+-
+-    def submit_request(
+-        self,
+-        request_type: RequestType,
+-        request_payloads: list[Any],
+-        response_cls: Optional[T] = None,
+-    ) -> MessagingFuture[T]:
+-        """Submit a request to the server.
+-
+-        Args:
+-            request_type (RequestType): The type of the request.
+-            request_payloads (list[Any]): The payloads of the request.
+-            response_cls (Optional[T]): The expected response class.
+-                This should be get from `get_response_class(request_type)`.
+-
+-        Returns:
+-            MessagingFuture[T]: A future that will hold the response.
+-        """
+-        future: MessagingFuture[T] = MessagingFuture()
+-        request_uid = next(self._request_counter)
+-        self.input_queue.put(
+-            MessageQueueClient.WrappedRequest(
+-                request_uid=request_uid,
+-                future=future,
+-                request_type=request_type,
+-                request_payloads=request_payloads,
+-            )
+-        )
+-        self._polling_loop.notify()
++                raise ValueError("invalid response frame count")
++        except Exception:
++            # Keep malformed replies fail-closed, but do not kill the shared loop.
++            failure = RemoteOperationError("outcome_unknown_invalid_response")
++            logger.error("Malformed MQ response for a pending operation")
++        if failure is not None:
++            future.set_exception(failure)
++        else:
++            future.set_result(response)
++        # Detach only after the future has a terminal, correlated outcome.
++        self.pending_futures.pop(request_uid, None)
++        self._pending_deadlines.pop(request_uid, None)
++        self._pending_request_types.pop(request_uid, None)
++
++    def submit_request(self, request_type, request_payloads, response_cls=None):
++        future = MessagingFuture()
++        # Serialize acceptance with close, while keeping socket work on its owner.
++        with self._submission_lock:
++            if self._closing:
++                future.set_exception(RemoteOperationError("not_started"))
++                return future
++            uid = next(self._request_counter)
++            self.input_queue.put(MessageQueueClient.WrappedRequest(
++                request_uid=uid, future=future, request_type=request_type,
++                request_payloads=request_payloads))
++            self._polling_loop.notify()
+         return future
+ 
+-    def close(self) -> None:
+-        self._polling_loop.unregister(self)
+-        ClientPollingLoop.release_instance()
+-        self.socket.close()
++    def _close_on_owner(self):
++        # Called only by ClientPollingLoop, after removing the socket from poll.
++        with self._submission_lock:
++            self._closing = True
++        for future in self.pending_futures.values():
++            future.set_exception(RemoteOperationError("outcome_unknown_closed"))
++        self.pending_futures.clear()
++        self._pending_deadlines.clear()
++        self._pending_request_types.clear()
++        while True:
++            try:
++                wrapped = self.input_queue.get_nowait()
++            except queue.Empty:
++                break
++            wrapped.future.set_exception(RemoteOperationError("not_started"))
++        self.socket.close(linger=0)
++
++    def close(self):
++        with self._submission_lock:
++            leader = not self._close_requested
++            self._close_requested = True
++            self._closing = True
++        if not leader:
++            self._close_done.wait()
++            return
++        try:
++            self._polling_loop.unregister(self)
++            ClientPollingLoop.release_instance()
++        finally:
++            self._close_done.set()
+ 
+ 
+ ResponseType = TypeVar("ResponseType", covariant=True)
+@@ -538,9 +589,9 @@
+         response_cls = handler_entry.get_response_class()
+         b_response = msgspec_encode(response, cls=response_cls)
+         if response is not None:
+-            self.socket.send_multipart(prefix_frames + [b_response])
++            self._send_response_frames(prefix_frames + [b_response])
+         else:
+-            self.socket.send_multipart(prefix_frames)
++            self._send_response_frames(prefix_frames)
+ 
+     def _call_blocking_handler(
+         self,
+@@ -575,28 +626,46 @@
+                 self.output_queue.put(frames_to_send)
+                 self._output_efd.notify()
+ 
+-            except Exception:
++            except Exception as error:
+                 logger.exception("Error in blocking handler")
++                self._queue_operation_error(prefix_frames, error)
+ 
+         future.add_done_callback(_notify_response)
+ 
+-    def _call_handler(
+-        self,
+-        handler_entry: RequestHandlerBase[Any],
+-        payloads: list[bytes],
+-        prefix_frames: list[bytes],
+-    ) -> Any:
+-        match handler_entry.get_handler_type():
+-            case HandlerType.SYNC:
+-                assert isinstance(handler_entry, SyncRequestHandler)
+-                self._call_sync_handler(handler_entry, payloads, prefix_frames)
+-            case HandlerType.BLOCKING:
+-                assert isinstance(handler_entry, BlockingRequestHandler)
+-                self._call_blocking_handler(handler_entry, payloads, prefix_frames)
+-            case HandlerType.NON_BLOCKING:
+-                raise NotImplementedError("Non-blocking handler is not supported yet")
+-            case _:
+-                raise ValueError("Unknown handler type")
++    def _send_response_frames(self, frames):
++        try:
++            self.socket.send_multipart(frames, flags=zmq.DONTWAIT)
++            return True
++        except Exception as error:
++            # Lost reply is not a safe rejection; the client deadline stays unknown.
++            logger.error("MQ reply dropped: %s", type(error).__name__)
++            return False
++
++
++    def _queue_operation_error(self, prefix_frames, error) -> None:
++        code = (b"not_started" if isinstance(error, OperationNotStarted)
++                else b"outcome_unknown_remote_error")
++        self.output_queue.put(prefix_frames + [ERROR_FRAME, code])
++        self._output_efd.notify()
++
++
++    def _call_handler(self, handler_entry, payloads, prefix_frames) -> Any:
++        # Includes synchronous handler errors and blocking-pool submission errors.
++        try:
++            match handler_entry.get_handler_type():
++                case HandlerType.SYNC:
++                    assert isinstance(handler_entry, SyncRequestHandler)
++                    self._call_sync_handler(handler_entry, payloads, prefix_frames)
++                case HandlerType.BLOCKING:
++                    assert isinstance(handler_entry, BlockingRequestHandler)
++                    self._call_blocking_handler(handler_entry, payloads, prefix_frames)
++                case HandlerType.NON_BLOCKING:
++                    raise NotImplementedError("Non-blocking handler is not supported")
++                case _:
++                    raise ValueError("Unknown handler type")
++        except Exception as error:
++            logger.error("MQ handler failed: %s", type(error).__name__)
++            self._queue_operation_error(prefix_frames, error)
+ 
+     def _main_loop(self):
+         output_fd = self._output_efd.fileno()
+@@ -604,42 +673,28 @@
+             socks = dict(self.poller.poll(1000))
+             inbound_state = socks.get(self.socket, None)
+             outbound_state = socks.get(output_fd, None)
+-
+-            # Process the incoming requests
+             if inbound_state and inbound_state & zmq.POLLIN:
+-                msg = self.socket.recv_multipart()
+-                assert len(msg) >= 3, (
+-                    "Expected at least 3 message parts "
+-                    "[identity, request_uid, request_type, *payloads]"
+-                )
+-
+-                identity, b_request_uid, b_request_type, *payloads = msg
+-                request_type = msgspec_decode(b_request_type, cls=RequestType)
+-
+-                if handler_entry := self.handlers.get(request_type):
+-                    try:
+-                        self._call_handler(
+-                            handler_entry=handler_entry,
+-                            payloads=payloads,
+-                            prefix_frames=[identity, b_request_uid, b_request_type],
+-                        )
+-                    except Exception:
+-                        logger.exception("Error handling request %s", request_type)
+-                else:
+-                    logger.error(
+-                        "No handler registered for request type %s", request_type
+-                    )
+-                    logger.error("Available handlers: %s", list(self.handlers.keys()))
+-
+-            # Send the responses
++                prefix_frames = None
++                try:
++                    msg = self.socket.recv_multipart()
++                    if len(msg) < 3:
++                        raise ValueError("missing request identity or type")
++                    identity, b_request_uid, b_request_type, *payloads = msg
++                    prefix_frames = [identity, b_request_uid, b_request_type]
++                    request_type = msgspec_decode(b_request_type, cls=RequestType)
++                    handler_entry = self.handlers.get(request_type)
++                    if handler_entry is None:
++                        raise ValueError("No handler registered for request type")
++                    self._call_handler(handler_entry, payloads, prefix_frames)
++                except Exception as error:
++                    logger.error("Malformed or rejected MQ request: %s", type(error).__name__)
++                    if prefix_frames is not None:
++                        self._queue_operation_error(prefix_frames, error)
+             if outbound_state and outbound_state & zmq.POLLIN:
+-                # Consume the notifier counter (resets atomically)
+                 self._output_efd.consume()
+-
+-                # Process the output tasks
+                 try:
+                     while frames_to_send := self.output_queue.get_nowait():
+-                        self.socket.send_multipart(frames_to_send)
++                        self._send_response_frames(frames_to_send)
+                 except queue.Empty:
+                     pass
+ 
+@@ -877,3 +932,7 @@
+         for pool in self.extra_pools:
+             pool.shutdown(wait=False)
+         self._output_efd.close()
++
++# LMCACHE_MQ_LIFECYCLE_HARDENING_V1
++
++# LMCACHE_MQ_LIFECYCLE_HARDENING_V3

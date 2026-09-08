@@ -19,6 +19,15 @@ def initialize(connection):
             updated_at REAL NOT NULL, payload_json TEXT NOT NULL);
         CREATE INDEX IF NOT EXISTS cache_operations_request
             ON cache_operations(request_id, updated_at);
+        CREATE TABLE IF NOT EXISTS workbuddy_history (
+            request_id TEXT PRIMARY KEY, scope TEXT NOT NULL, prefix_hash TEXT NOT NULL,
+            message_count INTEGER NOT NULL, created_at REAL NOT NULL, version INTEGER NOT NULL);
+        CREATE INDEX IF NOT EXISTS workbuddy_history_scope ON workbuddy_history(scope,created_at);
+        CREATE TABLE IF NOT EXISTS prefix_breaks (
+            request_id TEXT NOT NULL, attempt INTEGER NOT NULL,
+            created_at REAL NOT NULL, payload_json TEXT NOT NULL,
+            PRIMARY KEY(request_id, attempt));
+        CREATE INDEX IF NOT EXISTS prefix_breaks_created ON prefix_breaks(created_at);
     """)
 
 
@@ -143,7 +152,8 @@ class CacheAudit:
     def _detail(self, trace):
         with closing(self.connect()) as db:
             ops = [json.loads(r[0]) for r in db.execute("SELECT payload_json FROM cache_operations WHERE request_id=? ORDER BY updated_at", (trace["request_id"],))]
-        return {"request": metrics(trace, ops), "operations": ops}
+            breaks = [json.loads(r[0]) for r in db.execute("SELECT payload_json FROM prefix_breaks WHERE request_id=? ORDER BY attempt", (trace["request_id"],))]
+        return {"request": metrics(trace, ops), "operations": ops, "prefix_breaks": breaks}
 
     async def query(self, **filters):
         return await asyncio.to_thread(self._query, filters)
