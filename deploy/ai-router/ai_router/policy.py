@@ -17,7 +17,7 @@ from .errors import (
     RouterError,
 )
 from .health import HealthMonitor
-from .local_pool import LocalPool
+from .local_pool import LocalPool, LocalPoolLockBusy
 from .prefix_affinity import (
     PrefixAffinityLocation,
     PrefixAffinityRecord,
@@ -1146,9 +1146,20 @@ class RoutingPolicy:
         score, endpoint = max(scored, key=lambda item: (item[0], item[1].node == "ai", item[1].id))
         pool_candidates = [e for e in candidates if self.local_pool.member(e)]
         if requested_model == "auto" and not directed and pool_candidates:
-            chosen = await self.local_pool.select(
-                pool_candidates, statuses, trace=trace, conversation=conversation,
-                prompt_tokens=prompt_tokens, output_tokens=output_reserve_tokens)
+            try:
+                chosen = await self.local_pool.select(
+                    pool_candidates, statuses, trace=trace, conversation=conversation,
+                    prompt_tokens=prompt_tokens, output_tokens=output_reserve_tokens)
+            except LocalPoolLockBusy:
+                # Keep the already-filtered selection. The deployment scheduler
+                # still enforces real capacity; do not invent a reservation.
+                chosen = None
+                if trace:
+                    info = trace.payload.setdefault("local_pool", {"group": "local-peers"})
+                    info["allocation_fallback"] = "allocation_lock_busy"
+                    info.setdefault("selection", "allocation_lock_busy")
+                    trace.record(trace_attempt, "score_candidates", "evaluated", branch="local_pool",
+                                 reason="local_pool_lock_busy", evidence={"fallback": "existing_capacity_scheduler"})
             if chosen is not None:
                 endpoint = chosen
                 score = next(value for value, e in scored if e.id == chosen.id)

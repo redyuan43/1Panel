@@ -68,12 +68,14 @@ def diagnose_route(
         verdict = "本轮未找到同时满足硬约束和可用性要求的端点。"
     elif affinity == "admin-pin":
         verdict = f"管理员临时固定生效，本轮路由到 {selected_label}。"
+    elif trace.get("local_pool", {}).get("selection") == "capacity_timeout_cold_fallback":
+        verdict = f"原设备等待达到上限，本轮按容量回退到 {selected_label}；异机可能需要冷计算。"
+    elif trace.get("local_pool", {}).get("allocation_fallback") == "allocation_lock_busy":
+        verdict = f"本地分配锁繁忙，本轮按既有候选与容量机制选择了 {selected_label}；未保证会话分散。"
     elif reason == "local_pool_spread":
         verdict = f"本轮按本地候选组的空闲程度和近期会话占用选择了 {selected_label}；原始评分仅供审计。"
     elif reason == "local_pool_faster_first_output":
         verdict = f"历史实测估算显示异机首个输出等待明显更短，本轮迁移到 {selected_label}；实际缓存复用需查看后端计数。"
-    elif trace.get("local_pool", {}).get("selection") == "capacity_timeout_cold_fallback":
-        verdict = f"原设备等待达到上限，本轮按容量回退到 {selected_label}；异机可能需要冷计算。"
     elif previous_endpoint_id and endpoint_id != previous_endpoint_id:
         cause = _REJECTION_LABELS.get(
             str(previous_rejection),

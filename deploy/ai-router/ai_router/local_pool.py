@@ -20,6 +20,10 @@ def finite(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0
 
 
+class LocalPoolLockBusy(TimeoutError):
+    """Only allocation-lock contention; backend/store failures remain errors."""
+
+
 class LocalPool:
     def __init__(self, store, settings):
         self.store, self.settings = store, settings
@@ -41,7 +45,7 @@ class LocalPool:
         deadline = time.monotonic() + 2
         while not await self.store.acquire_lock(PREFIX + "lock", token, 10):
             if time.monotonic() >= deadline:
-                raise TimeoutError("local pool allocation lock busy")
+                raise LocalPoolLockBusy("local pool allocation lock busy")
             await asyncio.sleep(.02)
         try:
             yield
@@ -122,8 +126,10 @@ class LocalPool:
             return
         from .cache_audit import metrics
         m = metrics(trace.payload, [])
+        # Capacity observations must not survive completion just because the
+        # best-effort history writer cannot acquire the allocation lock.
+        await self.release(trace.request_id)
         async with self.lock():
-            await self.release(trace.request_id)
             if (trace.payload.get("status") != "succeeded"
                     or trace.payload.get("endpoint_id") != claim["endpoint_id"]):
                 return
