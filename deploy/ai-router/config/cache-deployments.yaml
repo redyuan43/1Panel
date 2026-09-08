@@ -108,6 +108,53 @@ deployments:
       - 跨 vLLM 进程和系统重启后的复用仍未验证。
       - 安装远端聚合遥测前，文件系统占用量不可实时观测。
 
+  - id: amd-qwen38-rocmfpx
+    title: AMD Qwen3.8 Flash
+    node: amd
+    strategy: native_memory
+    flow_label: Memory Prefix -> Checkpoint -> Prefill
+    target:
+      endpoint_id: amd-qwen38-rocmfpx-128k
+    lifecycle: deployed
+    layers:
+      - id: checkpoint
+        label: Memory Prefix / Checkpoint
+        medium: process
+        backend: llama.cpp
+        capacity: 4 checkpoints
+        persistence: llama-process
+        description: 已核对启用 cache-prompt，保留最多 4 个进程内 checkpoint。前缀一致且状态仍可恢复时复用；这不是磁盘快照。
+      - id: recompute
+        label: Recompute Prefill
+        medium: compute
+        backend: llama.cpp
+        capacity: unbounded
+        persistence: none
+        description: 新增输入、前缀变化或历史状态被淘汰后，仍需正常计算。
+    services:
+      - manager: systemd
+        unit: qwen38-flash-next-amd-rocmfpx-128k.service
+    paths:
+      source: /home/ivan/github/qwen3.8_flash_next_amd
+      deployment: /home/ivan/github/qwen3.8_flash_next_amd/build-vulkan-rocmfpx-5e085d12/bin/llama-server
+    validation:
+      status: partial
+      validated_at: "2026-09-08"
+      summary: 已核对运行进程启用 --cache-prompt 和 --ctx-checkpoints 4；尚未完成连续真实请求命中率验收，磁盘保存及重启恢复未验证。
+    telemetry:
+      mode: aggregate
+      status: config_only
+    management:
+      endpoint_actions: false
+      lmcache_settings: false
+      remote_restart: false
+      cache_clear: false
+    limitations:
+      - 当前仅纳入原生内存前缀缓存；未接入磁盘保存与恢复方案。
+      - checkpoint 数量来自运行配置核对，不代表已占用数量或内存用量。
+      - 健康和空闲状态可实时读取；缓存命中率、实际重算量和内存容量未实时采集。
+      - 进程重启会丢失内存计算状态；不保证重启后命中。
+
   - id: nx3-qwen36
     title: NX3 Qwen3.6
     node: nx3

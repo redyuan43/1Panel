@@ -490,7 +490,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     async def endpoints(request: Request) -> dict[str, Any]:
         current = _authorized_runtime(request)
         await current.reload_endpoint_config()
-        return {"endpoints": await _endpoint_values(current)}
+        return {"endpoints": await _endpoint_values(current, cache_catalog)}
 
     @app.get("/api/cache/deployments")
     async def cache_deployments(request: Request) -> JSONResponse:
@@ -499,7 +499,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         await current.reload_endpoint_config()
         payload = cache_deployment_view(
             cache_catalog,
-            await _endpoint_values(current),
+            await _endpoint_values(current, cache_catalog),
             current.settings.value,
         )
         return JSONResponse(
@@ -1170,7 +1170,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         current = _authorized_runtime(request)
         current.reload_settings()
         await current.reload_endpoint_config()
-        endpoints = await _endpoint_values(current)
+        endpoints = await _endpoint_values(current, cache_catalog)
         events = current.audit.recent(max(1000, limit * 8))
         requests = _request_rows(events, limit, current.settings.value)
         cloud = await _cloud_budget(current)
@@ -1302,7 +1302,16 @@ def _editable(value: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _endpoint_values(current: RouterRuntime) -> list[dict[str, Any]]:
+async def _endpoint_values(current: RouterRuntime, cache_catalog: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    # Declared architecture is separate from runtime health and cache counters.
+    declarations = {
+        item["target"]["endpoint_id"]: {
+            "strategy": item["strategy"], "layers": item["layers"],
+            "verified_at": item["validation"].get("validated_at"),
+        }
+        for item in (cache_catalog or {}).get("deployments", [])
+        if not item["target"].get("worker_id")
+    }
     statuses = await current.health.statuses(current.registry.endpoints)
     records = await current.endpoint_configs.records()
     return [
@@ -1310,6 +1319,7 @@ async def _endpoint_values(current: RouterRuntime) -> list[dict[str, Any]]:
             "endpoint": endpoint.to_dict(),
             "status": statuses[endpoint.id].to_dict(),
             "management": records[endpoint.id],
+            "cache_declaration": declarations.get(endpoint.id),
         }
         for endpoint in current.registry.endpoints
     ]

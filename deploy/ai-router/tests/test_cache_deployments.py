@@ -66,11 +66,12 @@ def fleet_workers():
     ]
 
 
-def test_catalog_loads_five_safe_deployments():
+def test_catalog_loads_six_safe_deployments():
     catalog = load_cache_deployment_catalog()
     assert [item["id"] for item in catalog["deployments"]] == [
         "ai-v100-tp2",
         "edge-qwen38-flash",
+        "amd-qwen38-rocmfpx",
         "nx3-qwen36",
         "nx4-qwen36",
         "agx-qwen36",
@@ -126,6 +127,7 @@ def test_view_separates_lmcache_health_from_connector_attachment():
                 },
             },
         ),
+        endpoint_value("amd-qwen38-rocmfpx-128k", backend_type="llama_cpp"),
         endpoint_value(
             "edge-qwen38-flash",
             detail={
@@ -159,6 +161,7 @@ def test_view_resolves_fleet_workers_and_keeps_nx4_planned():
     endpoints = [
         endpoint_value("ai-qwen38-27b"),
         endpoint_value("edge-qwen38-flash"),
+        endpoint_value("amd-qwen38-rocmfpx-128k", backend_type="llama_cpp"),
         endpoint_value(
             "qwen36-shared-fleet",
             backend_type="ai_pool",
@@ -186,6 +189,7 @@ def test_management_only_exposes_existing_safe_actions():
     catalog = load_cache_deployment_catalog()
     endpoints = [
         endpoint_value("ai-qwen38-27b"),
+        endpoint_value("amd-qwen38-rocmfpx-128k", backend_type="llama_cpp"),
         endpoint_value(
             "edge-qwen38-flash",
             enabled=False,
@@ -210,3 +214,15 @@ def test_management_only_exposes_existing_safe_actions():
     for device in ("nx3-qwen36", "nx4-qwen36", "agx-qwen36"):
         assert values[device]["management"]["read_only"] is True
         assert values[device]["management"]["actions"] == []
+
+
+def test_amd_memory_declaration_does_not_imply_disk_or_measured_hits():
+    catalog = load_cache_deployment_catalog()
+    payload = cache_deployment_view(catalog, [endpoint_value("amd-qwen38-rocmfpx-128k", backend_type="llama_cpp")], {})
+    amd = next(x for x in payload["deployments"] if x["node"] == "amd")
+    assert amd["declared"]["strategy"] == "native_memory"
+    assert {x["medium"] for x in amd["declared"]["layers"]} == {"process", "compute"}
+    assert amd["validated"]["status"] == "partial"
+    assert amd["observed"]["cache"]["gpu_apc"]["hit_tokens"] is None
+    assert amd["observed"]["cache"]["lmcache"] == {}
+    assert amd["management"]["read_only"] is True

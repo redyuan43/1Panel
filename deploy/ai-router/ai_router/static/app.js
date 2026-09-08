@@ -717,7 +717,7 @@ function renderEndpointTable(endpoints) {
   const enabled = endpoints.filter(({endpoint}) => endpoint.enabled).length;
   byId("endpoint-count").textContent =
     `${endpoints.filter((item) => item.status.healthy).length}/${endpoints.length} 健康 · ${enabled} 启用`;
-  byId("endpoint-table").innerHTML = endpoints.map(({endpoint, status, management}) => `
+  byId("endpoint-table").innerHTML = endpoints.map(({endpoint, status, management, cache_declaration}) => `
     <tr>
       <td>${endpointStatusBadge(endpoint, status)}</td>
       <td><span class="node-label node-${escapeHtml(endpoint.node)}">${escapeHtml(endpoint.node.toUpperCase())}</span></td>
@@ -731,7 +731,7 @@ function renderEndpointTable(endpoints) {
         <span class="table-secondary">配置 ${formatTokens(endpoint.configured_context_tokens)}</span>
       </td>
       <td>${status.healthy ? `${Math.round(status.load_headroom * 100)}%` : "—"}</td>
-      <td>${endpointCacheStatus(endpoint, status)}</td>
+      <td>${endpointCacheStatus(endpoint, status, cache_declaration)}</td>
       <td>${capabilitySummary(endpoint.capabilities, status.detail?.effective_modalities || endpoint.modalities)}</td>
       <td>
         <strong class="table-primary">${escapeHtml(endpoint.capabilities?.validation_status || "unverified")}</strong>
@@ -755,7 +755,12 @@ function renderEndpointTable(endpoints) {
   bindEndpointActions();
 }
 
-function endpointCacheStatus(endpoint, status) {
+function endpointCacheStatus(endpoint, status, cache_declaration) {
+  const declared = cache_declaration || {};
+  if (declared.strategy === "native_memory") {
+    const layer = (declared.layers || []).find(item => item.medium === "process");
+    return `<strong class="table-primary">内存前缀缓存 · 配置已核对</strong><span class="table-secondary">${escapeHtml(layer?.capacity || "数量未采集")} · 进程内 · 命中率未采集</span>`;
+  }
   const detail = status.detail || {};
   const queries = Number(detail.prefix_cache_queries || 0);
   const hits = Number(detail.prefix_cache_hits || 0);
@@ -763,7 +768,15 @@ function endpointCacheStatus(endpoint, status) {
   if (endpoint.backend_type !== "vllm") {
     return '<span class="table-secondary">—</span>';
   }
+  const gpu = `<strong class="table-primary">GPU ${escapeHtml(formatCacheHit(hits, apcRatio))}</strong>`;
+  if (declared.strategy === "native_disk") {
+    const layer = (declared.layers || []).find(item => item.medium === "disk");
+    return `${gpu}<span class="table-secondary">原生磁盘缓存 · 已配置 ${escapeHtml(layer?.capacity || "容量未知")} · 占用未采集</span>`;
+  }
   const lmcache = detail.lmcache || {};
+  if (lmcache.supported !== true) {
+    return `${gpu}<span class="table-secondary">外部缓存未采集 · LMCache 不适用</span>`;
+  }
   const desired = endpoint.id === "ai-qwen38-27b"
     ? state.settings?.lmcache
     : null;
@@ -777,7 +790,7 @@ function endpointCacheStatus(endpoint, status) {
     : null;
   const memory = Number(lmcache.memory_total_bytes || 0) > 0
     ? `${formatBytes(lmcache.memory_used_bytes)} / ${formatBytes(lmcache.memory_total_bytes)}`
-    : "未分配";
+    : lmcache.memory_total_bytes === 0 ? "未分配" : "容量未采集";
   const runtimeLabel = restartRequired
     ? "待重启"
     : active
@@ -852,6 +865,7 @@ const cacheDeploymentStrategyLabels = {
   lmcache_dram: "vLLM + LMCache 内存缓存",
   native_disk: "vLLM 原生磁盘缓存",
   gateway_snapshot: "llama.cpp 网关磁盘快照",
+  native_memory: "llama.cpp 内存前缀缓存",
 };
 
 const cacheDeploymentLifecycleLabels = {
@@ -867,6 +881,7 @@ const cacheDeploymentValidationLabels = {
 
 const cacheDeploymentTelemetryLabels = {
   installed: "已安装",
+  config_only: "仅核对配置，缓存计数未采集",
   partial: "仅请求级",
   planned: "待部署",
   native: "原生指标",
@@ -923,10 +938,10 @@ function renderCacheDeployments() {
 
 function renderCacheDeploymentSummary(summary) {
   const metrics = [
-    ["纳管设备", summary.total || 0, "AI、Edge、NX3、NX4、AGX", ""],
+    ["纳管设备", summary.total || 0, "AI、Edge、AMD、NX3、NX4、AGX", ""],
     ["已部署", summary.deployed || 0, `${summary.planned || 0} 项仍在规划`, "good"],
     ["配置差异", summary.drifted || 0, "声明配置与实时状态比较", summary.drifted ? "warn" : "good"],
-    ["缓存架构", summary.strategies || 0, "DRAM、原生磁盘、网关快照", "live"],
+    ["缓存架构", summary.strategies || 0, "内存前缀、DRAM、原生磁盘、网关快照", "live"],
   ];
   byId("cache-deployment-summary").innerHTML = metrics.map(
     ([label, value, hint, tone]) => `
@@ -959,7 +974,7 @@ function cacheDeploymentCapacity(item) {
         value: durable.capacity,
         detail: durable.backend,
       }
-    : {value: "GPU KV Cache", detail: "进程内"};
+    : {value: layers.find(layer => layer.medium === "process")?.capacity || "GPU KV Cache", detail: "配置容量 · 进程内"};
 }
 
 function cacheDeploymentObservedSummary(item) {
@@ -984,6 +999,9 @@ function cacheDeploymentObservedSummary(item) {
       observed.status?.healthy ? "vLLM 健康" : "vLLM 不可用",
       hits == null ? "磁盘命中指标不可用" : `外部命中 ${formatTokens(hits)} Token`,
     ];
+  }
+  if (item.declared?.strategy === "native_memory") {
+    return [observed.status?.healthy ? "llama.cpp 健康" : "llama.cpp 不可用", "内存缓存配置已核对 · 命中率未采集"];
   }
   if (worker) {
     return [
@@ -1248,7 +1266,7 @@ function renderCacheDeploymentInspector(item) {
       ["端点", endpoint.id || "—"],
       ["模型", endpoint.model || "—"],
       ["Worker", worker ? `${worker.worker_id} · ${worker.state}` : "不适用"],
-      ["LMCache", Object.keys(lmcache).length
+      ["LMCache", lmcache.supported === true
         ? `${lmcache.healthy ? "服务健康" : "服务异常"} · ${lmcache.connector_active ? "Connector 已连接" : "Connector 未连接"}`
         : "不适用"],
     ]);

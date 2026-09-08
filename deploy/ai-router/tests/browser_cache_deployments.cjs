@@ -40,14 +40,14 @@ async function run() {
     await page.locator("#auto-refresh").uncheck();
     await page.locator('[data-view="cache-deployments"]').click();
     await page.waitForFunction(
-      () => state.cacheDeployments?.deployments?.length === 5,
+      () => state.cacheDeployments?.deployments?.length === 6,
     );
 
     assert.equal(
       await page.locator(
         "#cache-deployment-table tr[data-cache-deployment-id]",
       ).count(),
-      5,
+      6,
     );
     assert.equal(
       await page.locator("#cache-deployment-summary .metric").count(),
