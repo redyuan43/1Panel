@@ -4,7 +4,9 @@ import argparse
 import asyncio
 import copy
 import json
+import os
 import shutil
+import stat
 import subprocess
 import time
 import uuid
@@ -44,6 +46,11 @@ SEEDS = [2026090701, 2026090702, 2026090703]
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--fleet-url", required=True)
+    parser.add_argument(
+        "--key-file",
+        type=Path,
+        default=Path.home() / ".config/ai-router-media/h3-key",
+    )
     parser.add_argument("--template", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--steps", type=int, default=6)
@@ -68,6 +75,20 @@ def parse_args() -> argparse.Namespace:
         default="t8star_minimax_h3_turbo_4step_ema_comfyui.safetensors",
     )
     return parser.parse_args()
+
+
+def router_key(path: Path) -> str:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise ValueError("H3 key file must be a regular 0600 file")
+    value = path.read_text(encoding="utf-8").strip()
+    if (
+        not value
+        or len(value) > 256
+        or not all(character.isalnum() or character in "_-" for character in value)
+    ):
+        raise ValueError("H3 key file is invalid")
+    return value
 
 
 def select_seeds(jobs: int, seed: int | None) -> list[int]:
@@ -432,6 +453,7 @@ def summarize_metrics(path: Path) -> dict[str, Any]:
 
 async def run(args: argparse.Namespace) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    headers = {"Authorization": "Bearer " + router_key(args.key_file)}
     template = json.loads(args.template.read_text(encoding="utf-8"))
     prompts = load_prompts(args.jobs, args.prompt_file, args.prompt_files)
     seeds = select_seeds(args.jobs, args.seed)
@@ -476,7 +498,7 @@ async def run(args: argparse.Namespace) -> int:
         "jobs": [],
     }
     try:
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=180, headers=headers) as client:
             submissions = await asyncio.gather(
                 *[
                     client.post(

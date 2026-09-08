@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -286,3 +287,13 @@ def test_wait_for_job_retries_transport_error(monkeypatch) -> None:
     )
     assert client.attempts == 2
     assert output["filename"] == "result.mp4"
+
+
+def test_router_key_requires_private_regular_file(tmp_path: Path) -> None:
+    path = tmp_path / "h3-key"
+    path.write_text("review-test-key", encoding="utf-8")
+    os.chmod(path, 0o600)
+    assert MODULE.router_key(path) == "review-test-key"
+    os.chmod(path, 0o644)
+    with pytest.raises(ValueError, match="0600"):
+        MODULE.router_key(path)

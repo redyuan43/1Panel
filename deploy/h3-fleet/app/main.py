@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .workflow_builder import SUPPORTED_MODES, build_workflow
@@ -812,7 +812,7 @@ async def health() -> dict[str, Any]:
                 "device": lane.device,
                 "preview_only": lane.preview_only,
                 "enabled": lane.enabled,
-                "active_jobs": fleet.store.active_for_lane(lane.id),
+                "active_job_count": len(fleet.store.active_for_lane(lane.id)),
                 **await fleet.lane_health(lane),
             }
         )
@@ -960,16 +960,31 @@ async def view(
     if not job:
         raise HTTPException(status_code=404, detail="Output is not mapped to an H3 job")
     lane = fleet.lanes_by_id[job["lane_id"]]
-    response = await fleet.client.get(
+    request = fleet.client.build_request(
+        "GET",
         f"{lane.url}/view",
         params={"filename": filename, "subfolder": subfolder, "type": type},
-        timeout=300,
     )
+    response = await fleet.client.send(request, stream=True)
     if not response.is_success:
-        raise HTTPException(status_code=response.status_code, detail=response.text)
-    return Response(
-        response.content,
+        detail = (await response.aread()).decode(errors="replace")[:1000]
+        await response.aclose()
+        raise HTTPException(status_code=response.status_code, detail=detail)
+
+    async def chunks():
+        try:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        finally:
+            await response.aclose()
+
+    headers = {"Cache-Control": "private, no-store"}
+    if response.headers.get("content-length"):
+        headers["Content-Length"] = response.headers["content-length"]
+    return StreamingResponse(
+        chunks(),
         media_type=response.headers.get("content-type", "application/octet-stream"),
+        headers=headers,
     )
 
 

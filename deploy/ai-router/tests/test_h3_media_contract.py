@@ -133,6 +133,35 @@ def fixture(tmp_path, monkeypatch):
     return m, contract, extension
 
 
+def test_executor_client_uses_router_authentication(tmp_path, monkeypatch):
+    _, _, extension = fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("H3_LOCAL_EXECUTOR_URL", "http://100.96.79.21:8789")
+    captured = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return None
+
+        async def request(self, method, path, **kwargs):
+            captured["request"] = (method, path, kwargs)
+            return httpx.Response(
+                200,
+                request=httpx.Request(method, "http://100.96.79.21:8789" + path),
+                json={"ok": True},
+            )
+
+    monkeypatch.setattr(extension.httpx, "AsyncClient", Client)
+    response = asyncio.run(extension._executor_request("GET", "/api/jobs/test"))
+    assert response.json() == {"ok": True}
+    assert captured["headers"] == {"Authorization": "Bearer test"}
+
+
 def test_local_768_requires_exclusive_gpu(tmp_path, monkeypatch):
     m, contract, extension = fixture(tmp_path, monkeypatch)
     calls = []

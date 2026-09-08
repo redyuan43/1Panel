@@ -470,6 +470,81 @@ def test_router_execution_contract_submits_directly_to_three_lanes(
     asyncio.run(scenario())
 
 
+def test_public_health_does_not_expose_active_request_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    async def scenario():
+        module = load_module(tmp_path)
+        fake = FakeComfyClient()
+        module.fleet.client = fake
+        disk = type("DiskUsage", (), {"free": 50 * 1024**3})()
+        monkeypatch.setattr(module.shutil, "disk_usage", lambda _path: disk)
+        module.fleet.store.create(
+            prompt_id="health-redaction",
+            upstream_prompt_id="upstream-health",
+            execution_id="health-redaction",
+            request_digest="digest",
+            lane_id="fast",
+            stage="preview",
+            profile="preview",
+            request_data={"prompt": {"secret": "customer prompt must not leak"}},
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=module.app),
+            base_url="http://test",
+        ) as client:
+            response = await client.get("/api/health")
+        assert response.status_code == 200
+        assert "customer prompt must not leak" not in response.text
+        fast = next(item for item in response.json()["lanes"] if item["id"] == "fast")
+        assert fast["active_job_count"] == 1
+        assert "active_jobs" not in fast
+
+    asyncio.run(scenario())
+
+
+def test_output_proxy_streams_upstream_video(tmp_path: Path) -> None:
+    async def scenario():
+        module = load_module(tmp_path)
+        store = module.fleet.store
+        store.create(
+            prompt_id="stream-output",
+            upstream_prompt_id="upstream-stream",
+            execution_id="stream-output",
+            request_digest="digest",
+            lane_id="fast",
+            stage="preview",
+            profile="preview",
+        )
+        store.update(
+            "stream-output",
+            status="completed",
+            output_filename="result.mp4",
+            output_subfolder="",
+            output_type="output",
+        )
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/view"
+            return httpx.Response(
+                200,
+                headers={"content-type": "video/mp4", "content-length": "11"},
+                stream=httpx.ByteStream(b"video-bytes"),
+            )
+
+        upstream = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        module.fleet.client = upstream
+        response = await module.view("result.mp4")
+        assert isinstance(response, module.StreamingResponse)
+        assert response.headers["cache-control"] == "private, no-store"
+        assert response.headers["content-length"] == "11"
+        assert b"".join([chunk async for chunk in response.body_iterator]) == b"video-bytes"
+        await upstream.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_router_execution_contract_accepts_concurrent_large_anchor_uploads(
     tmp_path: Path,
     monkeypatch,

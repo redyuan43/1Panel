@@ -78,6 +78,19 @@ sudo systemctl status \
 curl http://100.96.79.21:8789/api/health
 ```
 
+The load-validation client uses the same private Router credential. The key
+file must be a regular `0600` file and is never printed or copied into the
+report:
+
+```bash
+python3 scripts/validate_dual.py \
+  --fleet-url http://100.96.79.21:8789 \
+  --key-file ~/.config/ai-router-media/h3-key \
+  --template /mnt/ivan-ext4-offload/h3-deploy/workflows/turbo4-api.json \
+  --output-dir ~/.local/state/h3-validation \
+  --jobs 3
+```
+
 `gpustack-worker` uses Docker and must remain stopped with restart policy
 `no`. `ollama.service` must remain disabled while Ivan is dedicated to H3.
 

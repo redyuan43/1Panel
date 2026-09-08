@@ -50,10 +50,18 @@ def _executor_base() -> str:
     return value
 
 
+def _executor_headers() -> dict[str, str]:
+    secret = os.environ.get("H3_ROUTER_KEY", "")
+    if not secret:
+        raise HTTPException(503, "private H3 executor credential is not configured")
+    return {"Authorization": "Bearer " + secret}
+
+
 async def _executor_request(method: str, path: str, **kwargs) -> httpx.Response:
     try:
         async with httpx.AsyncClient(
             base_url=_executor_base(),
+            headers=_executor_headers(),
             timeout=httpx.Timeout(180, read=300),
             trust_env=False,
             follow_redirects=False,
@@ -899,6 +907,7 @@ def install(module):
         })
         client = httpx.AsyncClient(
             base_url=_executor_base(),
+            headers=_executor_headers(),
             timeout=httpx.Timeout(180, read=300),
             trust_env=False,
             follow_redirects=False,
