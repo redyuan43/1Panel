@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 import time
+import math
 from typing import Any
 
 import yaml
@@ -91,7 +92,7 @@ def cache_deployment_view(
             ),
             "healthy": sum(
                 item["declared"]["lifecycle"] == "deployed"
-                and item["observed"]["runtime_healthy"]
+                and item["state"]["code"] == "healthy"
                 for item in deployments
             ),
             "drifted": sum(
@@ -218,6 +219,7 @@ def _deployment_view(
         worker,
         worker_required=bool(worker_id),
     )
+    observed["cache_health"] = _cache_health(item, status, observed)
     desired = _desired(item, endpoint, settings)
     drift = _drift(item, endpoint, observed, desired, worker)
     return {
@@ -357,6 +359,30 @@ def _observed(
     }
 
 
+def _cache_health(item: dict[str, Any], status: dict[str, Any],
+                  observed: dict[str, Any]) -> dict[str, Any]:
+    # Model readiness and historical hit counters cannot establish cache readiness.
+    result = {"healthy": None, "source": None, "checked_at": status.get("checked_at"),
+              "reason": "cache_probe_unavailable"}
+    checked = _number(status.get("checked_at"))
+    if checked is None or not 0 <= time.time() - checked <= 120:
+        result["reason"] = "cache_evidence_stale"
+        return result
+    if item["strategy"] != "lmcache_dram":
+        return result
+    cache = observed["cache"]["lmcache"]
+    if cache.get("supported") is not True:
+        return result
+    result["source"] = "lmcache_probe"
+    if cache.get("healthy") is False:
+        result.update(healthy=False, reason="cache_service_unhealthy")
+    elif cache.get("healthy") is True and cache.get("connector_active") is True:
+        result.update(healthy=True, reason="service_and_connector_ready")
+    elif cache.get("connector_active") is False:
+        result.update(healthy=False, reason="cache_connector_inactive")
+    return result
+
+
 def _desired(
     item: dict[str, Any],
     endpoint: dict[str, Any],
@@ -466,24 +492,19 @@ def _drift(
     if item["management"].get("lmcache_settings"):
         lmcache = observed["cache"]["lmcache"]
         configured = desired.get("lmcache", {})
-        expected = bool(configured.get("enabled"))
-        active = bool(lmcache.get("connector_active"))
-        if expected != active:
-            result.append(
-                _drift_item(
-                    "lmcache_restart_required",
-                    "warning",
-                    "LMCache desired state differs from the attached connector.",
-                )
-            )
-        elif active and not lmcache.get("healthy"):
-            result.append(
-                _drift_item(
-                    "lmcache_unhealthy",
-                    "critical",
-                    "LMCache connector is active but the service is unhealthy.",
-                )
-            )
+        expected = configured.get("enabled")
+        active = lmcache.get("connector_active")
+        evidence = observed["cache_health"]
+        if evidence["reason"] == "cache_service_unhealthy":
+            result.append(_drift_item(
+                "lmcache_unhealthy", "critical",
+                "LMCache service probe is failing."))
+        elif (evidence["source"] == "lmcache_probe"
+              and isinstance(expected, bool) and isinstance(active, bool)
+              and expected != active):
+            result.append(_drift_item(
+                "lmcache_restart_required", "warning",
+                "LMCache desired state differs from the attached connector."))
     if (
         item.get("telemetry", {}).get("status") == "partial"
         and item["lifecycle"] == "deployed"
@@ -519,7 +540,7 @@ def _deployment_state(
             ),
             "tone": "warning",
         }
-    if observed["runtime_healthy"]:
+    if observed["runtime_healthy"] and observed["cache_health"]["healthy"] is True:
         return {
             "code": "healthy",
             "label": "Healthy",
@@ -598,6 +619,6 @@ def _drift_item(
 
 
 def _number(value: Any) -> float | int | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return value

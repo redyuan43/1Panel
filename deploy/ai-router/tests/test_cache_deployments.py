@@ -1,4 +1,5 @@
 from pathlib import Path
+import time
 
 import pytest
 
@@ -34,7 +35,7 @@ def endpoint_value(
         },
         "status": {
             "healthy": True,
-            "checked_at": 1,
+            "checked_at": time.time(),
             "load_headroom": 1,
             "cache_generation": "generation",
             "detail": detail or {},
@@ -226,3 +227,48 @@ def test_amd_memory_declaration_does_not_imply_disk_or_measured_hits():
     assert amd["observed"]["cache"]["gpu_apc"]["hit_tokens"] is None
     assert amd["observed"]["cache"]["lmcache"] == {}
     assert amd["management"]["read_only"] is True
+
+
+@pytest.mark.parametrize("target", ["edge-qwen38-flash", "amd-qwen38-rocmfpx-128k", "qwen36-shared-fleet"])
+def test_model_health_without_cache_probe_is_not_cache_health(target):
+    endpoints = [endpoint_value(target, detail={"workers": fleet_workers(),
+                 "external_prefix_cache_hits": 9000})]
+    payload = cache_deployment_view(load_cache_deployment_catalog(), endpoints, {})
+    for item in payload["deployments"]:
+        if item["target"]["endpoint_id"] == target and item["declared"]["lifecycle"] == "deployed":
+            assert item["observed"]["runtime_healthy"] is True
+            assert item["state"]["code"] == "unknown"
+            assert item["observed"]["cache_health"]["healthy"] is None
+    assert payload["summary"]["healthy"] == 0
+
+
+@pytest.mark.parametrize("age", [None, 121, -10])
+def test_missing_or_stale_cache_probe_cannot_claim_health(age):
+    endpoint = endpoint_value("ai-qwen38-27b", detail={"lmcache": {
+        "supported": True, "healthy": True, "connector_active": True}})
+    endpoint["status"]["checked_at"] = None if age is None else time.time() - age
+    payload = cache_deployment_view(load_cache_deployment_catalog(), [endpoint], {"lmcache": {"enabled": True}})
+    ai = payload["deployments"][0]
+    assert ai["state"]["code"] == "unknown"
+    assert ai["observed"]["cache_health"]["healthy"] is None
+    assert payload["summary"]["healthy"] == 0
+
+
+def test_fresh_cache_service_failure_is_not_hidden_by_inactive_connector():
+    endpoint = endpoint_value("ai-qwen38-27b", detail={"lmcache": {
+        "supported": True, "healthy": False, "connector_active": False}})
+    payload = cache_deployment_view(load_cache_deployment_catalog(), [endpoint], {"lmcache": {"enabled": True}})
+    assert payload["deployments"][0]["state"]["code"] == "unavailable"
+    assert payload["summary"]["healthy"] == 0
+    endpoint["status"]["detail"]["lmcache"].update(healthy=True, connector_active=True)
+    payload = cache_deployment_view(load_cache_deployment_catalog(), [endpoint], {"lmcache": {"enabled": True}})
+    assert payload["deployments"][0]["state"]["code"] == "healthy"
+    assert payload["summary"]["healthy"] == 1
+
+
+@pytest.mark.parametrize("value", [None, True, float("nan"), float("inf")])
+def test_unknown_or_invalid_counters_are_not_zero(value):
+    endpoint = endpoint_value("edge-qwen38-flash", detail={"prefix_cache_hits": value})
+    payload = cache_deployment_view(load_cache_deployment_catalog(), [endpoint], {})
+    edge = payload["deployments"][1]
+    assert edge["observed"]["cache"]["gpu_apc"]["hit_tokens"] is None

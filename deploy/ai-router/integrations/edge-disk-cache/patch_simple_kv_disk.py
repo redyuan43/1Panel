@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import os
+import tempfile
 from pathlib import Path
 import sys
 
@@ -176,6 +178,20 @@ def verify(path: Path, markers: tuple[str, ...]) -> None:
     print(f"{path}: {hashlib.sha256(source.encode()).hexdigest()}")
 
 
+def atomic_write(path: Path, data: bytes, mode: int) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit("usage: patch_simple_kv_disk.py SITE_PACKAGES")
@@ -185,24 +201,43 @@ def main() -> int:
     if not manager.is_file() or not worker.is_file():
         raise RuntimeError("pinned vLLM SimpleCPU offload sources are missing")
 
-    patch_manager(manager)
-    patch_worker(worker)
-    verify(
-        manager,
-        (
-            "self._offload_group_ids",
-            "if not spec.prefix_cacheable:",
-            "if g not in self._offload_group_ids:",
-        ),
-    )
-    verify(
-        worker,
-        (
-            "self._compute_done",
-            "wait_event=self._compute_done",
-            "vLLM issues #45704 and #47282",
-        ),
-    )
+    originals = {p: (p.read_bytes(), p.stat().st_mode & 0o777)
+                 for p in (manager, worker)}
+    # Match every anchor and compile both results before touching either runtime
+    # file. A rejected base image must not leave a partial safety patch behind.
+    with tempfile.TemporaryDirectory(prefix="edge-kv-patch-") as scratch:
+        staged_manager = Path(scratch) / "manager.py"
+        staged_worker = Path(scratch) / "worker.py"
+        for target, staged in ((manager, staged_manager), (worker, staged_worker)):
+            staged.write_bytes(originals[target][0])
+        patch_manager(staged_manager)
+        patch_worker(staged_worker)
+        verify(
+            staged_manager,
+            (
+                "self._offload_group_ids",
+                "if not spec.prefix_cacheable:",
+                "if g not in self._offload_group_ids:",
+            ),
+        )
+        verify(
+            staged_worker,
+            (
+                "self._compute_done",
+                "wait_event=self._compute_done",
+                "vLLM issues #45704 and #47282",
+            ),
+        )
+        prepared = {manager: staged_manager.read_bytes(), worker: staged_worker.read_bytes()}
+    written = []
+    try:
+        for target, data in prepared.items():
+            atomic_write(target, data, originals[target][1])
+            written.append(target)
+    except BaseException:
+        for target in reversed(written):
+            atomic_write(target, *originals[target])
+        raise
     return 0
 
 

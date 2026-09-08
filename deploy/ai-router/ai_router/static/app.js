@@ -153,7 +153,9 @@ async function api(path, options = {}) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(payload.error?.message || `HTTP ${response.status}`);
+    const error = new Error(payload.error?.message || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
   }
   return payload;
 }
@@ -837,7 +839,7 @@ const cacheDeploymentStateLabels = {
   healthy: "健康",
   warning: "配置差异",
   unavailable: "不可用",
-  unknown: "未知",
+  unknown: "缓存健康未确认",
 };
 
 const cacheDeploymentDriftLabels = {
@@ -983,14 +985,16 @@ function cacheDeploymentObservedSummary(item) {
   const lmcache = observed.cache?.lmcache || {};
   if (item.id === "ai-v100-tp2") {
     const desired = Boolean(item.desired?.lmcache?.enabled);
-    const service = !desired
-      ? "LMCache 已关闭"
-      : lmcache.healthy
-        ? "LMCache 健康"
-        : "LMCache 状态不可用";
+    const service = observed.cache_health?.healthy == null
+      ? "LMCache 健康未确认"
+      : !desired
+        ? "LMCache 目标关闭"
+        : lmcache.healthy
+          ? "LMCache 健康"
+          : "LMCache 状态不可用";
     const connector = lmcache.connector_active
-      ? `Connector ${lmcache.registered_count || 0}/${lmcache.expected_registrations || 0}`
-      : `Connector 未连接 ${lmcache.registered_count || 0}/${lmcache.expected_registrations || 0}`;
+      ? `Connector ${lmcache.registered_count ?? "—"}/${lmcache.expected_registrations ?? "—"}`
+      : `Connector 未连接 ${lmcache.registered_count ?? "—"}/${lmcache.expected_registrations ?? "—"}`;
     return [service, connector];
   }
   if (item.id === "edge-qwen38-flash") {
@@ -1075,6 +1079,7 @@ function cacheDeploymentActions(item) {
           class="secondary compact ${action.id === "disable" ? "danger-action" : ""}"
           data-cache-deployment-action="${escapeHtml(item.id)}"
           data-cache-action-id="${escapeHtml(action.id)}"
+          data-cache-revision="${escapeHtml(item.management?.revision ?? "")}"
         >${escapeHtml(cacheDeploymentActionLabel(action))}</button>
       `).join("")}
     </div>
@@ -1140,12 +1145,13 @@ function bindCacheDeploymentRows() {
       void runCacheDeploymentAction(
         button.dataset.cacheDeploymentAction,
         button.dataset.cacheActionId,
+        button.dataset.cacheRevision,
       );
     });
   });
 }
 
-async function runCacheDeploymentAction(deploymentId, actionId) {
+async function runCacheDeploymentAction(deploymentId, actionId, renderedRevision) {
   const item = (state.cacheDeployments?.deployments || []).find(
     ({id}) => id === deploymentId,
   );
@@ -1161,12 +1167,31 @@ async function runCacheDeploymentAction(deploymentId, actionId) {
     return;
   }
   const endpointId = item.management?.endpoint_id;
-  if (!endpointId) return;
-  await runEndpointAction(
-    endpointId,
-    actionId.startsWith("auto-") ? "auto" : "enabled",
-  );
-  await loadCacheDeployments(true);
+  const action = item.management?.actions?.find(({id, kind}) =>
+    id === actionId && kind === "endpoint");
+  const revision = Number(renderedRevision);
+  if (!endpointId || !action || !["enable", "disable", "auto-enable", "auto-disable"].includes(actionId)) return;
+  if (renderedRevision == null || renderedRevision === "" || !Number.isSafeInteger(revision) || revision < 0) {
+    notice("操作版本缺失，请刷新后重试。", true);
+    return;
+  }
+  if (actionId === "disable" && !window.confirm("停用后新请求将不再进入此端点，正在运行的请求会继续完成。确认停用？")) return;
+  try {
+    // Submit the displayed action and its revision; never toggle another snapshot.
+    await api(`/api/endpoints/${encodeURIComponent(endpointId)}/actions/${actionId}`, {
+      method: "POST",
+      body: JSON.stringify({expected_revision: revision}),
+    });
+    await Promise.all([loadDashboard(true), loadCacheDeployments(true)]);
+    notice(`${cacheDeploymentActionLabel(action)}操作已完成。`);
+  } catch (error) {
+    if (error.status === 409) {
+      await Promise.allSettled([loadDashboard(true), loadCacheDeployments(true)]);
+      notice("配置版本已变化，已刷新。请核对后重新操作；未自动重试。", true);
+    } else {
+      notice(error.message, true);
+    }
+  }
 }
 
 function selectedCacheDeployment() {
@@ -1266,8 +1291,9 @@ function renderCacheDeploymentInspector(item) {
       ["端点", endpoint.id || "—"],
       ["模型", endpoint.model || "—"],
       ["Worker", worker ? `${worker.worker_id} · ${worker.state}` : "不适用"],
+      ["缓存健康", item.observed?.cache_health?.healthy === true ? "服务与 Connector 已验证" : item.observed?.cache_health?.healthy === false ? "缓存层未就绪" : "未确认（缺少实时证据或证据已过期）"],
       ["LMCache", lmcache.supported === true
-        ? `${lmcache.healthy ? "服务健康" : "服务异常"} · ${lmcache.connector_active ? "Connector 已连接" : "Connector 未连接"}`
+        ? item.observed?.cache_health?.healthy == null ? "实时健康未确认" : `${lmcache.healthy ? "服务健康" : "服务异常"} · ${lmcache.connector_active ? "Connector 已连接" : "Connector 未连接"}`
         : "不适用"],
     ]);
   } else if (tab === "validated") {

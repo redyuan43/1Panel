@@ -62,6 +62,12 @@ def run(args):
             edits.append((target, current, restored))
             continue
         if sha == after:
+            # Idempotent/resumed installation must retain a complete rollback
+            # set, including files this invocation does not need to modify.
+            if args.mode == "apply" and before is not None:
+                original = backup / relative
+                if not original.is_file() or digest(original.read_bytes()) != before:
+                    raise ValueError("missing or invalid original backup for installed file: " + str(relative))
             continue
         if sha != before:
             raise ValueError("unsupported runtime source: " + str(relative))

@@ -67,10 +67,15 @@ class ControlAuditContractTests(unittest.TestCase):
             db.execute("INSERT INTO training_records VALUES(?,?)", (request_hash, ciphertext))
 
     def test_new_endpoints_require_admin(self):
-        for path in ("/api/cache/summary", "/api/cache/requests", "/api/route-traces/synthetic-request/content"):
+        for path in ("/api/cache/deployments", "/api/cache/summary", "/api/cache/requests", "/api/route-traces/synthetic-request/content"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
                 self.assertEqual(self.client.get(path, headers={"Authorization": "Bearer synthetic-client-key"}).status_code, 401)
+        for action in ("enable", "disable", "auto-enable", "auto-disable"):
+            for headers in ({}, {"Authorization": "Bearer synthetic-client-key"}):
+                self.assertEqual(self.client.post(
+                    f"/api/endpoints/edge-qwen38-flash/actions/{action}",
+                    headers=headers, json={"expected_revision": 0}).status_code, 401)
         self.assertEqual(self.events, [])
 
     def test_cache_requests_pagination_and_summary_are_consistent(self):
