@@ -23,6 +23,11 @@ const state = {
   selectedTrace: null,
   routeDiagnosis: null,
   conversationControl: null,
+  cacheDeployments: null,
+  selectedCacheDeploymentId: null,
+  selectedCacheLayerId: null,
+  selectedCacheDeploymentTab: "declared",
+  cacheDeploymentAnomaliesOnly: false,
   selectedTraceAttempt: 1,
   selectedTraceNodeId: null,
   editingEndpointId: null,
@@ -38,6 +43,7 @@ const viewTitles = {
   requests: "请求记录",
   audit: "路由审计",
   clients: "客户端账号",
+  "cache-deployments": "缓存部署",
   settings: "策略设置",
 };
 
@@ -811,6 +817,486 @@ function endpointConfigStatus(management = {}) {
   return `
     <strong class="table-primary">${management.has_override ? "动态配置" : "注册表基线"}</strong>
     <span class="table-secondary">rev ${management.revision ?? 0}</span>
+  `;
+}
+
+const cacheDeploymentStateLabels = {
+  healthy: "健康",
+  warning: "配置差异",
+  unavailable: "不可用",
+  unknown: "未知",
+};
+
+const cacheDeploymentDriftLabels = {
+  target_missing: "注册目标不存在",
+  endpoint_unhealthy: "端点健康检查失败",
+  worker_missing: "Fleet 未报告该 Worker",
+  worker_not_ready: "Worker 不可调度",
+  planned_not_deployed: "持久化缓存尚未部署",
+  lmcache_restart_required: "LMCache 目标与 Connector 不一致",
+  lmcache_unhealthy: "LMCache Connector 已连接但服务异常",
+  aggregate_telemetry_unavailable: "仅有请求级证据",
+};
+
+const cacheDeploymentPersistenceLabels = {
+  "vllm-process": "vLLM 进程内",
+  "lmcache-process": "LMCache 进程保持期间",
+  "same-vllm-process": "同一 vLLM 进程",
+  "llama-process": "llama.cpp 进程内",
+  "local-disk": "跨后端和网关重启",
+  "planned-local-disk": "计划跨进程恢复",
+  none: "不持久化",
+};
+
+const cacheDeploymentStrategyLabels = {
+  lmcache_dram: "vLLM + LMCache 内存缓存",
+  native_disk: "vLLM 原生磁盘缓存",
+  gateway_snapshot: "llama.cpp 网关磁盘快照",
+};
+
+const cacheDeploymentLifecycleLabels = {
+  deployed: "已部署",
+  planned: "待部署",
+};
+
+const cacheDeploymentValidationLabels = {
+  validated: "已验证",
+  partial: "部分验证",
+  planned: "待验证",
+};
+
+const cacheDeploymentTelemetryLabels = {
+  installed: "已安装",
+  partial: "仅请求级",
+  planned: "待部署",
+  native: "原生指标",
+  request: "请求级遥测",
+  aggregate: "聚合遥测",
+};
+
+async function loadCacheDeployments(silent = false) {
+  if (!state.key) return;
+  if (!silent) byId("refresh").disabled = true;
+  try {
+    state.cacheDeployments = await api("/api/cache/deployments");
+    const visible = cacheDeploymentItems();
+    if (
+      !state.selectedCacheDeploymentId
+      || !visible.some(
+        (item) => item.id === state.selectedCacheDeploymentId,
+      )
+    ) {
+      state.selectedCacheDeploymentId =
+        visible[0]?.id || state.cacheDeployments.deployments?.[0]?.id;
+      state.selectedCacheLayerId = null;
+    }
+    renderCacheDeployments();
+    byId("last-updated").textContent =
+      `更新于 ${formatTime(state.cacheDeployments.generated_at)}`;
+    setConnected(true);
+    if (!silent) notice("");
+  } catch (error) {
+    setConnected(false);
+    if (!silent) notice(error.message, true);
+  } finally {
+    byId("refresh").disabled = false;
+  }
+}
+
+function cacheDeploymentItems() {
+  const items = state.cacheDeployments?.deployments || [];
+  if (!state.cacheDeploymentAnomaliesOnly) return items;
+  return items.filter((item) =>
+    item.drift?.some(({severity}) =>
+      severity === "warning" || severity === "critical"
+    )
+  );
+}
+
+function renderCacheDeployments() {
+  const payload = state.cacheDeployments;
+  if (!payload) return;
+  renderCacheDeploymentSummary(payload.summary || {});
+  renderCacheDeploymentTable(cacheDeploymentItems());
+  renderCacheDeploymentDetail();
+}
+
+function renderCacheDeploymentSummary(summary) {
+  const metrics = [
+    ["纳管设备", summary.total || 0, "AI、Edge、NX3、NX4、AGX", ""],
+    ["已部署", summary.deployed || 0, `${summary.planned || 0} 项仍在规划`, "good"],
+    ["配置差异", summary.drifted || 0, "声明配置与实时状态比较", summary.drifted ? "warn" : "good"],
+    ["缓存架构", summary.strategies || 0, "DRAM、原生磁盘、网关快照", "live"],
+  ];
+  byId("cache-deployment-summary").innerHTML = metrics.map(
+    ([label, value, hint, tone]) => `
+      <div class="metric ${tone}">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+        <small>${escapeHtml(hint)}</small>
+      </div>
+    `,
+  ).join("");
+}
+
+function cacheDeploymentBadge(item) {
+  const tone = item.state?.tone || "neutral";
+  const label = item.state?.label === "Planned"
+    ? "待部署"
+    : cacheDeploymentStateLabels[item.state?.code]
+      || item.state?.label
+      || "未知";
+  return `<span class="badge ${escapeHtml(tone)}"><i></i>${escapeHtml(label)}</span>`;
+}
+
+function cacheDeploymentCapacity(item) {
+  const layers = item.declared?.layers || [];
+  const durable = layers.find(({medium}) =>
+    medium === "dram" || medium === "disk"
+  );
+  return durable
+    ? {
+        value: durable.capacity,
+        detail: durable.backend,
+      }
+    : {value: "GPU KV Cache", detail: "进程内"};
+}
+
+function cacheDeploymentObservedSummary(item) {
+  const observed = item.observed || {};
+  const worker = observed.worker;
+  const lmcache = observed.cache?.lmcache || {};
+  if (item.id === "ai-v100-tp2") {
+    const desired = Boolean(item.desired?.lmcache?.enabled);
+    const service = !desired
+      ? "LMCache 已关闭"
+      : lmcache.healthy
+        ? "LMCache 健康"
+        : "LMCache 状态不可用";
+    const connector = lmcache.connector_active
+      ? `Connector ${lmcache.registered_count || 0}/${lmcache.expected_registrations || 0}`
+      : `Connector 未连接 ${lmcache.registered_count || 0}/${lmcache.expected_registrations || 0}`;
+    return [service, connector];
+  }
+  if (item.id === "edge-qwen38-flash") {
+    const hits = observed.cache?.external?.hit_tokens;
+    return [
+      observed.status?.healthy ? "vLLM 健康" : "vLLM 不可用",
+      hits == null ? "磁盘命中指标不可用" : `外部命中 ${formatTokens(hits)} Token`,
+    ];
+  }
+  if (worker) {
+    return [
+      worker.ready ? "Worker 可调度" : "Worker 不可调度",
+      `Checkpoint ${worker.context_checkpoints ?? "—"} · ${worker.state || "未知"}`,
+    ];
+  }
+  return [
+    observed.status?.healthy ? "端点健康" : "端点不可用",
+    "目标 Worker 未报告",
+  ];
+}
+
+function cacheDeploymentPersistence(item) {
+  const layers = item.declared?.layers || [];
+  const durable = layers.find(({medium}) =>
+    medium === "dram" || medium === "disk"
+  );
+  return durable
+    ? cacheDeploymentPersistenceLabels[durable.persistence]
+      || durable.persistence
+    : "进程内";
+}
+
+function cacheDeploymentDrift(item) {
+  const actionable = (item.drift || []).filter(({severity}) =>
+    severity === "warning" || severity === "critical"
+  );
+  const informational = (item.drift || []).filter(
+    ({severity}) => severity === "info",
+  );
+  if (actionable.length) {
+    return {
+      primary: cacheDeploymentDriftLabels[actionable[0].code]
+        || actionable[0].message,
+      secondary: actionable.length > 1
+        ? `另有 ${actionable.length - 1} 项`
+        : "",
+    };
+  }
+  if (informational.length) {
+    return {
+      primary: cacheDeploymentDriftLabels[informational[0].code]
+        || informational[0].message,
+      secondary: "不影响当前调度",
+    };
+  }
+  return {primary: "无", secondary: "配置与运行一致"};
+}
+
+function cacheDeploymentActionLabel(action) {
+  return {
+    "lmcache-settings": "配置 LMCache",
+    disable: "停用",
+    enable: "启用",
+    "auto-disable": "退出自动",
+    "auto-enable": "加入自动",
+  }[action.id] || action.label;
+}
+
+function cacheDeploymentActions(item) {
+  const actions = item.management?.actions || [];
+  if (!actions.length) {
+    return '<span class="table-secondary">只读纳管</span>';
+  }
+  return `
+    <div class="row-actions">
+      ${actions.map((action) => `
+        <button
+          type="button"
+          class="secondary compact ${action.id === "disable" ? "danger-action" : ""}"
+          data-cache-deployment-action="${escapeHtml(item.id)}"
+          data-cache-action-id="${escapeHtml(action.id)}"
+        >${escapeHtml(cacheDeploymentActionLabel(action))}</button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderCacheDeploymentTable(items) {
+  byId("cache-deployment-count").textContent =
+    `${items.length} / ${state.cacheDeployments?.summary?.total || 0} 台设备`;
+  byId("cache-deployment-table").innerHTML = items.length
+    ? items.map((item) => {
+        const endpoint = item.observed?.endpoint || {};
+        const capacity = cacheDeploymentCapacity(item);
+        const observed = cacheDeploymentObservedSummary(item);
+        const drift = cacheDeploymentDrift(item);
+        const selected = item.id === state.selectedCacheDeploymentId;
+        return `
+          <tr
+            class="cache-deployment-row ${selected ? "selected" : ""}"
+            data-cache-deployment-id="${escapeHtml(item.id)}"
+          >
+            <td>${cacheDeploymentBadge(item)}</td>
+            <td>
+              <strong class="table-primary">${escapeHtml(item.title)}</strong>
+              <span class="table-secondary">${escapeHtml(item.target?.worker_id || item.target?.endpoint_id || "—")}</span>
+            </td>
+            <td>
+              <strong class="table-primary cache-deployment-flow-label">${escapeHtml(item.declared?.flow_label || "—")}</strong>
+              <span class="table-secondary">${escapeHtml(endpoint.model || item.node)}</span>
+            </td>
+            <td>
+              <strong class="table-primary">${escapeHtml(capacity.value)}</strong>
+              <span class="table-secondary">${escapeHtml(capacity.detail)}</span>
+            </td>
+            <td>
+              <strong class="table-primary">${escapeHtml(observed[0])}</strong>
+              <span class="table-secondary">${escapeHtml(observed[1])}</span>
+            </td>
+            <td>${escapeHtml(cacheDeploymentPersistence(item))}</td>
+            <td>
+              <strong class="table-primary">${escapeHtml(drift.primary)}</strong>
+              <span class="table-secondary">${escapeHtml(drift.secondary)}</span>
+            </td>
+            <td>${cacheDeploymentActions(item)}</td>
+          </tr>
+        `;
+      }).join("")
+    : emptyRow(8, "当前筛选下没有异常设备。");
+  bindCacheDeploymentRows();
+}
+
+function bindCacheDeploymentRows() {
+  document.querySelectorAll("[data-cache-deployment-id]").forEach((row) => {
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("button")) return;
+      state.selectedCacheDeploymentId = row.dataset.cacheDeploymentId;
+      state.selectedCacheLayerId = null;
+      renderCacheDeployments();
+    });
+  });
+  document.querySelectorAll("[data-cache-deployment-action]").forEach((button) => {
+    button.addEventListener("click", () => {
+      void runCacheDeploymentAction(
+        button.dataset.cacheDeploymentAction,
+        button.dataset.cacheActionId,
+      );
+    });
+  });
+}
+
+async function runCacheDeploymentAction(deploymentId, actionId) {
+  const item = (state.cacheDeployments?.deployments || []).find(
+    ({id}) => id === deploymentId,
+  );
+  if (!item) return;
+  state.selectedCacheDeploymentId = deploymentId;
+  if (actionId === "lmcache-settings") {
+    switchView("settings");
+    byId("lmcache-enabled")?.scrollIntoView({
+      behavior: "smooth",
+      block: "center",
+    });
+    notice("LMCache 修改通过策略草稿、验证和激活流程保存；运行服务仍需受控重启。");
+    return;
+  }
+  const endpointId = item.management?.endpoint_id;
+  if (!endpointId) return;
+  await runEndpointAction(
+    endpointId,
+    actionId.startsWith("auto-") ? "auto" : "enabled",
+  );
+  await loadCacheDeployments(true);
+}
+
+function selectedCacheDeployment() {
+  return (state.cacheDeployments?.deployments || []).find(
+    ({id}) => id === state.selectedCacheDeploymentId,
+  );
+}
+
+function renderCacheDeploymentDetail() {
+  const item = selectedCacheDeployment();
+  const detail = byId("cache-deployment-detail");
+  if (!item) {
+    detail.hidden = true;
+    return;
+  }
+  detail.hidden = false;
+  const endpoint = item.observed?.endpoint || {};
+  byId("cache-deployment-detail-title").textContent =
+    `${item.title} · ${item.target?.worker_id || item.target?.endpoint_id}`;
+  byId("cache-deployment-detail-subtitle").textContent = [
+    endpoint.backend_type || item.declared?.strategy,
+    endpoint.safe_context_tokens
+      ? `安全上下文 ${formatTokens(endpoint.safe_context_tokens)}`
+      : null,
+    endpoint.max_concurrency
+      ? `并发 ${endpoint.max_concurrency}`
+      : null,
+  ].filter(Boolean).join(" · ");
+  byId("cache-deployment-detail-state").innerHTML =
+    cacheDeploymentBadge(item);
+  renderCacheDeploymentPipeline(item);
+  renderCacheDeploymentInspector(item);
+}
+
+function renderCacheDeploymentPipeline(item) {
+  const layers = item.declared?.layers || [];
+  if (!state.selectedCacheLayerId) {
+    state.selectedCacheLayerId = layers[0]?.id || null;
+  }
+  byId("cache-deployment-pipeline").innerHTML = layers.map(
+    (layer, index) => `
+      ${index ? '<span class="cache-deployment-arrow" aria-hidden="true">→</span>' : ""}
+      <button
+        type="button"
+        class="cache-deployment-layer ${layer.id === state.selectedCacheLayerId ? "selected" : ""}"
+        data-cache-layer-id="${escapeHtml(layer.id)}"
+      >
+        <small>${escapeHtml(layer.medium)}</small>
+        <strong>${escapeHtml(layer.label)}</strong>
+        <span>${escapeHtml(layer.capacity)}</span>
+      </button>
+    `,
+  ).join("");
+  byId("cache-deployment-pipeline")
+    .querySelectorAll("[data-cache-layer-id]")
+    .forEach((button) => {
+      button.addEventListener("click", () => {
+        state.selectedCacheLayerId = button.dataset.cacheLayerId;
+        renderCacheDeploymentPipeline(item);
+      });
+    });
+  const layer = layers.find(({id}) =>
+    id === state.selectedCacheLayerId
+  ) || layers[0];
+  byId("cache-deployment-layer-detail").innerHTML = layer
+    ? `
+      <strong>${escapeHtml(layer.label)} · ${escapeHtml(cacheDeploymentPersistenceLabels[layer.persistence] || layer.persistence)}</strong>
+      <p>${escapeHtml(layer.description)}</p>
+    `
+    : "";
+}
+
+function renderCacheDeploymentInspector(item) {
+  document.querySelectorAll("[data-cache-deployment-tab]").forEach((button) => {
+    button.classList.toggle(
+      "active",
+      button.dataset.cacheDeploymentTab
+        === state.selectedCacheDeploymentTab,
+    );
+  });
+  const target = byId("cache-deployment-tab-content");
+  const tab = state.selectedCacheDeploymentTab;
+  if (tab === "declared") {
+    target.innerHTML = cacheDeploymentFacts([
+      ["策略", cacheDeploymentStrategyLabels[item.declared?.strategy] || item.declared?.strategy],
+      ["生命周期", cacheDeploymentLifecycleLabels[item.declared?.lifecycle] || item.declared?.lifecycle],
+      ["缓存流程", item.declared?.flow_label],
+      ["遥测", `${cacheDeploymentTelemetryLabels[item.declared?.telemetry?.mode] || item.declared?.telemetry?.mode || "—"} · ${cacheDeploymentTelemetryLabels[item.declared?.telemetry?.status] || item.declared?.telemetry?.status || "—"}`],
+    ]);
+  } else if (tab === "observed") {
+    const endpoint = item.observed?.endpoint || {};
+    const worker = item.observed?.worker;
+    const lmcache = item.observed?.cache?.lmcache || {};
+    target.innerHTML = cacheDeploymentFacts([
+      ["目标状态", item.observed?.target_found ? "已发现" : "未发现"],
+      ["运行健康", item.observed?.runtime_healthy ? "健康" : "异常"],
+      ["端点", endpoint.id || "—"],
+      ["模型", endpoint.model || "—"],
+      ["Worker", worker ? `${worker.worker_id} · ${worker.state}` : "不适用"],
+      ["LMCache", Object.keys(lmcache).length
+        ? `${lmcache.healthy ? "服务健康" : "服务异常"} · ${lmcache.connector_active ? "Connector 已连接" : "Connector 未连接"}`
+        : "不适用"],
+    ]);
+  } else if (tab === "validated") {
+    target.innerHTML = cacheDeploymentFacts([
+      ["状态", cacheDeploymentValidationLabels[item.validated?.status] || item.validated?.status],
+      ["验证日期", item.validated?.validated_at || "未验证"],
+      ["证据摘要", item.validated?.summary],
+    ]);
+  } else if (tab === "services") {
+    const services = (item.declared?.services || []).map(
+      (service) => [
+        service.manager,
+        `${service.unit}${service.state ? ` · ${service.state}` : ""}`,
+      ],
+    );
+    const paths = Object.entries(item.declared?.paths || {}).map(
+      ([key, value]) => [`路径 · ${key}`, value],
+    );
+    target.innerHTML = cacheDeploymentFacts([...services, ...paths]);
+  } else {
+    const limitations = (item.declared?.limitations || []).map(
+      (value, index) => [`限制 ${index + 1}`, value],
+    );
+    const drift = (item.drift || []).map(
+      (value) => [
+        `${value.severity} · ${value.code}`,
+        cacheDeploymentDriftLabels[value.code] || value.message,
+      ],
+    );
+    target.innerHTML = cacheDeploymentFacts([
+      ...limitations,
+      ...drift,
+      ["网页能力", "不提供远程重启、缓存清除或远程构建"],
+    ]);
+  }
+}
+
+function cacheDeploymentFacts(items) {
+  return `
+    <dl class="cache-deployment-facts">
+      ${items.map(([label, value]) => `
+        <div>
+          <dt>${escapeHtml(label || "—")}</dt>
+          <dd>${escapeHtml(value ?? "—")}</dd>
+        </div>
+      `).join("")}
+    </dl>
   `;
 }
 
@@ -3974,6 +4460,7 @@ function switchView(view) {
   if (view === "requests") void loadRequestTraces();
   if (view === "audit") return cacheView.view === "overview" ? loadCacheOverview() : loadRouteAudit();
   if (view === "clients") loadClients(true);
+  if (view === "cache-deployments") void loadCacheDeployments();
 }
 
 function startPolling() {
@@ -3983,6 +4470,9 @@ function startPolling() {
     if (!document.hidden && state.key) {
       loadDashboard(true);
       if (state.view === "clients") loadClients(true);
+      if (state.view === "cache-deployments") {
+        void loadCacheDeployments(true);
+      }
       if (state.view === "requests") loadRequestTraces(true);
       if (state.view === "audit") {
         if (cacheView.view === "overview") void loadCacheOverview();
@@ -4208,6 +4698,8 @@ byId("refresh").addEventListener("click", () => {
     void loadRequestTraces();
   } else if (state.view === "audit") {
     void loadRouteAudit();
+  } else if (state.view === "cache-deployments") {
+    void loadCacheDeployments();
   } else {
     void loadDashboard();
   }
@@ -4245,6 +4737,25 @@ byId("routing-strategy").addEventListener(
   "change",
   updateStrategyBranchVisibility,
 );
+byId("cache-deployment-anomalies").addEventListener("change", (event) => {
+  state.cacheDeploymentAnomaliesOnly = event.target.checked;
+  const visible = cacheDeploymentItems();
+  if (
+    !visible.some(({id}) => id === state.selectedCacheDeploymentId)
+  ) {
+    state.selectedCacheDeploymentId = visible[0]?.id || null;
+    state.selectedCacheLayerId = null;
+  }
+  renderCacheDeployments();
+});
+document.querySelectorAll("[data-cache-deployment-tab]").forEach((button) => {
+  button.addEventListener("click", () => {
+    state.selectedCacheDeploymentTab =
+      button.dataset.cacheDeploymentTab;
+    const item = selectedCacheDeployment();
+    if (item) renderCacheDeploymentInspector(item);
+  });
+});
 byId("weights").addEventListener("input", updateWeightsTotal);
 byId("review-backend").addEventListener("change", () => {
   if (byId("review-backend").value === "router") {

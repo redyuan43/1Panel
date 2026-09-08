@@ -35,6 +35,7 @@
       <button class="tab" type="button" data-view="audit">路由审计</button>
       <button class="tab" type="button" data-view="clients">客户端账号</button>
       <a class="tab" href="/media">媒体任务</a>
+      <button class="tab" type="button" data-view="cache-deployments">缓存部署</button>
       <button class="tab" type="button" data-view="settings">策略设置</button>
     </nav>
 
@@ -193,6 +194,183 @@
               </thead>
               <tbody id="worker-table"></tbody>
             </table>
+          </div>
+        </section>
+      </section>
+
+      <section id="cache-deployments-view" class="view">
+        <div
+          id="cache-deployment-summary"
+          class="metric-strip"
+          aria-label="缓存部署概况"
+        ></div>
+
+        <section class="section-block">
+          <div class="section-heading cache-deployment-heading">
+            <div>
+              <h3>设备缓存策略</h3>
+              <span id="cache-deployment-count" class="section-meta"></span>
+            </div>
+            <label class="cache-deployment-filter">
+              <input id="cache-deployment-anomalies" type="checkbox">
+              <span>只看异常</span>
+            </label>
+          </div>
+          <div class="table-wrap">
+            <table class="cache-deployment-table">
+              <thead>
+                <tr>
+                  <th>状态</th>
+                  <th>设备 / 目标</th>
+                  <th>缓存流程</th>
+                  <th>容量</th>
+                  <th>实际运行</th>
+                  <th>持久化范围</th>
+                  <th>配置差异</th>
+                  <th>安全操作</th>
+                </tr>
+              </thead>
+              <tbody id="cache-deployment-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section
+          id="cache-deployment-detail"
+          class="section-block cache-deployment-detail"
+          hidden
+        >
+          <div class="section-heading">
+            <div>
+              <h3 id="cache-deployment-detail-title">设备详情</h3>
+              <span
+                id="cache-deployment-detail-subtitle"
+                class="section-meta"
+              ></span>
+            </div>
+            <span id="cache-deployment-detail-state"></span>
+          </div>
+
+          <div class="cache-deployment-detail-grid">
+            <div class="cache-deployment-flow">
+              <div
+                id="cache-deployment-pipeline"
+                class="cache-deployment-pipeline"
+                aria-label="缓存回退链路"
+              ></div>
+              <div
+                id="cache-deployment-layer-detail"
+                class="cache-deployment-layer-detail"
+                aria-live="polite"
+              ></div>
+            </div>
+
+            <div class="cache-deployment-inspector">
+              <div
+                class="cache-deployment-tabs"
+                role="tablist"
+                aria-label="缓存部署详情"
+              >
+                <button
+                  class="cache-deployment-tab active"
+                  type="button"
+                  data-cache-deployment-tab="declared"
+                >声明配置</button>
+                <button
+                  class="cache-deployment-tab"
+                  type="button"
+                  data-cache-deployment-tab="observed"
+                >实际运行</button>
+                <button
+                  class="cache-deployment-tab"
+                  type="button"
+                  data-cache-deployment-tab="validated"
+                >验证证据</button>
+                <button
+                  class="cache-deployment-tab"
+                  type="button"
+                  data-cache-deployment-tab="services"
+                >服务与文件</button>
+                <button
+                  class="cache-deployment-tab"
+                  type="button"
+                  data-cache-deployment-tab="limitations"
+                >限制与回滚</button>
+              </div>
+              <div
+                id="cache-deployment-tab-content"
+                class="cache-deployment-tab-content"
+                aria-live="polite"
+              ></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
+            <h3>页面判断逻辑</h3>
+            <span class="section-meta">声明、运行和验证分别取证</span>
+          </div>
+          <div class="cache-deployment-logic-wrap">
+            <svg
+              class="cache-deployment-logic"
+              viewBox="0 0 960 210"
+              role="img"
+              aria-labelledby="cache-deployment-logic-title cache-deployment-logic-desc"
+            >
+              <title id="cache-deployment-logic-title">缓存部署状态判断流程</title>
+              <desc id="cache-deployment-logic-desc">
+                配置目录提供期望状态，Router 和设备提供实际状态，控制台比较后显示正常、配置差异或遥测缺失。
+              </desc>
+              <defs>
+                <marker
+                  id="cache-deployment-arrow"
+                  markerHeight="8"
+                  markerWidth="8"
+                  orient="auto"
+                  refX="7"
+                  refY="4"
+                >
+                  <path d="M0,0 L8,4 L0,8 Z"></path>
+                </marker>
+              </defs>
+              <rect x="20" y="36" width="220" height="104" rx="6"></rect>
+              <text class="logic-title" x="42" y="72">配置目录</text>
+              <text x="42" y="100">描述理论上应该怎样运行</text>
+              <text x="42" y="122">不保存密码或设备密钥</text>
+
+              <path
+                class="logic-link"
+                d="M240 88 H310"
+                marker-end="url(#cache-deployment-arrow)"
+              ></path>
+
+              <rect x="320" y="36" width="240" height="104" rx="6"></rect>
+              <text class="logic-title" x="342" y="72">Router 与设备状态</text>
+              <text x="342" y="100">提供健康、容量和命中证据</text>
+              <text x="342" y="122">无法检测时明确报告缺失</text>
+
+              <path
+                class="logic-link"
+                d="M560 88 H630"
+                marker-end="url(#cache-deployment-arrow)"
+              ></path>
+
+              <rect
+                class="logic-result"
+                x="640"
+                y="36"
+                width="300"
+                height="104"
+                rx="6"
+              ></rect>
+              <text class="logic-title" x="662" y="72">比较并显示结果</text>
+              <text x="662" y="100">一致：正常　不一致：配置差异</text>
+              <text x="662" y="122">没有遥测：明确显示未安装</text>
+              <text x="20" y="184">
+                页面只执行已经接通的安全操作；远程重启、清缓存和构建不会显示为可用按钮。
+              </text>
+            </svg>
           </div>
         </section>
       </section>
