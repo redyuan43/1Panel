@@ -81,6 +81,8 @@ const reasonLabels = {
   affinity_spillover: "亲和迁移",
   cloud_capacity_fallback: "云端容量兜底",
   local_sufficient: "本地完整满足",
+  local_pool_spread: "本地会话分散",
+  local_pool_faster_first_output: "预计更快首个输出",
   remote_profile_fallback: "云端画像回退",
   configured_remote_order: "固定云端顺序",
   history_migration_required: "历史迁移受阻",
@@ -3647,6 +3649,8 @@ function renderSettings() {
     "routing.new_request_capacity_wait_seconds",
     0,
   );
+  byId("local-pool-enabled").checked = Boolean(value("routing.local_pool.enabled", false));
+  byId("local-pool-recent").value = value("routing.local_pool.recent_seconds", 600) / 60;
   byId("stability-enabled").checked = Boolean(
     value("routing.conversation_stability.enabled", false),
   );
@@ -4344,6 +4348,11 @@ function collectSettings() {
     routing: {
       ...state.settings.routing,
       prompt_directives: promptDirectives,
+      local_pool: {
+        ...(state.settings.routing.local_pool || {}),
+        enabled: byId("local-pool-enabled").checked,
+        recent_seconds: Number(byId("local-pool-recent").value) * 60,
+      },
       conversation_stability: {
         ...state.settings.routing.conversation_stability,
         enabled: byId("stability-enabled").checked,

@@ -777,6 +777,21 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError(
             "routing.provider_priority must be local_first, balanced, or cloud_first"
         )
+    pool = routing.get("local_pool", {})
+    if not isinstance(pool, dict) or not isinstance(pool.get("enabled", False), bool):
+        raise ValueError("routing.local_pool must be an object with boolean enabled")
+    if pool:
+        from .local_pool import MEMBERS, finite
+        members = pool.get("members", list(MEMBERS))
+        if not isinstance(members, list) or not all(isinstance(item, str) for item in members) or len(members) != len(set(members)) or set(members) != set(MEMBERS):
+            raise ValueError("routing.local_pool.members must name the three local peers exactly once")
+        for field, default, low, high in (("recent_seconds", 600, 60, 3600), ("min_samples", 5, 5, 256),
+                                        ("recheck_seconds", 5, 1, 10), ("min_saving_seconds", 5, 1, 120),
+                                        ("min_saving_ratio", .2, .05, 1)):
+            field_value = pool.get(field, default)
+            if (not finite(field_value) or not low <= field_value <= high
+                    or (field in {"recent_seconds", "min_samples"} and not isinstance(field_value, int))):
+                raise ValueError("invalid routing.local_pool." + field)
     affinity_wait = float(
         routing.get("affinity_capacity_wait_seconds", 0)
     )

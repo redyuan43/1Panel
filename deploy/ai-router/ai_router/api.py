@@ -2211,8 +2211,12 @@ async def _acquire_route_capacity(
     history_incompatible_seen = False
     carried_capsule = None
     routing = current.settings.section("routing")
+    pool_wait_deadlines = {}
+    pool = getattr(getattr(current, "policy", None), "local_pool", None)
 
     while True:
+        if pool:
+            await pool.release(request_id, trace)
         try:
             decision = await current.policy.choose(
                 requested_model=requested_model,
@@ -2358,6 +2362,13 @@ async def _acquire_route_capacity(
             requested_model=requested_model,
             decision=decision,
         )
+        pool = getattr(getattr(current, "policy", None), "local_pool", None)
+        adaptive_wait = bool(pool and pool.member(decision.endpoint) and requested_model == "auto"
+                             and not evaluation.required_endpoint_id and decision.affinity != "admin-pin"
+                             and conversation is not None and wait_seconds > 0)
+        if adaptive_wait:
+            deadline = pool_wait_deadlines.setdefault("request", time.monotonic() + wait_seconds)
+            wait_seconds = min(float(pool.config.get("recheck_seconds", 5)), max(0, deadline - time.monotonic()))
         wait_started = time.monotonic()
         try:
             if wait_seconds <= 0:
@@ -2391,6 +2402,12 @@ async def _acquire_route_capacity(
                         )
                     )
                 except QueueTimeoutError as exc:
+                    if adaptive_wait and time.monotonic() < pool_wait_deadlines["request"]:
+                        queue_wait_ms += (time.monotonic() - wait_started) * 1000
+                        if trace:
+                            trace.payload.setdefault("local_pool", {})["waited_ms"] = round(queue_wait_ms, 2)
+                            await _save_request_trace(current, trace)
+                        continue
                     raise CapacityBusyError() from exc
             backend_wait_seconds = max(
                 0.0,
@@ -2404,7 +2421,17 @@ async def _acquire_route_capacity(
             ):
                 raise CapacityBusyError()
         except CapacityBusyError:
+            if pool and pool.member(decision.endpoint):
+                await pool.release(request_id, trace)
             queue_wait_ms += (time.monotonic() - wait_started) * 1000
+            if adaptive_wait and time.monotonic() < pool_wait_deadlines["request"]:
+                await lease.release_deployment()
+                if pool:
+                    await pool.release(request_id, trace)
+                continue
+            if adaptive_wait and trace:
+                trace.payload.setdefault("local_pool", {}).update(
+                    selection="capacity_timeout_cold_fallback", wait_budget_seconds=float(routing.get("affinity_capacity_wait_seconds", 120)))
             capacity_busy_seen = True
             affinity_spilled = affinity_spilled or decision.affinity in {
                 "hit",
@@ -2456,6 +2483,8 @@ async def _acquire_route_capacity(
                 )
                 await _save_request_trace(current, trace)
             await lease.release_deployment()
+            if pool:
+                await pool.release(request_id, trace)
             if decision.affinity == "admin-pin":
                 raise
             if requested_model != "auto":
@@ -2481,6 +2510,10 @@ async def _acquire_route_capacity(
                 selected_deployment
             ]
         _apply_selected_deployment(decision, selected_deployment)
+        if pool and pool.member(decision.endpoint) and trace:
+            status = await current.health.status(decision.endpoint)
+            trace.payload.setdefault("local_pool", {})["generation"] = status.cache_generation
+            await pool.start(decision, trace, conversation)
 
         budget_reservation = None
         if trace:
@@ -2543,6 +2576,8 @@ async def _acquire_route_capacity(
                 )
                 await _save_request_trace(current, trace)
             await lease.release_deployment()
+            if pool:
+                await pool.release(request_id, trace)
             if requested_model != "auto":
                 raise
             history_incompatible_seen = True
@@ -2559,6 +2594,8 @@ async def _acquire_route_capacity(
                 )
                 await _save_request_trace(current, trace)
             await lease.release_deployment()
+            if pool:
+                await pool.release(request_id, trace)
             raise
         if (
             capsule is not None
@@ -2582,6 +2619,8 @@ async def _acquire_route_capacity(
             prefix_affinity = None
             prefix_affinity_key = None
             await lease.release_deployment()
+            if pool:
+                await pool.release(request_id, trace)
             continue
         capsule = capsule or carried_capsule
         if trace:
@@ -2637,6 +2676,8 @@ async def _acquire_route_capacity(
                 await _save_request_trace(current, trace)
             await current.budget.release(budget_reservation)
             await lease.release_deployment()
+            if pool:
+                await pool.release(request_id, trace)
             if decision.endpoint.cloud and capacity_busy_seen:
                 raise AllLocalCapacityBusyError()
             raise
@@ -2707,7 +2748,7 @@ def _capacity_wait_seconds(
     pin = decision.endpoint.metadata.get("client_deployment_pin")
     if pin is not None:
         return float(pin["capacity_wait_seconds"])
-    if requested_model != "auto" or decision.affinity in {
+    if requested_model != "auto" or decision.reason == "local_pool_faster_first_output" or decision.affinity in {
         "hit",
         "logical-hit",
         "prefix-hit",
@@ -2731,14 +2772,18 @@ async def _wait_for_selected_deployment(
     *,
     timeout_seconds: float,
 ) -> bool:
-    if decision.endpoint.backend_type != "ai_pool":
+    pool = getattr(getattr(current, "policy", None), "local_pool", None)
+    direct_pool = bool(pool and pool.member(decision.endpoint))
+    if decision.endpoint.backend_type != "ai_pool" and not direct_pool:
         return True
     deadline = time.monotonic() + timeout_seconds
     while True:
-        status = await current.health.status(
-            decision.endpoint,
-            force_refresh=True,
-        )
+        probe = current.health.status(decision.endpoint, force_refresh=True)
+        try:
+            status = (await asyncio.wait_for(probe, max(0, deadline - time.monotonic()))
+                      if timeout_seconds > 0 else await probe)
+        except asyncio.TimeoutError:
+            return False
         worker = next(
             (
                 item
@@ -2747,7 +2792,10 @@ async def _wait_for_selected_deployment(
             ),
             None,
         )
-        if worker and worker.get("state") == "available":
+        if direct_pool:
+            if status.healthy and status.load_headroom > 0:
+                return True
+        elif worker and worker.get("state") == "available":
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -4465,6 +4513,14 @@ async def _save_request_trace(
 ) -> None:
     if trace is None:
         return
+    if trace.terminal:
+        pool = getattr(getattr(current, "policy", None), "local_pool", None)
+        if pool:
+            try:
+                await asyncio.shield(pool.finish(trace))
+            except Exception as exc:
+                current.audit.write("local_pool_observation_failed", request_id=trace.request_id,
+                                    error=type(exc).__name__)
     try:
         await asyncio.shield(current.route_traces.save(trace))
     except Exception as exc:

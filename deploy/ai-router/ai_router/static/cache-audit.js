@@ -98,6 +98,7 @@ function renderUnifiedAudit() {
   }).join("");
   byId("audit-pipeline").querySelectorAll("[data-pipeline-stage]").forEach(b=>b.addEventListener("click",()=>selectPipelineStage(b.dataset.pipelineStage)));
   byId("audit-routing-detail").hidden=cacheView.stage!=="routing";
+  byId("local-pool-audit").innerHTML=localPoolHtml(trace.local_pool);
   byId("audit-stage-detail").hidden=!cacheView.stage||cacheView.stage==="routing";
   byId("cache-content").hidden=cacheView.stage!=="content";
   if(cacheView.stage&&cacheView.stage!=="routing")renderPipelineDetail();
@@ -133,7 +134,7 @@ function renderPipelineDetail() {
     target.innerHTML=`<div class="cache-verdict ${measured?"measured":estimated?"estimated":"unknown"}"><strong>${escapeHtml(cacheBrief(m))}</strong><p>${escapeHtml(m.cache_reason||"后端未提供完整逐请求计数")} · ${escapeHtml(source)}</p></div><div class="cache-value-grid">${cacheCell(`总输入 · ${inputSource}`,input,"tokens")}${cacheCell(`缓存复用 · ${measured?"实测":estimated?"估算":"未知"}`,cached,"tokens")}${cacheCell(`后端复用比例 · ${measured?"实测":estimated?"估算":"未知"}`,ratio,"ratio")}${cacheCell("未复用输入 · 总输入减复用",m.uncached_input_tokens,"tokens")}${cacheCell("Router 首个输出 · 实测",m.ttft_ms)}${cacheCell("Router 首段正文 · 实测",m.first_text_ms)}${cacheCell("Router 排队 · 实测",m.queue_ms)}${cacheCell("总耗时 · 实测",m.total_ms)}</div><p class="section-meta">未复用输入仅表示本次输入中尚需计算的 token，不包含准备、重试或抢占带来的全部重算。后端复用汇总本地及外部缓存，不区分 GPU 与 LMCache。首个输出等待包括入口处理和排队，不能作为 prefill 耗时；非流式请求没有首个输出计时。</p>${m.prime_tokens>0?`<p class="section-meta">本次准备阶段还重算了 ${escapeHtml(cacheFormat(m.prime_tokens,"tokens"))}，扣除后的净复用为 ${escapeHtml(cacheFormat(m.net_cache_ratio,"ratio"))}。</p>`:""}${prefixBreakHtml(audit)}${cacheDisclosure("native","固定前缀、准备与 Prefill 详情",native,m.measurement==="measured")}${operations}`;
     target.querySelectorAll("details[data-cache-detail]").forEach(el=>el.addEventListener("toggle",()=>cacheView.disclosures.set(el.dataset.cacheDetail,el.open)));
 
-  } else if(stage==="queue")target.innerHTML=`<div class="cache-value-grid">${cacheCell("Router 排队",m.queue_ms)}${cacheCell("网关排队",m.gateway_queue_ms)}</div>`;
+  } else if(stage==="queue")target.innerHTML=`<div class="cache-value-grid">${cacheCell("Router 排队",m.queue_ms)}${cacheCell("网关排队",m.gateway_queue_ms)}</div>${localPoolHtml(trace.local_pool)}`;
   else if(stage==="completed")target.innerHTML=`<div class="cache-value-grid">${cacheCell("请求总耗时",m.total_ms)}${cacheCell("输入",m.input_tokens,"tokens")}${cacheCell("输出",m.output_tokens,"tokens")}</div><p>${escapeHtml(trace.error?.message||statusLabels[trace.status]||trace.status)}</p>`;
   else if(stage==="received")target.innerHTML=`<p>请求 ${escapeHtml(trace.request_id)}</p><p>客户端 ${escapeHtml(trace.client_id)} · ${escapeHtml(trace.protocol)} · ${formatTime(trace.started_at)}</p>`;
   else if(stage==="content") {
@@ -209,4 +210,12 @@ function initializeCacheAudit() {
   byId("cache-prev").addEventListener("click",()=>{cacheView.offset=Math.max(0,cacheView.offset-50);void loadCacheOverview({force:true});});
   byId("cache-next").addEventListener("click",()=>{if(cacheView.next!=null){cacheView.offset=cacheView.next;void loadCacheOverview({force:true});}});
   byId("cache-filter-form").addEventListener("submit",e=>{e.preventDefault();cacheView.offset=0;void loadCacheOverview({force:true});});
+}
+
+function localPoolHtml(pool) {
+  if (!pool) return "";
+  const labels={spread_new_conversations:"分散分配新会话",estimated_faster_first_output:"预计更快的首个输出",insufficient_cost_evidence_keep_affinity:"估算证据不足，保留原设备",original_device_available_keep_affinity:"原设备可用，保持会话亲和",migration_not_materially_faster:"异机收益不足，保持会话亲和",insufficient_matching_samples:"匹配样本不足",unknown_remaining_service_time:"剩余执行时间未知",capacity_timeout_cold_fallback:"等待达到上限，按容量回退；异机缓存未保证"};
+  const candidates=(pool.candidates||[]).map(c=>`<tr><td>${escapeHtml(c.endpoint_id)}</td><td>${c.available?"有容量":"占用中"}</td><td>${Number(c.running)} / ${Number(c.capacity)}</td><td>${Number(c.recent_conversations)} / ${Number(c.capacity)}</td></tr>`).join("");
+  const costs=(pool.costs||[]).map(c=>`<tr><td>${escapeHtml(c.endpoint_id)}</td><td>${c.cache_assumption==="hot"?"近期同会话高复用（估算假设）":"冷计算（保守估算）"}</td><td>${Number(c.sample_count)}</td><td>${c.queue_s==null?"未知":escapeHtml(cacheFormat(c.queue_s*1000))}</td><td>${c.total_s==null?escapeHtml(labels[c.unavailable_reason]||"未知"):escapeHtml(cacheFormat(c.total_s*1000))}</td></tr>`).join("");
+  return `<section class="cache-prefix-break"><strong>本地候选组 · AMD / AI / Edge</strong><p>${escapeHtml(labels[pool.selection]||labels[pool.wait_reason]||"按实际容量选择设备")}${pool.target?` → ${escapeHtml(pool.target)}`:""}</p>${pool.estimated_saving_s!=null?`<p>预计减少等待 ${escapeHtml(cacheFormat(pool.estimated_saving_s*1000))}（历史估算）</p>`:""}${candidates?`<div class="table-wrap"><table><thead><tr><th>候选设备</th><th>实际容量</th><th>在途 / 并发</th><th>近期会话 / 并发</th></tr></thead><tbody>${candidates}</tbody></table></div>`:""}${costs?`<div class="table-wrap"><table><thead><tr><th>设备</th><th>计算成本假设</th><th>有效样本</th><th>预计排队</th><th>预计首个输出总等待</th></tr></thead><tbody>${costs}</tbody></table></div>`:""}<p class="section-meta">容量不满足的端点及原始模型评分见下方完整路由判断。预计总等待包含排队与输入准备；路由亲和和估算均不能证明实际缓存命中。</p></section>`;
 }

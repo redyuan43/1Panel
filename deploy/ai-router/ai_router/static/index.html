@@ -658,6 +658,7 @@
 
                 </details>
                 <div id="audit-routing-detail" hidden>
+                <div id="local-pool-audit"></div>
                   <div class="trace-graph-controls" aria-label="流程图控制">
                     <div class="trace-graph-mode" role="group" aria-label="流程图详细程度">
                       <button id="trace-graph-mode-simple" type="button" class="active">简明</button>
@@ -986,6 +987,17 @@
               </div>
             </section>
 
+            <div class="policy-flow-connector"></div>
+
+            <section id="local-pool-policy" class="settings-band policy-stage-card">
+              <div class="settings-title"><h3>本地设备平衡调度</h3><span>AMD / AI / Edge</span></div>
+              <div class="control-grid">
+                <label class="toggle-row"><span>自动选型时平衡分配新会话</span><input id="local-pool-enabled" type="checkbox"></label>
+                <label>近期会话占用窗口（分钟）<input id="local-pool-recent" type="number" min="1" max="60" step="1"></label>
+                <p class="wide field-hint">新会话按空闲程度、近期会话数与并发容量分散；已确认的续请求优先原设备。保留各设备真实上下文与能力，明确指定设备或模型仍优先。</p>
+                <p class="wide field-hint">原设备繁忙时，至少 5 个同版本、相近输入规模及缓存状态的实测样本才估算首字等待。默认异机至少快 5 秒且快 20% 才迁移；证据不足每 5 秒复评，沿用会话等待上限。跨设备可能需要重新计算输入。</p>
+              </div>
+            </section>
             <div class="policy-flow-connector"></div>
 
             <section id="conversation-stability" class="settings-band policy-stage-card">

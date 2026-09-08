@@ -17,6 +17,7 @@ from .errors import (
     RouterError,
 )
 from .health import HealthMonitor
+from .local_pool import LocalPool
 from .prefix_affinity import (
     PrefixAffinityLocation,
     PrefixAffinityRecord,
@@ -238,6 +239,7 @@ class RoutingPolicy:
         self.settings = settings
         self.health = health
         self.store = store
+        self.local_pool = LocalPool(store, settings)
 
     async def choose(
         self,
@@ -728,6 +730,13 @@ class RoutingPolicy:
                 (item for item in candidates if item.id == conversation.endpoint_id),
                 None,
             )
+            if pinned and requested_model == "auto" and not directed and self.local_pool.member(pinned):
+                target = await self.local_pool.alternative(
+                    pinned, candidates, statuses, trace=trace, conversation=conversation,
+                    prompt_tokens=prompt_tokens, output_tokens=output_reserve_tokens)
+                if target is not None:
+                    candidates = [target]
+                    pinned = None
             if pinned:
                 cache_reset = bool(
                     conversation.cache_generation
@@ -1135,6 +1144,20 @@ class RoutingPolicy:
                 },
             )
         score, endpoint = max(scored, key=lambda item: (item[0], item[1].node == "ai", item[1].id))
+        pool_candidates = [e for e in candidates if self.local_pool.member(e)]
+        if requested_model == "auto" and not directed and pool_candidates:
+            chosen = await self.local_pool.select(
+                pool_candidates, statuses, trace=trace, conversation=conversation,
+                prompt_tokens=prompt_tokens, output_tokens=output_reserve_tokens)
+            if chosen is not None:
+                endpoint = chosen
+                score = next(value for value, e in scored if e.id == chosen.id)
+                selection_reason = "local_pool_spread"
+                if trace.payload["local_pool"].get("target") == chosen.id:
+                    selection_reason = "local_pool_faster_first_output"
+                if trace:
+                    trace.record(trace_attempt, "score_candidates", "selected", branch="local_pool",
+                                 reason=selection_reason, evidence=trace.payload["local_pool"])
         migration = bool(conversation and endpoint.id != conversation.endpoint_id)
         decision = RouteDecision(
             endpoint=endpoint,
@@ -1582,6 +1605,7 @@ class RoutingPolicy:
             and endpoint.tier_rank < conversation.tier_rank
             and not self._cloud_to_local_migration(conversation, endpoint)
             and not allow_tier_downgrade
+            and not self.local_pool.peers(endpoint, self.registry.by_id(conversation.endpoint_id))
             and not (
                 endpoint.id == conversation.recovery_endpoint_id
                 and self._conversation_stability().get("recovery_mode")
@@ -1699,6 +1723,7 @@ class RoutingPolicy:
             endpoint
             for endpoint in candidates
             if endpoint.tier_rank >= conversation.tier_rank
+            or self.local_pool.peers(endpoint, self.registry.by_id(conversation.endpoint_id))
         ]
         if not eligible:
             raise NoCompatibleModelError(
