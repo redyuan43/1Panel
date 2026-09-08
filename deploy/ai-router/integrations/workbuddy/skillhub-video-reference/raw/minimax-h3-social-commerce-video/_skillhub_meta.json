@@ -1,0 +1,10 @@
+{
+  "name": "MiniMax H3 带货视频",
+  "installedAt": 1788845551241,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087495272570183680",
+  "description_zh": "基于 MiniMax H3 带货视频 的 AI 视频生成器，使用 MiniMax H3 制作带货视频。当用户需要 MiniMax H3、MiniMaxH3、海螺 H3、Hailuo H3、海螺视频、带货视频、直播带货、短视频带货、商品种草、转化视频、卖货视频、AI视频、视频生成 时使用此 Skill。",
+  "description_en": "AI video generation skill for commercial video scenarios. Uses AI Hive open API for direct video generation. Use when users need MiniMax H3 Social Commerce Video videos.",
+  "iconSource": "letter:auto"
+}

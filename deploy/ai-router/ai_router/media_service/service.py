@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import fcntl
 import json
 import os
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
+from PIL import Image, ImageOps
 try:
     from asyncio import timeout
 except ImportError:
@@ -20,10 +22,20 @@ except ImportError:
 
 from .contracts import (
     BACKGROUNDS, ID_PATTERN, RATIOS, TERMINAL, USE_CASES, MediaError, QuotaExceeded,
-    UnknownOutcome, image_info, image_request, video_request,
+    UnknownOutcome, decode_asset, image_info, image_request, video_request,
 )
 from .providers import CodexProvider, H3Provider, QwenProvider
 from .storage import MediaStore
+from .video_review import VideoReviewer, technical_review
+from .video_workflows import (
+    build_prompt_package,
+    managed_stages,
+    options as video_workflow_options,
+    refresh_prompt_hash,
+    segmentation_blockers,
+    segmentation_enabled,
+    workflow_mode,
+)
 
 
 NON_BILLABLE_QWEN_ERRORS = {
@@ -31,6 +43,27 @@ NON_BILLABLE_QWEN_ERRORS = {
     "qwen_not_configured",
     "qwen_request_failed",
 }
+
+
+class _LocalStream:
+    def __init__(self, path: Path):
+        self.path = path
+        self.handle = None
+
+    async def __aenter__(self):
+        self.handle = self.path.open("rb")
+        return self
+
+    async def __aexit__(self, *_):
+        if self.handle:
+            self.handle.close()
+
+    def raise_for_status(self):
+        return None
+
+    async def aiter_bytes(self):
+        while chunk := self.handle.read(1024 * 1024):
+            yield chunk
 
 
 class MediaService:
@@ -43,8 +76,10 @@ class MediaService:
         self.runner = None
         self.image_task = None
         self.image_job = None
+        self.video_tasks: dict[str, asyncio.Task] = {}
         self.locks: dict[str, asyncio.Lock] = {}
         self.lock_file = None
+        self.reviewer = VideoReviewer(self.client)
 
     def lock(self, job_id: str):
         return self.locks.setdefault(job_id, asyncio.Lock())
@@ -64,10 +99,11 @@ class MediaService:
         self.runner = asyncio.create_task(self._run())
 
     async def close(self):
-        for task in (self.runner, self.image_task):
+        tasks = [self.runner, self.image_task, *self.video_tasks.values()]
+        for task in tasks:
             if task:
                 task.cancel()
-        await asyncio.gather(*(task for task in (self.runner, self.image_task) if task), return_exceptions=True)
+        await asyncio.gather(*(task for task in tasks if task), return_exceptions=True)
         await self.client.aclose()
         if self.lock_file:
             self.lock_file.close()
@@ -99,6 +135,22 @@ class MediaService:
                 self.image_job = job["id"]
                 self.image_task = asyncio.create_task(self._image(job))
             else:
+                if workflow_mode(job["request"]) != "legacy_pipeline":
+                    task = self.video_tasks.get(job["id"])
+                    if task and task.done():
+                        self.video_tasks.pop(job["id"], None)
+                        task = None
+                    active_stage = next(
+                        (stage for stage in job.get("stages", [])
+                         if stage["status"] in {"queued", "running", "reconciling", "cancelling"}),
+                        None,
+                    )
+                    if active_stage and task is None:
+                        self.video_tasks[job["id"]] = asyncio.create_task(
+                            self._managed_video(job),
+                            name=f"media-video-{job['id']}",
+                        )
+                    continue
                 async with self.lock(job["id"]):
                     try:
                         for output_id in job.get("recovery_outputs", []):
@@ -128,11 +180,19 @@ class MediaService:
             "images": {"use_case": USE_CASES, "aspect_ratio": RATIOS, "background": BACKGROUNDS,
                        "n": [1], "max_edit_images": 5, "fallback_max_edit_images": 3,
                        "response_format": ["b64_json", "url"], "mask": False},
-            "videos": {"available": False, "context_ir_billable": True},
+            "videos": {
+                "available": False,
+                "context_ir_billable": True,
+                **video_workflow_options(),
+            },
         }
         if settings["h3_ready"] and settings["videos_enabled"] and "siyuan-video" in models:
             try:
-                result["videos"] = {"available": True, **await self.h3.options()}
+                result["videos"] = {
+                    "available": True,
+                    **await self.h3.options(),
+                    **video_workflow_options(),
+                }
             except MediaError:
                 pass
         return result
@@ -152,7 +212,32 @@ class MediaService:
         self.space()
         if not isinstance(idem, str) or not 1 <= len(idem) <= 128:
             raise MediaError("invalid_idempotency_key", "Idempotency key must contain 1-128 characters.")
-        return self.store.create(owner, kind, body, idem, request_id, settings["queue_limit"])[0]
+        if kind == "video" and workflow_mode(body) == "duration_ladder":
+            if not segmentation_enabled():
+                raise MediaError(
+                    "workflow_unavailable",
+                    "Duration ladder is temporarily unavailable; use quality_gate "
+                    "for one continuous video generation.",
+                    409,
+                )
+            blockers = segmentation_blockers(body)
+            if blockers:
+                raise MediaError(
+                    "workflow_incompatible",
+                    "Duration ladder cannot safely split this prompt; use quality_gate "
+                    "so it can remain one continuous 15-second generation.",
+                )
+        job = self.store.create(owner, kind, body, idem, request_id, settings["queue_limit"])[0]
+        if kind == "video" and workflow_mode(body) != "legacy_pipeline" and not job.get("stages"):
+            job = self.store.update(
+                job["id"],
+                status="in_progress",
+                stages=managed_stages(body),
+                workflow_mode=workflow_mode(body),
+                creative_profile=body["creative_profile"],
+                aspect_ratio=body["aspect_ratio"],
+            )
+        return job
 
     async def _image(self, original: dict):
         job_id = original["id"]
@@ -373,7 +458,899 @@ class MediaService:
         if any(set(item.get("tags", {})) - allowed for item in sections):
             raise MediaError("unsafe_video_metadata", "Video metadata could not be removed.", 502)
 
+    def _replace_stage(self, job_id: str, stage_id: str, **changes) -> dict:
+        job = self.store.get(job_id)
+        stages = []
+        found = False
+        for stage in job.get("stages", []):
+            if stage["id"] == stage_id:
+                stages.append({**stage, **changes})
+                found = True
+            else:
+                stages.append(stage)
+        if not found:
+            raise MediaError("stage_not_found", "Stage is not in this pipeline.", 404)
+        return self.store.update(job_id, stages=stages)
+
+    @staticmethod
+    def _stage(job: dict, stage_id: str) -> dict:
+        stage = next((item for item in job.get("stages", []) if item["id"] == stage_id), None)
+        if stage is None:
+            raise MediaError("stage_not_found", "Stage is not in this pipeline.", 404)
+        return stage
+
+    async def _managed_video(self, original: dict):
+        job_id = original["id"]
+        job = self.store.get(job_id)
+        stage = next(
+            (item for item in job.get("stages", [])
+             if item["status"] in {"queued", "running", "reconciling", "cancelling"}),
+            None,
+        )
+        if stage is None:
+            return
+        stage_id = stage["id"]
+        try:
+            if stage["status"] == "queued":
+                run_id = "run_" + uuid4().hex
+                job = self._replace_stage(
+                    job_id,
+                    stage_id,
+                    status="running",
+                    progress=2,
+                    run_id=run_id,
+                    output_id=None,
+                    output=None,
+                    review=None,
+                    error=None,
+                    started_at=time.time(),
+                )
+                stage = self._stage(job, stage_id)
+            if stage.get("cancel_requested") or stage["status"] == "cancelling":
+                await self._cancel_managed_executions(job_id, stage_id)
+                self._replace_stage(job_id, stage_id, status="cancelled", progress=0)
+                self.store.update(job_id, status="cancelled")
+                return
+            if stage_id == "plan":
+                await self._run_plan(job_id, stage)
+            else:
+                await self._run_generated_stage(job_id, stage)
+        except asyncio.CancelledError:
+            current = self.store.get(job_id)
+            stage = self._stage(current, stage_id)
+            if stage["status"] not in TERMINAL | {"awaiting_approval", "approved"}:
+                self._replace_stage(
+                    job_id,
+                    stage_id,
+                    status="cancelling" if stage.get("cancel_requested") else "reconciling",
+                )
+            raise
+        except UnknownOutcome as exc:
+            current = self.store.get(job_id)
+            current_stage = self._stage(current, stage_id)
+            self._replace_stage(
+                job_id,
+                stage_id,
+                status=(
+                    "cancelling"
+                    if current_stage.get("cancel_requested")
+                    else "reconciling"
+                ),
+                error={"code": exc.code, "message": str(exc)},
+            )
+        except MediaError as exc:
+            self._replace_stage(
+                job_id,
+                stage_id,
+                status="cancelled" if exc.code == "media_cancelled" else "failed",
+                error={"code": exc.code, "message": str(exc)},
+            )
+            self.store.update(job_id, status="cancelled" if exc.code == "media_cancelled" else "failed")
+        except Exception:
+            self._replace_stage(
+                job_id,
+                stage_id,
+                status="reconciling",
+                error={"code": "media_outcome_unknown", "message": "Managed video task requires reconciliation."},
+            )
+
+    async def _run_plan(self, job_id: str, stage: dict):
+        job = self.store.get(job_id)
+        package = job.get("prompt_package") or build_prompt_package(job["request"])
+        if package.get("anchor_seconds"):
+            package = await self._ensure_anchors(job_id, package, stage["run_id"], "plan")
+        anchors = [
+            self.store.artifact(item["artifact_id"])
+            for item in package.get("anchors", [])
+        ]
+        if anchors:
+            sheet = await self._anchor_contact_sheet(job_id, package, anchors)
+            package["anchor_contact_sheet"] = {
+                "artifact_id": sheet["id"],
+                "sha256": sheet["sha256"],
+            }
+            anchors.append(sheet)
+        package = refresh_prompt_hash(package)
+        text = json.dumps(package, ensure_ascii=False, indent=2)
+        version = "out_" + hashlib.sha256(
+            f"{job_id}:{stage['run_id']}:{package['prompt_hash']}".encode()
+        ).hexdigest()
+        output = await self.archive(
+            job_id,
+            version,
+            data=text.encode(),
+            content_type="text/plain",
+            text=text,
+            stage="plan",
+            prompt_hash=package["prompt_hash"],
+        )
+        self.store.update(job_id, prompt_package=package)
+        self._replace_stage(
+            job_id,
+            "plan",
+            status="awaiting_approval",
+            progress=100,
+            output_id=version,
+            output=output,
+            artifacts=anchors,
+            completed_at=time.time(),
+        )
+
+    async def _anchor_contact_sheet(
+        self,
+        job_id: str,
+        package: dict,
+        anchors: list[dict],
+    ) -> dict:
+        digest = hashlib.sha256(
+            ":".join(anchor["sha256"] for anchor in anchors).encode()
+        ).hexdigest()
+        version = "out_anchor_sheet_" + digest
+        try:
+            existing = self.store.artifact(version)
+            if Path(existing["path"]).is_file():
+                return existing
+        except MediaError:
+            pass
+        cells = []
+        for anchor in anchors:
+            with Image.open(anchor["path"]) as source:
+                cells.append(ImageOps.contain(source.convert("RGB"), (360, 360)))
+        columns = min(2, len(cells))
+        rows = (len(cells) + columns - 1) // columns
+        canvas = Image.new("RGB", (columns * 360, rows * 360), "black")
+        for index, cell in enumerate(cells):
+            left = (index % columns) * 360 + (360 - cell.width) // 2
+            top = (index // columns) * 360 + (360 - cell.height) // 2
+            canvas.paste(cell, (left, top))
+        output = io.BytesIO()
+        canvas.save(output, format="PNG", optimize=False)
+        data = output.getvalue()
+        return await self.archive(
+            job_id,
+            version,
+            data=data,
+            stage="plan",
+            role="anchor_contact_sheet",
+            prompt_hash=package["prompt_hash"],
+            **image_info(data),
+        )
+
+    async def _ensure_anchors(self, job_id: str, package: dict, run_id: str, stage_id: str) -> dict:
+        job = self.store.get(job_id)
+        state = dict(job.get("provider_state", {}))
+        anchors = dict(state.get("anchors", {}))
+        previous = None
+        output = []
+        for seconds in package["anchor_seconds"]:
+            key = str(seconds)
+            existing = anchors.get(key)
+            if existing:
+                try:
+                    artifact = self.store.artifact(existing["artifact_id"])
+                    if Path(artifact["path"]).is_file():
+                        output.append({
+                            "timestamp_seconds": seconds,
+                            "artifact_id": artifact["id"],
+                            "sha256": artifact["sha256"],
+                        })
+                        previous = artifact
+                        continue
+                except MediaError:
+                    pass
+            artifact = await self._create_anchor(
+                job_id,
+                seconds,
+                package,
+                run_id,
+                previous,
+            )
+            anchors[key] = {"artifact_id": artifact["id"], "run_id": run_id}
+            state["anchors"] = anchors
+            self.store.update(job_id, provider_state=state)
+            output.append({
+                "timestamp_seconds": seconds,
+                "artifact_id": artifact["id"],
+                "sha256": artifact["sha256"],
+            })
+            previous = artifact
+            self._replace_stage(
+                job_id,
+                stage_id,
+                progress=min(85, 10 + int(70 * len(output) / len(package["anchor_seconds"]))),
+            )
+        return {**package, "anchors": output}
+
+    async def _create_anchor(
+        self,
+        job_id: str,
+        seconds: int,
+        package: dict,
+        run_id: str,
+        previous: dict | None,
+    ) -> dict:
+        job = self.store.get(job_id)
+        request = job["request"]
+        supplied = None
+        if seconds == 0:
+            supplied = request["assets"].get("first_frame")
+        if seconds == request["duration"]:
+            supplied = request["assets"].get("last_frame") or supplied
+        version = "out_anchor_" + hashlib.sha256(
+            f"{job_id}:{run_id}:{seconds}:{package['prompt_hash']}".encode()
+        ).hexdigest()
+        if supplied:
+            data = decode_asset(supplied, image=True)
+            return await self.archive(
+                job_id,
+                version,
+                data=data,
+                stage="plan",
+                role="anchor",
+                timestamp_seconds=seconds,
+                **image_info(data),
+            )
+        references = []
+        if previous:
+            data = Path(previous["path"]).read_bytes()
+            references = [{
+                "data": base64.b64encode(data).decode(),
+                "content_type": previous["content_type"],
+            }]
+        profile = package["creative_profile"]
+        use_case = "product" if profile in {"ecommerce", "social_commerce", "tvc", "ai_ad", "seeding"} else (
+            "illustration" if profile == "dynamic_comic" else "photo"
+        )
+        prompt = (
+            f"Create the exact approved boundary frame at {seconds} seconds for a {package['duration_seconds']}-second "
+            f"video. Preserve the same adult subject identity, face, hair, body proportions, props, environment, "
+            f"lighting, camera axis and aspect ratio. This is a continuity anchor, not a collage. "
+            f"Primary request: {request['prompt']}"
+        )
+        body = image_request({
+            "model": "siyuan-image",
+            "prompt": prompt,
+            "use_case": use_case,
+            "aspect_ratio": "portrait" if request["aspect_ratio"] == "9:16" else "landscape",
+            "background": "opaque",
+            "response_format": "b64_json",
+            "n": 1,
+            "images": references,
+        }, edit=bool(references))
+        directory = self.store.root / "jobs" / job_id / "anchors" / str(seconds)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        current = self.store.get(job_id)
+        state = dict(current.get("provider_state", {}))
+        image_states = dict(state.get("anchor_generation", {}))
+        image_state = dict(image_states.get(str(seconds), {}))
+
+        def checkpoint(value):
+            nonlocal image_state
+            image_state = dict(value)
+            latest = self.store.get(job_id)
+            provider_state = dict(latest.get("provider_state", {}))
+            values = dict(provider_state.get("anchor_generation", {}))
+            values[str(seconds)] = image_state
+            provider_state["anchor_generation"] = values
+            self.store.update(job_id, provider_state=provider_state)
+
+        try:
+            result = await self.codex.generate(body, image_state, checkpoint, directory)
+        except QuotaExceeded:
+            settings = self.store.settings()
+            if not settings["paid_fallback"]:
+                raise
+            reservation = f"{job_id}:anchor:{run_id}:{seconds}"
+            self.store.reserve_paid(reservation, settings["daily_paid_images"])
+            try:
+                result = await self.qwen.generate(body, {}, lambda _: None, directory)
+            except Exception:
+                self.store.release_paid(reservation)
+                raise
+        data = result.get("data")
+        if data is None:
+            data = await self._image_url(result["url"])
+        return await self.archive(
+            job_id,
+            version,
+            data=data,
+            stage="plan",
+            role="anchor",
+            timestamp_seconds=seconds,
+            **image_info(data),
+        )
+
+    async def _run_generated_stage(self, job_id: str, stage: dict):
+        job = self.store.get(job_id)
+        package = job.get("prompt_package") or build_prompt_package(job["request"])
+        if len(package["segments"]) > 1 and not package.get("anchors"):
+            package = await self._ensure_anchors(
+                job_id,
+                package,
+                stage["run_id"],
+                stage["id"],
+            )
+            package = refresh_prompt_hash(package)
+            self.store.update(job_id, prompt_package=package)
+        package = self._effective_prompt_package(job, stage, package)
+        stage_id = stage["id"]
+        profile = "quality" if stage_id == "final" else "preview"
+        if workflow_mode(job["request"]) == "duration_ladder":
+            index = {"clip_5s": 0, "clip_10s": 1, "clip_15s": 2}[stage_id]
+            requested_segments = [package["segments"][index]]
+        else:
+            requested_segments = package["segments"]
+        results = await self._execution_batches(
+            job_id,
+            stage_id,
+            stage["run_id"],
+            profile,
+            package,
+            requested_segments,
+        )
+        self._require_managed_stage_active(job_id, stage_id)
+        sources = results
+        boundary_anchors = self._boundary_anchor_evidence(package, requested_segments)
+        if workflow_mode(job["request"]) == "duration_ladder" and stage_id != "clip_5s":
+            previous_id = "clip_5s" if stage_id == "clip_10s" else "clip_10s"
+            previous = self._stage(self.store.get(job_id), previous_id)
+            if previous["status"] != "approved" or not previous.get("output"):
+                raise MediaError("stale_stage_output", "Duration extension requires the approved preceding clip.", 409)
+            sources = [previous["output"], *results]
+            boundary_anchors = [
+                *previous["output"].get("shared_boundary_anchors", []),
+                self._anchor_evidence(
+                    package,
+                    requested_segments[0]["first_anchor_seconds"],
+                ),
+            ]
+        expected = self._expected_video(job["request"], profile)
+        expected_duration = 0.0
+        expected_frames = 0
+        for source in sources:
+            gate = source.get("internal_technical_gate", {})
+            expected_duration += float(
+                source.get("expected_duration_seconds")
+                or gate.get("duration_seconds")
+                or 0
+            )
+            expected_frames += int(
+                source.get("expected_frame_count")
+                or gate.get("frame_count")
+                or 0
+            )
+        if len(sources) > 1:
+            expected_duration -= (len(sources) - 1) / 24
+            expected_frames -= len(sources) - 1
+        if expected_duration > 0:
+            expected["duration_seconds"] = expected_duration
+        if expected_frames > 0:
+            expected["frame_count"] = expected_frames
+        assembled = await self._assemble_stage(
+            job_id,
+            stage_id,
+            stage["run_id"],
+            sources,
+            boundary_anchors,
+            expected,
+        )
+        self._require_managed_stage_active(job_id, stage_id)
+        expected["boundaries_seconds"] = assembled.get("boundary_seconds", [])
+        expected["shared_boundary_anchors"] = boundary_anchors
+        try:
+            reference_sheets = []
+            contact_sheet_id = (package.get("anchor_contact_sheet") or {}).get("artifact_id")
+            if contact_sheet_id:
+                reference_sheets.append(Path(self.store.artifact(contact_sheet_id)["path"]))
+            review = await self.reviewer.review(
+                Path(assembled["path"]),
+                output_id=assembled["output_id"],
+                artifact_sha256=assembled["sha256"],
+                prompt_package=package,
+                expected=expected,
+                reference_sheets=reference_sheets,
+                technical=assembled["internal_technical_gate"],
+            )
+        except MediaError as exc:
+            if exc.code == "video_technical_review_failed":
+                raise
+            review = {
+                "review_id": "rev_" + hashlib.sha256(
+                    f"{assembled['output_id']}:{assembled['sha256']}:manual".encode()
+                ).hexdigest(),
+                "output_id": assembled["output_id"],
+                "artifact_sha256": assembled["sha256"],
+                "prompt_hash": package.get("prompt_hash"),
+                "manual_review_required": True,
+                "technical": assembled["internal_technical_gate"],
+                "semantic": {
+                    "status": "manual_required",
+                    "verdict": "CONDITIONAL_PASS",
+                    "confidence": 0.0,
+                    "issues": [{"category": "reviewer", "severity": "warning", "message": str(exc)}],
+                    "scores": {},
+                    "revised_prompt": "",
+                    "recommended_action": "manual_review",
+                },
+            }
+        duration = review.get("technical", {}).get("duration_seconds")
+        if duration:
+            self.store.update(job_id, actual_duration=duration)
+        self._require_managed_stage_active(job_id, stage_id)
+        self._replace_stage(
+            job_id,
+            stage_id,
+            status="awaiting_approval",
+            progress=100,
+            output_id=assembled["output_id"],
+            output=assembled,
+            review=review,
+            execution_outputs=[item["output_id"] for item in results],
+            execution_lanes=[
+                item["internal_lane_id"]
+                for item in results
+                if item.get("internal_lane_id")
+            ],
+            internal_gpu_uuids=[
+                item["internal_gpu_uuid"]
+                for item in results
+                if item.get("internal_gpu_uuid")
+            ],
+            completed_at=time.time(),
+        )
+
+    async def _execution_batches(
+        self,
+        job_id: str,
+        stage_id: str,
+        run_id: str,
+        profile: str,
+        package: dict,
+        segments: list[dict],
+    ) -> list[dict]:
+        batch_size = 2 if profile == "quality" else 3
+        results = []
+        for offset in range(0, len(segments), batch_size):
+            group = segments[offset:offset + batch_size]
+            tasks = [
+                asyncio.create_task(
+                    self._execute_segment(job_id, stage_id, run_id, profile, package, segment),
+                    name=f"{job_id}-{stage_id}-{segment['id']}",
+                )
+                for segment in group
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+            failure = next(
+                (
+                    task.exception()
+                    for task in tasks
+                    if task in done
+                    and not task.cancelled()
+                    and task.exception() is not None
+                ),
+                None,
+            )
+            if failure is not None:
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                await self._cancel_managed_executions(job_id, stage_id)
+                raise failure
+            completed = await asyncio.gather(*tasks)
+            results.extend(completed)
+        return results
+
+    async def _execute_segment(
+        self,
+        job_id: str,
+        stage_id: str,
+        run_id: str,
+        profile: str,
+        package: dict,
+        segment: dict,
+    ) -> dict:
+        job = self.store.get(job_id)
+        state = dict(job.get("provider_state", {}))
+        runs = dict(state.get("managed_executions", {}))
+        run = dict(runs.get(run_id, {}))
+        executions = dict(run.get("segments", {}))
+        saved = dict(executions.get(segment["id"], {}))
+        execution_id = saved.get("execution_id")
+        assets, mode = self._execution_assets(job, package, segment)
+        active_stage = self._stage(job, stage_id)
+        prompt = segment["prompt"]
+        requested_seed = int(job["request"]["seed"])
+        seed_offset = int(active_stage.get("seed_offset", 0))
+        body = {
+            "operation_id": f"{job_id}_{stage_id}_{run_id}_{segment['id']}",
+            "profile": profile,
+            "mode": mode,
+            "prompt": prompt,
+            "duration": segment["duration_seconds"],
+            "seed": requested_seed + package["segments"].index(segment) + seed_offset
+            if requested_seed >= 0 else -1,
+            "audio_policy": job["request"]["audio_policy"],
+            "aspect_ratio": job["request"]["aspect_ratio"],
+            "watermark": job["request"]["watermark"],
+            "metadata": {
+                "router_job_id": job_id,
+                "stage": stage_id,
+                "run_id": run_id,
+                "segment_id": segment["id"],
+                "prompt_hash": package["prompt_hash"],
+            },
+        }
+        if not execution_id:
+            created = await self.h3.create_execution(body, assets)
+            execution_id = created.get("execution_id")
+            if not isinstance(execution_id, str) or not ID_PATTERN.fullmatch(execution_id):
+                raise UnknownOutcome("H3 execution creation returned no stable identifier.")
+            saved.update(
+                execution_id=execution_id,
+                status=created.get("status", "submitted"),
+                lane_id=created.get("lane_id"),
+                gpu_uuid=created.get("gpu_uuid"),
+                actual_duration=created.get("actual_duration"),
+                frame_count=created.get("frame_count"),
+            )
+            executions = await self._save_managed_execution(
+                job_id,
+                run_id,
+                segment["id"],
+                saved,
+            )
+        deadline = time.monotonic() + int(os.environ.get(
+            "AI_ROUTER_H3_QUALITY_TIMEOUT" if profile == "quality" else "AI_ROUTER_H3_PREVIEW_TIMEOUT",
+            "14400" if profile == "quality" else "3600",
+        ))
+        while True:
+            current_job = self.store.get(job_id)
+            current_stage = self._stage(current_job, stage_id)
+            if current_stage.get("cancel_requested") or current_stage["status"] == "cancelling":
+                await self.h3.cancel_execution(
+                    execution_id,
+                    f"{job_id}_{stage_id}_{run_id}_{segment['id']}_cancel",
+                )
+                raise MediaError("media_cancelled", "Video execution was cancelled.", 409)
+            execution = await self.h3.get_execution(execution_id)
+            status = execution.get("status")
+            progress = max(3, min(95, int(execution.get("progress") or 0)))
+            saved.update(
+                status=status,
+                progress=progress,
+                lane_id=execution.get("lane_id") or saved.get("lane_id"),
+                gpu_uuid=execution.get("gpu_uuid") or saved.get("gpu_uuid"),
+                actual_duration=execution.get("actual_duration") or saved.get("actual_duration"),
+                frame_count=execution.get("frame_count") or saved.get("frame_count"),
+            )
+            executions = await self._save_managed_execution(
+                job_id,
+                run_id,
+                segment["id"],
+                saved,
+            )
+            average = sum(int(value.get("progress") or 0) for value in executions.values()) / max(1, len(executions))
+            self._replace_stage(job_id, stage_id, progress=max(3, min(94, int(average))))
+            if status == "completed":
+                self._require_managed_stage_active(job_id, stage_id)
+                output_id = execution.get("output_id")
+                if not isinstance(output_id, str) or not ID_PATTERN.fullmatch(output_id):
+                    raise UnknownOutcome("Completed H3 execution has no immutable output identifier.")
+                stream = await self.h3.download_execution(execution_id)
+                artifact = await self.archive(
+                    job_id,
+                    output_id,
+                    stream=stream,
+                    content_type="video/mp4",
+                    stage=f"{stage_id}_{segment['id']}",
+                    execution_id=execution_id,
+                    segment_id=segment["id"],
+                    internal_lane_id=saved.get("lane_id"),
+                    internal_gpu_uuid=saved.get("gpu_uuid"),
+                    expected_duration_seconds=saved.get("actual_duration"),
+                    expected_frame_count=saved.get("frame_count"),
+                    internal_hidden=True,
+                )
+                self._require_managed_stage_active(job_id, stage_id)
+                saved.update(status="completed", output_id=output_id, artifact_id=artifact["id"], progress=100)
+                await self._save_managed_execution(
+                    job_id,
+                    run_id,
+                    segment["id"],
+                    saved,
+                )
+                return artifact
+            if status in {"failed", "cancelled"}:
+                code = "media_cancelled" if status == "cancelled" else "h3_execution_failed"
+                raise MediaError(code, execution.get("error") or "H3 video execution failed.", 502)
+            if time.monotonic() >= deadline:
+                raise UnknownOutcome("H3 execution exceeded its reconciliation window.")
+            await asyncio.sleep(5)
+
+    async def _save_managed_execution(
+        self,
+        job_id: str,
+        run_id: str,
+        segment_id: str,
+        value: dict,
+    ) -> dict:
+        async with self.lock(job_id):
+            latest = self.store.get(job_id)
+            provider_state = dict(latest.get("provider_state", {}))
+            runs = dict(provider_state.get("managed_executions", {}))
+            run = dict(runs.get(run_id, {}))
+            executions = dict(run.get("segments", {}))
+            executions[segment_id] = dict(value)
+            run["segments"] = executions
+            runs[run_id] = run
+            provider_state["managed_executions"] = runs
+            self.store.update(job_id, provider_state=provider_state)
+            return executions
+
+    def _execution_assets(self, job: dict, package: dict, segment: dict) -> tuple[dict, str]:
+        request = job["request"]
+        anchors = {item["timestamp_seconds"]: self.store.artifact(item["artifact_id"])
+                   for item in package.get("anchors", [])}
+        if not anchors:
+            return dict(request["assets"]), request["mode"]
+
+        def asset(seconds: int) -> dict:
+            artifact = anchors[seconds]
+            data = Path(artifact["path"]).read_bytes()
+            if hashlib.sha256(data).hexdigest() != artifact.get("sha256"):
+                raise MediaError(
+                    "boundary_anchor_hash_mismatch",
+                    f"Approved boundary anchor T{seconds} no longer matches its immutable hash.",
+                    409,
+                )
+            return {
+                "data": base64.b64encode(data).decode(),
+                "content_type": artifact["content_type"],
+            }
+
+        assets = {
+            "first_frame": asset(segment["first_anchor_seconds"]),
+            "last_frame": asset(segment["last_anchor_seconds"]),
+        }
+        for name in ("reference_image", "reference_video", "reference_audio"):
+            if name in request["assets"]:
+                assets[name] = request["assets"][name]
+        return assets, "fl2v"
+
+    @staticmethod
+    def _anchor_evidence(package: dict, timestamp: int) -> dict:
+        anchor = next(
+            (
+                item
+                for item in package.get("anchors", [])
+                if item.get("timestamp_seconds") == timestamp
+            ),
+            None,
+        )
+        if not anchor or not anchor.get("artifact_id") or not anchor.get("sha256"):
+            raise MediaError(
+                "missing_boundary_anchor",
+                f"Approved boundary anchor T{timestamp} is unavailable.",
+                409,
+            )
+        return {
+            "timestamp_seconds": timestamp,
+            "artifact_id": anchor["artifact_id"],
+            "sha256": anchor["sha256"],
+        }
+
+    @classmethod
+    def _boundary_anchor_evidence(cls, package: dict, segments: list[dict]) -> list[dict]:
+        evidence = []
+        for left, right in zip(segments, segments[1:]):
+            timestamp = left.get("last_anchor_seconds")
+            if timestamp != right.get("first_anchor_seconds"):
+                raise MediaError(
+                    "boundary_anchor_mismatch",
+                    "Adjacent segments do not share the same approved boundary timestamp.",
+                    409,
+                )
+            evidence.append(cls._anchor_evidence(package, timestamp))
+        return evidence
+
+    async def _assemble_stage(
+        self,
+        job_id: str,
+        stage_id: str,
+        run_id: str,
+        sources: list[dict],
+        boundary_anchors: list[dict],
+        expected: dict,
+    ) -> dict:
+        directory = self.store.root / "jobs" / job_id / "assembled"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        assembled = directory / f"{stage_id}-{run_id}.mp4"
+        component_durations = [
+            float(json.loads(await self.media_command(
+                "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                "-of", "json", str(item["path"]),
+            )).get("format", {}).get("duration") or 0)
+            for item in sources
+        ]
+        boundaries = []
+        elapsed = 0.0
+        for index, duration in enumerate(component_durations):
+            if index:
+                boundaries.append(round(elapsed, 6))
+                elapsed += max(0.0, duration - 1 / 24)
+            else:
+                elapsed += duration
+        await self._concat_videos([Path(item["path"]) for item in sources], assembled)
+        gate = await technical_review(
+            assembled,
+            expected={
+                **expected,
+                "boundaries_seconds": boundaries,
+                "shared_boundary_anchors": boundary_anchors,
+            },
+        )
+        if not gate["passed"]:
+            raise MediaError(
+                "video_technical_review_failed",
+                "Video failed its technical quality gate before publication.",
+                502,
+            )
+        version = "out_" + hashlib.sha256(
+            json.dumps(
+                [
+                    job_id,
+                    stage_id,
+                    run_id,
+                    [item["output_id"] for item in sources],
+                    boundary_anchors,
+                ],
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        return await self.archive(
+            job_id,
+            version,
+            stream=_LocalStream(assembled),
+            content_type="video/mp4",
+            stage=stage_id,
+            component_output_ids=[item["output_id"] for item in sources],
+            component_duration_seconds=component_durations,
+            boundary_seconds=boundaries,
+            shared_boundary_anchors=boundary_anchors,
+            internal_technical_gate=gate,
+        )
+
+    async def _concat_videos(self, sources: list[Path], destination: Path):
+        if len(sources) == 1:
+            shutil.copyfile(sources[0], destination)
+            return
+        probes = [
+            json.loads(await self.media_command(
+                "ffprobe", "-v", "error", "-show_streams", "-of", "json", str(path),
+            ))
+            for path in sources
+        ]
+        all_audio = all(any(stream.get("codec_type") == "audio" for stream in probe.get("streams", []))
+                        for probe in probes)
+        command = ["ffmpeg", "-v", "error", "-nostdin"]
+        for source in sources:
+            command.extend(["-i", str(source)])
+        filters = []
+        video_labels = []
+        audio_labels = []
+        for index in range(len(sources)):
+            trim = "trim=start_frame=1," if index else ""
+            filters.append(f"[{index}:v]{trim}setpts=PTS-STARTPTS[v{index}]")
+            video_labels.append(f"[v{index}]")
+            if all_audio:
+                atrim = "atrim=start=0.041667," if index else ""
+                filters.append(f"[{index}:a]{atrim}asetpts=PTS-STARTPTS[a{index}]")
+                audio_labels.append(f"[a{index}]")
+        filters.append("".join(video_labels) + f"concat=n={len(sources)}:v=1:a=0[vout]")
+        audio_output = None
+        if all_audio:
+            current = audio_labels[0]
+            for index, label in enumerate(audio_labels[1:], 1):
+                target = f"[ax{index}]"
+                filters.append(f"{current}{label}acrossfade=d=0.08:c1=tri:c2=tri{target}")
+                current = target
+            filters.append(f"{current}apad=pad_dur=1[aout]")
+            audio_output = "[aout]"
+        temporary = destination.with_suffix(".part.mp4")
+        try:
+            command.extend([
+                "-filter_complex", ";".join(filters),
+                "-map", "[vout]",
+                "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+                "-pix_fmt", "yuv420p",
+            ])
+            if audio_output:
+                command.extend(["-map", audio_output, "-c:a", "aac", "-b:a", "192k", "-shortest"])
+            command.extend(["-movflags", "+faststart", "-y", str(temporary)])
+            await self.media_command(*command, seconds=900)
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _expected_video(request: dict, profile: str) -> dict:
+        portrait = request.get("aspect_ratio") == "9:16"
+        if profile == "quality":
+            width, height = ((768, 1344) if portrait else (1344, 768))
+        else:
+            width, height = ((480, 864) if portrait else (864, 480))
+        return {
+            "width": width,
+            "height": height,
+            "fps": 24,
+            "audio_required": request.get("audio_policy") in {
+                "native",
+                "reference",
+                "lock_source",
+            },
+        }
+
+    async def _cancel_managed_executions(self, job_id: str, stage_id: str):
+        job = self.store.get(job_id)
+        stage = self._stage(job, stage_id)
+        run = job.get("provider_state", {}).get("managed_executions", {}).get(stage.get("run_id"), {})
+        for segment_id, execution in run.get("segments", {}).items():
+            if execution.get("status") not in TERMINAL and execution.get("execution_id"):
+                try:
+                    await self.h3.cancel_execution(
+                        execution["execution_id"],
+                        f"{job_id}_{stage_id}_{stage.get('run_id')}_{segment_id}_cancel",
+                    )
+                except UnknownOutcome:
+                    raise
+                except MediaError as exc:
+                    raise UnknownOutcome(
+                        f"Cancellation outcome is unknown for segment {segment_id}: {exc}"
+                    ) from exc
+
+    def _require_managed_stage_active(self, job_id: str, stage_id: str) -> None:
+        stage = self._stage(self.store.get(job_id), stage_id)
+        if stage.get("cancel_requested") or stage["status"] == "cancelling":
+            raise MediaError("media_cancelled", "Video execution was cancelled.", 409)
+
+    @staticmethod
+    def _effective_prompt_package(job: dict, stage: dict, package: dict) -> dict:
+        override = stage.get("prompt_override") or job.get("provider_state", {}).get(
+            "approved_prompt_override"
+        )
+        if not override:
+            return package
+        value = json.loads(json.dumps(package))
+        value["effective_prompt_override"] = override
+        for segment in value.get("segments", []):
+            segment["prompt"] = override
+        return refresh_prompt_hash(value)
+
     async def _video(self, job: dict):
+        if workflow_mode(job["request"]) != "legacy_pipeline":
+            await self._managed_video(job)
+            return
         state = job["provider_state"]
         if not state.get("project_id"):
             project = await self.h3.create(job)
@@ -420,8 +1397,11 @@ class MediaService:
 
     async def action(self, job_id: str, stage_id: str, action: str, body: dict, idem: str, owner: str | None,
                      request_id: str | None = None):
-        if not ID_PATTERN.fullmatch(stage_id) or action not in {"start", "approve", "cancel"}:
+        if not ID_PATTERN.fullmatch(stage_id) or action not in {"start", "approve", "cancel", "regenerate"}:
             raise MediaError("invalid_stage_action", "Invalid stage action.")
+        job = self.store.get(job_id, owner)
+        if workflow_mode(job["request"]) != "legacy_pipeline":
+            return await self._managed_action(job, stage_id, action, body, idem, request_id)
         allowed = {"output_id", "new_seed"} if action == "start" else (
             {"output_id", "prompt"} if action == "approve" and stage_id == "context_ir" else
             {"output_id"} if action == "approve" else set()
@@ -480,6 +1460,211 @@ class MediaService:
             await self._video(self.store.get(job_id))
             return {**self.store.get(job_id, owner), "operation_id": operation["id"]}
 
+    async def _managed_action(
+        self,
+        original: dict,
+        stage_id: str,
+        action: str,
+        body: dict,
+        idem: str,
+        request_id: str | None,
+    ) -> dict:
+        if not isinstance(body, dict):
+            raise MediaError("invalid_stage_action", "Expected an operation object.")
+        allowed = {
+            "start": {"output_id", "new_seed"},
+            "approve": {"output_id"},
+            "cancel": set(),
+            "regenerate": {"output_id", "review_id", "prompt", "apply_suggestion", "new_seed"},
+        }[action]
+        if set(body) - allowed:
+            raise MediaError("invalid_stage_action", "Unexpected stage parameters.")
+        for name in ("new_seed", "apply_suggestion"):
+            if name in body and type(body[name]) is not bool:
+                raise MediaError("invalid_stage_action", f"{name} must be boolean.")
+        if action in {"start", "regenerate"}:
+            settings = self.store.settings()
+            if not settings["enabled"] or not settings["videos_enabled"]:
+                raise MediaError("media_disabled", "New video execution is disabled.", 503)
+            if not settings["h3_ready"]:
+                raise MediaError("h3_not_verified", "H3 media contract has not been verified.", 503)
+            self.space()
+        async with self.lock(original["id"]):
+            job = self.store.get(original["id"], original["owner"])
+            stage = self._stage(job, stage_id)
+            operation, created = self.store.operation(
+                job["id"],
+                idem,
+                {"stage": stage_id, "action": action, **body},
+                request_id,
+            )
+            if not created and operation["status"] == "completed":
+                return {**job, "operation_id": operation["id"]}
+            if (
+                not created
+                and stage.get("internal_operation_id") == operation["id"]
+                and (
+                    (action == "approve" and stage["status"] == "approved")
+                    or (
+                        action in {"start", "regenerate"}
+                        and stage["status"] in {
+                            "queued",
+                            "running",
+                            "reconciling",
+                            "awaiting_approval",
+                            "approved",
+                        }
+                    )
+                    or (
+                        action == "cancel"
+                        and stage["status"] in {"cancelling", "cancelled"}
+                    )
+                )
+            ):
+                self.store.finish_operation(
+                    job["id"],
+                    idem,
+                    {**operation, "status": "completed"},
+                )
+                return {**job, "operation_id": operation["id"]}
+            if action == "approve":
+                if (stage["status"] != "awaiting_approval" or not stage.get("output")
+                        or body.get("output_id") != stage.get("output_id")):
+                    raise MediaError("stale_stage_output", "Approval requires the current archived output.", 409)
+                job = self._replace_stage(
+                    job["id"],
+                    stage_id,
+                    status="approved",
+                    progress=100,
+                    approved_at=time.time(),
+                    internal_operation_id=operation["id"],
+                )
+                if stage.get("prompt_override"):
+                    provider_state = dict(job.get("provider_state", {}))
+                    provider_state["approved_prompt_override"] = stage["prompt_override"]
+                    job = self.store.update(job["id"], provider_state=provider_state)
+                if stage_id in {"final", "clip_15s"}:
+                    approved = self._stage(job, stage_id)
+                    job = self.store.update(job["id"], status="completed", output=approved["output"])
+            elif action == "start":
+                index = job["stages"].index(stage)
+                if index == 0:
+                    if stage["status"] not in {"failed", "cancelled"} or body.get("output_id"):
+                        raise MediaError(
+                            "invalid_stage_action",
+                            "The initial managed stage can be restarted only after failure or cancellation.",
+                            409,
+                        )
+                else:
+                    previous = job["stages"][index - 1]
+                    if previous["status"] != "approved" or previous.get("output_id") != body.get("output_id"):
+                        raise MediaError("stale_stage_output", "Start requires the approved predecessor output.", 409)
+                    if stage["status"] not in {"pending", "failed", "cancelled"}:
+                        raise MediaError(
+                            "invalid_stage_action",
+                            "Start requires a pending, failed or cancelled stage.",
+                            409,
+                        )
+                job = self._queue_managed_attempt(
+                    job,
+                    stage_id,
+                    new_seed=body.get("new_seed", False),
+                    operation_id=operation["id"],
+                )
+            elif action == "regenerate":
+                if (stage["status"] not in {"awaiting_approval", "approved"}
+                        or not stage.get("output")
+                        or body.get("output_id") != stage.get("output_id")):
+                    raise MediaError("stale_stage_output", "Regeneration requires the current archived output.", 409)
+                review = stage.get("review") or {}
+                if stage_id != "plan" and (
+                    not isinstance(body.get("review_id"), str)
+                    or body["review_id"] != review.get("review_id")
+                ):
+                    raise MediaError(
+                        "stale_stage_output",
+                        "Regeneration requires the exact review for the current output.",
+                        409,
+                    )
+                prompt = body.get("prompt")
+                if body.get("apply_suggestion"):
+                    prompt = (review.get("semantic") or {}).get("revised_prompt")
+                if prompt is not None and (not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 16000):
+                    raise MediaError("invalid_prompt", "A non-empty revised prompt is required.")
+                job = self._queue_managed_attempt(
+                    job,
+                    stage_id,
+                    new_seed=body.get("new_seed", True),
+                    prompt_override=prompt.strip() if isinstance(prompt, str) else None,
+                    operation_id=operation["id"],
+                )
+            else:
+                if stage["status"] not in {"queued", "running", "reconciling"}:
+                    raise MediaError("stage_not_active", "Stage is not active.", 409)
+                job = self._replace_stage(
+                    job["id"],
+                    stage_id,
+                    status="cancelling",
+                    cancel_requested=True,
+                    internal_operation_id=operation["id"],
+                )
+            self.store.finish_operation(job["id"], idem, {**operation, "status": "completed"})
+            return {**job, "operation_id": operation["id"]}
+
+    def _queue_managed_attempt(
+        self,
+        job: dict,
+        stage_id: str,
+        *,
+        new_seed: bool,
+        prompt_override: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict:
+        index = next(index for index, stage in enumerate(job["stages"]) if stage["id"] == stage_id)
+        stages = []
+        for current, stage in enumerate(job["stages"]):
+            if current < index:
+                stages.append(stage)
+            elif current == index:
+                stages.append({
+                    "id": stage_id,
+                    "label": stage.get("label", stage_id),
+                    "status": "queued",
+                    "progress": 1,
+                    "run_id": None,
+                    "output_id": None,
+                    "seed_offset": int(stage.get("seed_offset", 0)) + (1 if new_seed else 0),
+                    **(
+                        {"internal_operation_id": operation_id}
+                        if operation_id
+                        else {}
+                    ),
+                    **({"prompt_override": prompt_override} if prompt_override else {}),
+                })
+            else:
+                stages.append({
+                    "id": stage["id"],
+                    "label": stage.get("label", stage["id"]),
+                    "status": "pending",
+                    "progress": 0,
+                    "run_id": None,
+                    "output_id": None,
+                })
+        changes = {"status": "in_progress", "stages": stages, "output": None}
+        if stage_id == "plan":
+            request = dict(job["request"])
+            if prompt_override:
+                request["prompt"] = prompt_override
+            provider_state = dict(job.get("provider_state", {}))
+            provider_state.pop("anchors", None)
+            provider_state.pop("anchor_generation", None)
+            changes.update(
+                request=request,
+                prompt_package=None,
+                provider_state=provider_state,
+            )
+        return self.store.update(job["id"], **changes)
+
     async def cancel_image(self, job_id: str, owner: str | None):
         job = self.store.get(job_id, owner)
         if job["kind"] != "image":
@@ -510,15 +1695,20 @@ class MediaService:
         job = self.store.get(job_id, deleted=True)
         if confirmation != job_id or not job.get("deleted") or job["status"] not in TERMINAL:
             raise MediaError("purge_not_confirmed", "Purge requires a deleted terminal task and its exact ID.", 409)
-        roots = {(self.store.root / name / job_id).resolve() for name in ("outputs", "sources")}
+        roots = {(self.store.root / name / job_id).resolve() for name in ("outputs", "sources", "jobs")}
         outputs = self.store.outputs(job_id)
         paths = {Path(output[key]) for output in outputs for key in ("path", "source_path") if output.get(key)}
-        if any(root.parent not in {(self.store.root / name).resolve() for name in ("outputs", "sources")} for root in roots) or any(
-            path.is_symlink() or path.resolve().parent not in roots for path in paths
+        allowed_parents = {(self.store.root / name).resolve() for name in ("outputs", "sources", "jobs")}
+        if any(root.parent not in allowed_parents for root in roots) or any(
+            path.is_symlink() or not any(path.resolve().is_relative_to(root) for root in roots)
+            for path in paths
         ):
             raise MediaError("invalid_artifact_path", "Refusing to remove files outside this task.", 409)
         for path in paths:
             path.unlink(missing_ok=True)
+        for root in roots:
+            if root.exists() and not root.is_symlink():
+                shutil.rmtree(root)
         self.store.update(job_id, purged=True, request={"model": job["model"]}, output=None, stages=[])
         return {"id": job_id, "purged": True}
 
@@ -529,23 +1719,40 @@ class MediaService:
             pending = sorted(set(job.get("recovery_outputs", [])) | {output["id"] for output in retired})
             if job["status"] != "archiving" or job.get("recovery_outputs") != pending:
                 job = self.store.update(job["id"], status="archiving", recovery_outputs=pending)
-        fields = ("id", "kind", "model", "status", "created_at", "updated_at", "error",
-                  "fallback_applied", "actual_duration", "operation_id")
+        fields = (
+            "id", "kind", "model", "status", "created_at", "updated_at", "error",
+            "fallback_applied", "actual_duration", "operation_id", "workflow_mode",
+            "creative_profile", "aspect_ratio",
+        )
         result = {field: job[field] for field in fields if field in job}
+        if job["kind"] == "video":
+            result.setdefault("workflow_mode", workflow_mode(job["request"]))
+            result.setdefault("creative_profile", job["request"].get("creative_profile", "auto"))
+            result.setdefault("aspect_ratio", job["request"].get("aspect_ratio", "16:9"))
         result["object"] = "image" if job["kind"] == "image" else "video"
         if internal:
             result.update({field: job.get(field) for field in ("owner", "provider", "provider_state", "request_id", "sync_error", "provider_errors")})
         if job.get("output"):
-            result["output"] = self.public_output(job["output"])
+            result["output"] = self.public_output(job["output"], internal=internal)
         result["stages"] = []
         for stage in job.get("stages", []):
-            item = {key: value for key, value in stage.items() if key not in {"run_id", "output"}}
+            excluded = {"output", "artifacts", "run_id"}
+            item = {key: value for key, value in stage.items()
+                    if key not in excluded and (internal or not key.startswith("internal_"))}
+            if stage.get("review"):
+                item["review"] = self._public_review(stage["review"], internal=internal)
             if stage.get("output"):
-                safe_output = self.public_output(stage["output"])
+                safe_output = self.public_output(stage["output"], internal=internal)
                 if safe_output:
                     item["output"] = safe_output
                 else:
                     item["status"] = "archiving"
+            if stage.get("artifacts"):
+                item["artifacts"] = [
+                    value
+                    for output in stage["artifacts"]
+                    if (value := self.public_output(output, internal=internal)) is not None
+                ]
             result["stages"].append(item)
         if include_data and job["kind"] == "image" and job["status"] == "completed":
             output = job["output"]
@@ -571,7 +1778,21 @@ class MediaService:
         return output.get("content_type") == "video/mp4" and not output.get("metadata_stripped")
 
     @staticmethod
-    def public_output(output: dict) -> dict | None:
-        if MediaService.legacy_video(output):
+    def public_output(output: dict, *, internal: bool = False) -> dict | None:
+        if MediaService.legacy_video(output) or output.get("internal_hidden") and not internal:
             return None
-        return {key: value for key, value in output.items() if key not in {"path", "job_id"} and not key.startswith("source_")}
+        return {
+            key: value
+            for key, value in output.items()
+            if key not in {"path", "job_id", "internal_hidden"}
+            and not key.startswith("source_")
+            and (internal or not key.startswith("internal_"))
+        }
+
+    @staticmethod
+    def _public_review(review: dict, *, internal: bool) -> dict:
+        return {
+            key: value
+            for key, value in review.items()
+            if key != "contact_sheet_path" and (internal or not key.startswith("internal_"))
+        }

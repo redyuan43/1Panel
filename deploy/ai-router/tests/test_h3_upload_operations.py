@@ -51,8 +51,14 @@ def test_h3_upgrade_is_idempotent_when_target_is_already_live(
     }
     monkeypatch.setattr(helper.d, "ROOT", tmp_path)
     monkeypatch.setattr(helper, "snapshot", lambda database: state.copy())
+    executor_url = "http://100.96.79.21:8789"
     monkeypatch.setattr(
-        helper.d, "environment", lambda: {"H3_ROUTER_KEY": "private"}
+        helper, "verify_executor", lambda url: {"origin": url, "healthy_lanes": ["fast", "main"]}
+    )
+    monkeypatch.setattr(
+        helper.d,
+        "environment",
+        lambda: {"H3_ROUTER_KEY": "private", "H3_LOCAL_EXECUTOR_URL": executor_url},
     )
     monkeypatch.setattr(
         helper, "health",
@@ -60,6 +66,7 @@ def test_h3_upgrade_is_idempotent_when_target_is_already_live(
             "cloud_upload_metadata_clean": True,
             "stage_heartbeat": True,
             "local_768_gpu_exclusive": True,
+            "workflow_contract_version": 2,
         },
     )
     monkeypatch.setattr(
@@ -75,6 +82,7 @@ def test_h3_upgrade_is_idempotent_when_target_is_already_live(
         "expected_extension_sha256": "previous-extension",
         "expected_main_sha256": "reviewed-main",
         "extension": extension,
+        "executor_url": executor_url,
     })
 
     assert report["status"] == "deployed_upload_hook_already_current"

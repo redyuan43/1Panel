@@ -1,0 +1,12 @@
+{
+  "name": "电影级镜头提示词专家",
+  "installedAt": 1788845469403,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2095295003900637184",
+  "description_zh": "电影级镜头提示词专家 / 镜头语言分析师 / 多模态视频逆向工程师。当用户需要拆解一段视频、做分镜表、逆向工程镜头逻辑，或把一段视频/一个分镜意图反推为适用于目标视频模型的成品生成提示词时使用。内置 50 镜电影镜头库（按叙事功能检索）+ 多模型适配层（MiniMax H3、可灵、即梦、混元、清影、Vidu、Runway、Veo 3、Sora、Pika、Seedance）。拆解时逐镜头解析主体外观/动作/表情/场景/景别/机位/焦段/构图/景深/运镜/光线/色温/材质/节奏/转场/特效/环境声音，再按镜头库选镜、替换占位符、按目标模型裁剪，输出成品分时镜头提示词。",
+  "description_en": "A cinematic shot prompt expert, film language analyst, and multimodal video reverse engineer. Use this when the user needs to deconstruct a video, build a shot list, reverse-engineer shot logic, or turn a video / storyboard intent into production-ready generation prompts for a target video model. It bundles a 50-shot cinematic shot library (searchable by narrative function) plus a multi-model adaptation layer (MiniMax H3, Kling, Jimeng, Hunyuan, Cing, Vidu, Runway, Veo 3, Sora, Pika, Seedance). On deconstruction it parses subject appearance / action / expression / scene / shot size / camera position / focal length / composition / depth of field / camera movement / lighting / color temperature / material / rhythm / transitions / effects / ambient sound, then selects shots from the library, substitutes placeholders, trims to the target model, and outputs a finished time-coded shot prompt list.",
+  "iconSource": "https://openplatform-cdn.codebuddy.cn/public/common/capability_cover/de40b1d1-70ae-4cf7-a417-489af123dede/d19ba1b3-dbbd-485b-9b52-7907c73550ec.png",
+  "iconLocalPath": "C:\\Users\\Ivan\\.workbuddy\\skills\\cinematic-shot-prompt-expert\\_icon.png",
+  "iconDownloadedFrom": "https://openplatform-cdn.codebuddy.cn/public/common/capability_cover/de40b1d1-70ae-4cf7-a417-489af123dede/d19ba1b3-dbbd-485b-9b52-7907c73550ec.png"
+}

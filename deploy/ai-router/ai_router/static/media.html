@@ -45,6 +45,22 @@
           <h2>新建视频</h2>
           <label>名称 <input name="name" maxlength="200" value="Video"></label>
           <label>提示词 <textarea name="prompt" rows="5" maxlength="16000" required></textarea></label>
+          <label>客户工作流
+            <select name="workflow_mode">
+              <option value="quality_gate" selected>方案 → 预览 → 成片</option>
+              <option value="legacy_pipeline">旧版阶段流程</option>
+            </select>
+          </label>
+          <div class="pair">
+            <label>创作类型 <select name="creative_profile"><option value="general">通用</option></select></label>
+            <label>成片画幅
+              <select name="aspect_ratio">
+                <option value="9:16" selected>9:16 竖屏</option>
+                <option value="16:9">16:9 横屏</option>
+              </select>
+            </label>
+          </div>
+          <p id="video-compat" class="compat" hidden></p>
           <div class="pair">
             <label>模式 <select name="mode"><option value="t2v">文生视频</option><option value="i2v">首帧</option><option value="l2v">尾帧</option><option value="fl2v">首尾帧</option><option value="reference">参考素材</option><option value="hybrid">混合</option></select></label>
             <label>策略 <select name="strategy"><option value="fast">快速</option><option value="safe">质量验证</option><option value="cloud">云端</option></select></label>
@@ -63,8 +79,8 @@
           </div>
           <label class="check"><input name="use_embedded_video_audio" type="checkbox">使用参考视频内置音频</label>
           <label class="check"><input name="watermark" type="checkbox">水印</label>
-          <label class="check"><input id="cloud-consent" type="checkbox" required>确认启动可能计费的 Context IR</label>
-          <button type="submit" class="primary">创建并启动 Context IR</button>
+          <label class="check"><input id="cloud-consent" type="checkbox" required>确认创建任务并启动其首个阶段；云端阶段可能计费</label>
+          <button type="submit" class="primary">创建视频任务</button>
         </form>
         <div class="history"><h2>视频任务</h2><div id="video-list" class="task-list"></div><button id="video-more" hidden>加载更多</button></div>
       </div>

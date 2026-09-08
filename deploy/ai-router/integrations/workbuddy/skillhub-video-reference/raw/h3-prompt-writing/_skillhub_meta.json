@@ -1,0 +1,12 @@
+{
+  "name": "MiniMax H3 提示词编写",
+  "installedAt": 1788845456689,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2095195552571396096",
+  "description_zh": "为 T2VA、I2VA、FL2VA、L2VA 和 Ref2VA 编写 MiniMax H3 视频生成提示词。用于将多模态请求重写为 H3 提示词结构，撰写 integrated_multimodal_description、overall_soundscape 和 non_diegetic_music，调整关键帧，或定义图像、视频和音频的参考标签。",
+  "description_en": "Write MiniMax H3 video generation prompts for T2VA, I2VA, FL2VA, L2VA, and Ref2VA. Use when rewriting multimodal requests into H3 prompt structures, composing integrated_multimodal_description, overall_soundscape, and non_diegetic_music, aligning keyframes, or defining reference labels for images, videos, and audio.",
+  "iconSource": "https://openplatform-cdn.codebuddy.cn/public/common/capability_cover/fcf5e1df-0740-46a7-a7ec-a3f1216c8f2b/18348176-327d-40f8-b0cf-d0f5ae4faa09.png",
+  "iconLocalPath": "C:\\Users\\Ivan\\.workbuddy\\skills\\h3-prompt-writing\\_icon.png",
+  "iconDownloadedFrom": "https://openplatform-cdn.codebuddy.cn/public/common/capability_cover/fcf5e1df-0740-46a7-a7ec-a3f1216c8f2b/18348176-327d-40f8-b0cf-d0f5ae4faa09.png"
+}

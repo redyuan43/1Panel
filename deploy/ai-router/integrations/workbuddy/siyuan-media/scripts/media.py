@@ -27,7 +27,7 @@ ALLOWED_ORIGINS = {ROUTER_URL, "http://127.0.0.1:4000"}
 ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 MAX_UPLOAD = 512 * 1024 * 1024
 MAX_JSON = 64 * 1024 * 1024
-STAGES = ("context_ir", "preview", "proof", "local_768", "cloud_768", "regenerate_2k")
+WORKFLOW_MODES = ("quality_gate", "duration_ladder", "legacy_pipeline")
 PRIVATE_FIELDS = {"api_key", "authorization", "access", "content_url", "url", "b64_json",
                   "provider_state", "provider_errors", "source_path", "source_sha256"}
 
@@ -219,16 +219,27 @@ class Client:
                    "error", "actual_duration", "fallback_applied", "operation_id",
                    "progress", "output_id", "run_id", "content_type", "bytes", "sha256",
                    "width", "height", "text", "stage", "transparent", "next_cursor",
-                   "local_path", "request_id"}
+                   "local_path", "request_id", "workflow_mode", "creative_profile",
+                   "aspect_ratio", "label", "title", "review_id", "verdict", "decision",
+                   "confidence", "severity", "start_sec", "end_sec", "timestamp_sec",
+                   "start_seconds", "end_seconds", "time_range", "message", "issue",
+                   "description", "category", "score", "schema_version",
+                   "manual_review_required", "recommended_action", "recommendation",
+                   "recommendations", "revised_prompt", "suggested_prompt"}
         def select(item):
             if isinstance(item, list):
                 return [select(part) for part in item]
             if not isinstance(item, dict):
                 return item
             result = {key: part for key, part in item.items() if key in allowed}
-            for key in ("output", "stages"):
+            for key in ("output", "stages", "review", "semantic", "technical", "issues", "artifacts"):
                 if isinstance(item.get(key), (dict, list)):
                     result[key] = select(item[key])
+            if isinstance(item.get("scores"), dict):
+                result["scores"] = {
+                    str(key): part for key, part in item["scores"].items()
+                    if isinstance(part, (str, int, float, bool)) or part is None
+                }
             if isinstance(item.get("data"), list) and all(
                 isinstance(part, dict) and "id" in part for part in item["data"]
             ):
@@ -435,6 +446,94 @@ def prompt(args):
     return value.strip()
 
 
+def option_values(value):
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str) and item]
+    if isinstance(value, dict):
+        for key in ("values", "options", "allowed"):
+            if isinstance(value.get(key), list):
+                return [item for item in value[key] if isinstance(item, str) and item]
+    return []
+
+
+def option_default(videos, name, fallback=None):
+    field = videos.get(name)
+    if isinstance(field, dict) and isinstance(field.get("default"), str):
+        return field["default"]
+    defaults = videos.get("defaults")
+    if isinstance(defaults, dict) and isinstance(defaults.get(name), str):
+        return defaults[name]
+    value = videos.get("default_" + name)
+    return value if isinstance(value, str) else fallback
+
+
+def validate_option(value, name):
+    if not isinstance(value, str) or not 1 <= len(value) <= 128 or any(ord(char) < 32 for char in value):
+        raise ClientError("invalid_media_option", f"Invalid {name}.")
+    return value
+
+
+def negotiated_video_fields(args, options):
+    videos = options.get("videos") if isinstance(options, dict) else {}
+    videos = videos if isinstance(videos, dict) else {}
+    fields = {}
+    explicit_workflow = args.workflow_mode
+    requested_workflow = explicit_workflow or "quality_gate"
+    if "workflow_mode" not in videos:
+        if explicit_workflow not in {None, "legacy_pipeline"}:
+            raise ClientError("unsupported_media_option",
+                              "This Router only supports the legacy video pipeline.")
+        for name in ("creative_profile", "aspect_ratio"):
+            if getattr(args, name) is not None:
+                raise ClientError("unsupported_media_option",
+                                  f"This Router does not publish the {name} option.")
+        return fields
+    workflows = option_values(videos["workflow_mode"])
+    if workflows and requested_workflow not in workflows:
+        raise ClientError("unsupported_media_option",
+                          f"workflow_mode={requested_workflow} is not available.")
+    fields["workflow_mode"] = requested_workflow
+    for name in ("creative_profile", "aspect_ratio"):
+        supplied = getattr(args, name)
+        if name not in videos:
+            if supplied is not None:
+                raise ClientError("unsupported_media_option",
+                                  f"This Router does not publish the {name} option.")
+            continue
+        allowed = option_values(videos[name])
+        selected = supplied or option_default(videos, name)
+        if selected is None:
+            continue
+        selected = validate_option(selected, name)
+        if allowed and selected not in allowed:
+            raise ClientError("unsupported_media_option", f"{name}={selected} is not available.")
+        fields[name] = selected
+    return fields
+
+
+def find_stage(job, stage_id):
+    stages = job.get("stages") if isinstance(job, dict) else None
+    if not isinstance(stages, list):
+        raise ClientError("invalid_response", "The Router did not return a video pipeline.")
+    for index, stage in enumerate(stages):
+        if isinstance(stage, dict) and stage.get("id") == stage_id:
+            return stages, index, stage
+    raise ClientError("stage_not_found", "The requested stage is not present in the current video pipeline.")
+
+
+def output_identifier(stage):
+    output = stage.get("output") if isinstance(stage, dict) else None
+    return stage.get("output_id") or (output.get("output_id") if isinstance(output, dict) else None)
+
+
+def review_identifier(stage):
+    output = stage.get("output") if isinstance(stage, dict) else None
+    review = stage.get("review") or (output.get("review") if isinstance(output, dict) else None)
+    if not isinstance(review, dict):
+        return None
+    return review.get("review_id") or review.get("id")
+
+
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=state_home() / "config.json")
@@ -451,7 +550,7 @@ def arguments(argv=None):
             command.add_argument("--seconds", type=int, default=30, choices=range(0, 121))
         if name == "download":
             selection = command.add_mutually_exclusive_group()
-            selection.add_argument("--stage", choices=STAGES)
+            selection.add_argument("--stage")
             selection.add_argument("--artifact-id")
             command.add_argument("--output", required=True)
     for name in ("image", "edit", "video"):
@@ -467,6 +566,9 @@ def arguments(argv=None):
             if name == "edit":
                 command.add_argument("--image", action="append", required=True)
         else:
+            command.add_argument("--workflow-mode", choices=WORKFLOW_MODES)
+            command.add_argument("--creative-profile")
+            command.add_argument("--aspect-ratio")
             command.add_argument("--strategy", choices=("fast", "safe", "cloud"), default="fast")
             command.add_argument("--mode", choices=("t2v", "i2v", "l2v", "fl2v", "reference", "hybrid"), default="t2v")
             command.add_argument("--duration", type=int, default=4, choices=range(4, 16))
@@ -478,14 +580,19 @@ def arguments(argv=None):
             command.add_argument("--confirm-context-cost", action="store_true", required=True)
     resume = sub.add_parser("resume")
     resume.add_argument("--operation-id", required=True)
-    for name in ("approve", "start", "cancel"):
+    for name in ("approve", "start", "regenerate", "cancel"):
         command = sub.add_parser(name)
         command.add_argument("--operation-id", required=True)
         command.add_argument("--job-id", required=True)
-        command.add_argument("--stage", choices=STAGES, required=name != "cancel")
+        command.add_argument("--stage", required=name != "cancel")
         command.add_argument("--confirmed", action="store_true", required=True)
         if name != "cancel":
             command.add_argument("--output-id", required=True)
+        if name == "regenerate":
+            command.add_argument("--review-id")
+            revision = command.add_mutually_exclusive_group()
+            revision.add_argument("--apply-suggestion", action="store_true")
+            revision.add_argument("--prompt-file")
         if name == "approve":
             command.add_argument("--prompt-file")
     return parser.parse_args(argv)
@@ -518,6 +625,8 @@ def run(args, client):
         value, request_id, _ = client.request("GET", f"/v1/{kind}/{args.job_id}/outputs")
         return {**client.summary(value), "request_id": request_id}
     if cmd == "download":
+        if args.stage:
+            validate_id(args.stage)
         return client.download(args.job_id, args.output, stage=args.stage, artifact_id=args.artifact_id)
     if cmd in {"image", "edit"}:
         fields = {"model": "siyuan-image", "prompt": prompt(args), "n": 1, "response_format": "url",
@@ -532,10 +641,12 @@ def run(args, client):
             files = [("image", path) for path in args.image]
         return client.operate(args.operation_id, "/v1/images/" + ("edits" if cmd == "edit" else "generations"), fields, files)
     if cmd == "video":
+        options, _, _ = client.request("GET", "/v1/media/options")
+        negotiated = negotiated_video_fields(args, options)
         fields = {"model": "siyuan-video", "name": "WorkBuddy video", "prompt": prompt(args), "mode": args.mode,
                   "strategy": args.strategy, "duration": args.duration, "seed": args.seed,
                   "audio_policy": args.audio_policy, "watermark": args.watermark,
-                  "use_embedded_video_audio": args.use_embedded_video_audio}
+                  "use_embedded_video_audio": args.use_embedded_video_audio, **negotiated}
         files = []
         for item in args.asset:
             name, separator, path = item.partition("=")
@@ -550,13 +661,67 @@ def run(args, client):
             raise ClientError("invalid_action", "Images support cancellation without a stage.")
         path, fields = f"/v1/images/{args.job_id}/cancel", {}
     else:
-        if not args.job_id.startswith("vid_") or not args.stage:
-            raise ClientError("invalid_action", "Video actions require a video ID and a stage.")
+        if not args.job_id.startswith("vid_"):
+            raise ClientError("invalid_action", "Video actions require a video ID.")
+        if cmd == "cancel" and not args.stage:
+            job, _ = client.get(args.job_id)
+            active = [
+                stage
+                for stage in job.get("stages", [])
+                if stage.get("status") in {
+                    "queued",
+                    "running",
+                    "reconciling",
+                    "cancelling",
+                }
+            ]
+            if len(active) != 1:
+                raise ClientError(
+                    "invalid_action",
+                    "Video cancellation without --stage requires exactly one active stage.",
+                )
+            args.stage = active[0]["id"]
+        if not args.stage:
+            raise ClientError("invalid_action", "Video actions require a stage.")
+        validate_id(args.stage)
+        job, _ = client.get(args.job_id)
+        stages, index, stage = find_stage(job, args.stage)
         path = f"/v1/videos/{args.job_id}/stages/{args.stage}/{cmd}"
         fields = {} if cmd == "cancel" else {"output_id": validate_id(args.output_id)}
+        if cmd == "approve" and output_identifier(stage) != args.output_id:
+            raise ClientError("stale_stage_output", "Approval requires the current stage output_id.")
+        if cmd == "start":
+            if index == 0:
+                raise ClientError("invalid_action", "The first stage is started by video creation.")
+            previous = stages[index - 1]
+            if previous.get("status") != "approved" or output_identifier(previous) != args.output_id:
+                raise ClientError("stale_stage_output", "Start requires the approved predecessor output_id.")
+        if cmd == "regenerate":
+            if output_identifier(stage) != args.output_id:
+                raise ClientError("stale_review", "Regeneration requires the current output_id.")
+            current_review = review_identifier(stage)
+            if args.stage != "plan":
+                if not args.review_id or current_review != args.review_id:
+                    raise ClientError(
+                        "stale_review",
+                        "Generated-stage regeneration requires the current output_id and review_id.",
+                    )
+                fields["review_id"] = validate_id(args.review_id)
+            elif args.review_id:
+                raise ClientError("stale_review", "The plan stage does not use a quality review_id.")
+            if args.apply_suggestion:
+                if not current_review:
+                    raise ClientError("stale_review", "No current review suggestion is available.")
+                fields["apply_suggestion"] = True
+            if args.prompt_file:
+                fields["prompt"] = Path(args.prompt_file).read_text("utf-8")
         if cmd == "approve" and args.prompt_file:
-            if args.stage != "context_ir":
-                raise ClientError("invalid_action", "Only Context IR accepts an edited prompt.")
+            output = stage.get("output") if isinstance(stage, dict) else None
+            if args.stage != "context_ir" or not isinstance(output, dict) or output.get("content_type") != "text/plain":
+                raise ClientError(
+                    "invalid_action",
+                    "Only the legacy Context IR stage accepts an edited prompt during approval.",
+                )
             fields["prompt"] = Path(args.prompt_file).read_text("utf-8")
     return client.operate(args.operation_id, path, fields)
 

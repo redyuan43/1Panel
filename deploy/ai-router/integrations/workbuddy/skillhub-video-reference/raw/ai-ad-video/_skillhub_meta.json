@@ -1,0 +1,10 @@
+{
+  "name": "AI 广告视频",
+  "installedAt": 1788845549884,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508472006037504",
+  "description_zh": "基于 AI 广告视频 的 AI 视频生成器，通用商业场景搜索入口，底层调用 AI Hive 裸接口。当用户需要 AI 广告视频、AI广告、广告片、品牌广告、商业广告、信息流广告、Seedance、MiniMax H3、Happy Horse、AI视频 时使用此 Skill。",
+  "description_en": "Generic video generation skill for AI Ad Video scenarios. Model-agnostic, uses AI Hive open API. Use when users need this video scenario.",
+  "iconSource": "letter:auto"
+}

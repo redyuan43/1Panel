@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,22 @@ def private_write(path, content, mode=0o600):
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
+
+
+def private_executor_url(value):
+    parsed = urllib.parse.urlparse(value)
+    try:
+        address = ipaddress.ip_address(parsed.hostname or "")
+    except ValueError:
+        address = None
+    allowed = (
+        parsed.hostname in {"127.0.0.1", "localhost"}
+        or (parsed.hostname or "").endswith(".taild500c8.ts.net")
+        or bool(address and address in ipaddress.ip_network("100.64.0.0/10"))
+    )
+    if parsed.scheme != "http" or not allowed or parsed.path or parsed.username or parsed.password:
+        raise RuntimeError("H3 executor must be a private HTTP origin")
+    return value.rstrip("/")
 
 
 def service_info(name=SERVICE):
@@ -202,7 +219,8 @@ def functional_checks(key, operation):
     check("missing authentication", "/api/router/options", 401)
     check("invalid authentication", "/api/router/options", 401, key="invalid")
     options = check("authenticated options", "/api/router/options", 200, key=key)
-    if options["contract_version"] != 1 or options["stage_outputs"] != "immutable":
+    if (options["contract_version"] != 1 or options["stage_outputs"] != "immutable"
+            or options.get("workflow_contract_version") != 2):
         raise RuntimeError("Unexpected H3 Router contract")
     form = {"operation_id": operation, "name": "Router deployment acceptance (pending, no generation)",
             "mode": "t2v", "strategy": "fast", "prompt": "A red cube on a white table.",
@@ -327,7 +345,11 @@ def remote(payload):
     env_file = credential_dir / "router.env"
     if env_file.exists():
         shutil.copy2(env_file, backup / "router.env.before")
-    private_write(env_file, "H3_ROUTER_KEY=" + payload["key"] + "\n")
+    private_write(
+        env_file,
+        "H3_ROUTER_KEY=" + payload["key"] + "\n"
+        + "H3_LOCAL_EXECUTOR_URL=" + private_executor_url(payload["executor_url"]) + "\n",
+    )
     dropin = Path.home() / ".config/systemd/user" / (SERVICE + ".d") / "90-router-contract.conf"
     if dropin.exists():
         shutil.copy2(dropin, backup / "90-router-contract.conf.before")
@@ -391,10 +413,16 @@ def main():
     mode.add_argument("--verify", action="store_true", help="Verify an existing deployment without restarting")
     parser.add_argument("--host", default="edge")
     parser.add_argument("--expected-head", default=EXPECTED_HEAD)
+    parser.add_argument("--executor-url", default="http://100.96.79.21:8789")
     parser.add_argument("--key-file", type=Path, default=Path.home() / ".config/ai-router-media/h3-key")
     parser.add_argument("--report", type=Path, default=Path.home() / ".local/state/ai-router-acceptance/20260904-media-deploy/h3-deploy.json")
     args = parser.parse_args()
-    payload = {"deploy": args.deploy, "verify": args.verify, "expected_head": args.expected_head}
+    payload = {
+        "deploy": args.deploy,
+        "verify": args.verify,
+        "expected_head": args.expected_head,
+        "executor_url": private_executor_url(args.executor_url),
+    }
     if args.verify:
         payload["previous_report"] = json.loads(args.report.read_text())
     if args.deploy or args.verify:

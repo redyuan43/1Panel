@@ -1,0 +1,10 @@
+{
+  "name": "动态漫画",
+  "installedAt": 1788845552778,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508849485008896",
+  "description_zh": "基于 动态漫画 的 AI 视频生成器，通用商业场景搜索入口，底层调用 AI Hive 裸接口。当用户需要 动态漫画、动态漫、漫画转视频、漫画动起来、动画分镜、二次元动画、Seedance、MiniMax H3、Happy Horse、AI视频 时使用此 Skill。",
+  "description_en": "Generic video generation skill for Dynamic Comic Video scenarios. Model-agnostic, uses AI Hive open API. Use when users need this video scenario.",
+  "iconSource": "letter:auto"
+}

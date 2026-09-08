@@ -17,6 +17,19 @@ TERMINAL = {"completed", "failed", "cancelled"}
 USE_CASES = ("photo", "product", "ui", "infographic", "illustration", "logo")
 RATIOS = ("auto", "square", "landscape", "portrait")
 BACKGROUNDS = ("auto", "transparent", "opaque")
+VIDEO_WORKFLOW_MODES = ("quality_gate", "duration_ladder", "legacy_pipeline")
+VIDEO_CREATIVE_PROFILES = (
+    "auto",
+    "general",
+    "ecommerce",
+    "social_commerce",
+    "short_drama",
+    "dynamic_comic",
+    "tvc",
+    "ai_ad",
+    "seeding",
+)
+VIDEO_ASPECT_RATIOS = ("16:9", "9:16")
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 MAX_PIXELS = 40_000_000
@@ -112,14 +125,19 @@ def image_request(value: dict, edit: bool = False) -> dict:
 def video_request(value: dict) -> dict:
     allowed = {
         "model", "name", "prompt", "mode", "strategy", "duration", "seed", "audio_policy",
-        "watermark", "use_embedded_video_audio", "assets",
+        "watermark", "use_embedded_video_audio", "assets", "workflow_mode",
+        "creative_profile", "aspect_ratio",
     }
     if not isinstance(value, dict) or set(value) - allowed:
         raise MediaError("invalid_media_parameters", "Unsupported video parameters.")
     result = {
         "model": "siyuan-video", "name": "Video", "mode": "t2v", "strategy": "fast",
         "duration": 4, "seed": -1, "audio_policy": "native", "watermark": False,
-        "use_embedded_video_audio": False, "assets": {}, **value,
+        "use_embedded_video_audio": False, "assets": {},
+        # An omitted value means an older client. New clients explicitly send
+        # quality_gate so legacy callers keep their existing pipeline.
+        "workflow_mode": "legacy_pipeline", "creative_profile": "auto",
+        "aspect_ratio": "16:9", **value,
     }
     if result["model"] != "siyuan-video":
         raise MediaError("model_not_found", "Video model is not available.", 404)
@@ -130,6 +148,9 @@ def video_request(value: dict) -> dict:
     for field, options in (
         ("mode", ("t2v", "i2v", "l2v", "fl2v", "reference", "hybrid")),
         ("strategy", ("fast", "safe", "cloud")), ("audio_policy", ("native", "reference", "lock_source")),
+        ("workflow_mode", VIDEO_WORKFLOW_MODES),
+        ("creative_profile", VIDEO_CREATIVE_PROFILES),
+        ("aspect_ratio", VIDEO_ASPECT_RATIOS),
     ):
         if result[field] not in options:
             raise MediaError("invalid_media_parameters", f"Invalid {field}.")
@@ -171,6 +192,25 @@ def video_request(value: dict) -> dict:
         raise MediaError("missing_reference", "Audio locking requires a first frame and source audio.")
     if result["strategy"] == "cloud" and (result["mode"] == "hybrid" or result["audio_policy"] == "lock_source"):
         raise MediaError("invalid_media_parameters", "This mode does not support cloud acceleration.")
+    if result["workflow_mode"] != "legacy_pipeline" and result["strategy"] == "cloud":
+        raise MediaError(
+            "invalid_media_parameters",
+            "Managed customer workflows use Ivan local generation; cloud is available only in the legacy pipeline.",
+        )
+    if result["workflow_mode"] != "legacy_pipeline" and (
+        result["mode"] not in {"t2v", "i2v", "l2v", "fl2v"}
+        or result["audio_policy"] != "native"
+    ):
+        raise MediaError(
+            "invalid_media_parameters",
+            "Managed Ivan workflows currently support t2v/i2v/l2v/fl2v with native audio; "
+            "use legacy_pipeline for reference, hybrid, or source-locked audio.",
+        )
+    if result["workflow_mode"] == "duration_ladder" and result["duration"] != 15:
+        raise MediaError(
+            "invalid_media_parameters",
+            "The duration ladder produces approximately 5, 10 and 15 seconds and requires duration=15.",
+        )
     return result
 
 

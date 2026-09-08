@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import os
 try:
@@ -493,40 +494,82 @@ class H3Provider:
     def __init__(self, client: httpx.AsyncClient):
         self.client = client
         self.base = os.environ.get("AI_ROUTER_H3_URL", "http://edge.taild500c8.ts.net:8789").rstrip("/")
-        parsed = urlparse(self.base)
-        if parsed.scheme not in {"http", "https"} or not (
-            (parsed.hostname or "").endswith(".taild500c8.ts.net") or parsed.hostname in {"127.0.0.1", "localhost"}
-        ) or parsed.path or parsed.username or parsed.password:
-            raise ValueError("H3 must be a private direct endpoint")
+        self.executor_base = os.environ.get(
+            "AI_ROUTER_H3_EXECUTOR_URL",
+            "http://100.96.79.21:8789",
+        ).rstrip("/")
+        for value in (self.base, self.executor_base):
+            parsed = urlparse(value)
+            try:
+                address = ipaddress.ip_address(parsed.hostname or "")
+            except ValueError:
+                address = None
+            private = (
+                (parsed.hostname or "").endswith(".taild500c8.ts.net")
+                or parsed.hostname in {"127.0.0.1", "localhost"}
+                or bool(address and (
+                    address.is_loopback
+                    or address in ipaddress.ip_network("100.64.0.0/10")
+                ))
+            )
+            if parsed.scheme not in {"http", "https"} or not private or parsed.path or parsed.username or parsed.password:
+                raise ValueError("H3 must be a private direct endpoint")
 
-    async def call(self, method: str, path: str, **kwargs) -> dict:
+    async def call(self, method: str, path: str, *, executor=False, **kwargs) -> dict:
         key = os.environ.get("AI_ROUTER_H3_KEY", "")
         if not key:
             raise MediaError("h3_not_configured", "H3 contract credential is required.", 503)
+        base = self.executor_base if executor else self.base
         try:
             response = await self.client.request(
-                method, self.base + "/api/router" + path,
+                method, base + "/api/router" + path,
                 headers={"Authorization": f"Bearer {key}"}, timeout=30, **kwargs,
             )
         except httpx.HTTPError as exc:
             raise UnknownOutcome() from exc
         if response.status_code == 409:
             raise MediaError("stale_stage_output", "Stage state or output version has changed.", 409)
+        if response.status_code == 503:
+            raise MediaError("h3_unavailable", "No eligible Ivan H3 execution lane is available.", 503)
         if response.status_code >= 400:
-            raise MediaError("h3_request_failed", "H3 contract request failed.", 502)
+            detail = None
+            try:
+                payload = response.json()
+                value = payload.get("detail") if isinstance(payload, dict) else None
+                if isinstance(value, str):
+                    detail = value[:300]
+            except (ValueError, TypeError):
+                pass
+            raise MediaError(
+                "h3_request_failed",
+                "H3 contract request failed.",
+                502,
+                upstream_status=response.status_code,
+                **({"upstream_detail": detail} if detail else {}),
+            )
         return response.json()
 
     async def options(self) -> dict:
+        result = await self.call("GET", "/options", executor=True)
+        if result.get("contract_version") != 1:
+            raise MediaError("h3_contract_mismatch", "H3 versioned media contract is required.", 503)
+        return result
+
+    async def legacy_options(self) -> dict:
         result = await self.call("GET", "/options")
         if result.get("contract_version") != 1:
             raise MediaError("h3_contract_mismatch", "H3 versioned media contract is required.", 503)
         return result
 
     async def create(self, job: dict) -> dict:
-        await self.options()
+        await self.legacy_options()
         body = job["request"]
+        legacy_fields = {
+            "name", "prompt", "mode", "strategy", "duration", "seed", "audio_policy",
+            "watermark", "use_embedded_video_audio",
+        }
         data = {key: str(value).lower() if type(value) is bool else str(value)
-                for key, value in body.items() if key not in {"assets", "model"}}
+                for key, value in body.items() if key in legacy_fields}
         data["operation_id"] = job["id"] + "_create"
         extensions = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
                       "video/mp4": ".mp4", "video/webm": ".webm", "audio/wav": ".wav",
@@ -546,4 +589,56 @@ class H3Provider:
         return self.client.stream(
             "GET", self.base + f"/api/router/projects/{project_id}/outputs/{output_id}",
             headers={"Authorization": f"Bearer {key}"}, timeout=120,
+        )
+
+    async def create_execution(self, body: dict, assets: dict[str, dict]) -> dict:
+        capabilities = await self.options()
+        if int(capabilities.get("workflow_contract_version", 0)) < 2:
+            raise MediaError("h3_contract_mismatch", "H3 managed execution contract v2 is required.", 503)
+        data = {
+            key: json.dumps(value, ensure_ascii=False) if key == "metadata" else (
+                str(value).lower() if type(value) is bool else str(value)
+            )
+            for key, value in body.items()
+        }
+        extensions = {
+            "image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp",
+            "video/mp4": ".mp4", "video/webm": ".webm", "audio/wav": ".wav",
+            "audio/x-wav": ".wav", "audio/mpeg": ".mp3", "audio/mp4": ".m4a",
+            "audio/flac": ".flac",
+        }
+        files = {
+            name: (
+                name + extensions.get(asset["content_type"], ".bin"),
+                decode_asset(asset),
+                asset["content_type"],
+            )
+            for name, asset in assets.items()
+        }
+        return await self.call(
+            "POST",
+            "/executions",
+            executor=True,
+            data=data,
+            files=files or None,
+        )
+
+    async def get_execution(self, execution_id: str) -> dict:
+        return await self.call("GET", f"/executions/{execution_id}", executor=True)
+
+    async def cancel_execution(self, execution_id: str, operation_id: str) -> dict:
+        return await self.call(
+            "POST",
+            f"/executions/{execution_id}/cancel",
+            executor=True,
+            json={"operation_id": operation_id},
+        )
+
+    async def download_execution(self, execution_id: str):
+        key = os.environ.get("AI_ROUTER_H3_KEY", "")
+        return self.client.stream(
+            "GET",
+            self.executor_base + f"/api/router/executions/{execution_id}/output",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=300,
         )

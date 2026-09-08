@@ -51,13 +51,23 @@ One image is generated per operation. Mask editing is not supported.
 After the user confirms the initial Context IR cost:
 
 ```text
-python <cli> video --operation-id OP --prompt "A red cube rotates on a white table" --strategy fast --duration 4 --confirm-context-cost
+python <cli> options
+python <cli> video --operation-id OP --prompt "A red cube rotates on a white table" --workflow-mode quality_gate --creative-profile product --aspect-ratio 9:16 --strategy fast --duration 4 --confirm-context-cost
 python <cli> wait --job-id vid_... --seconds 30
 ```
 
-The returned stages define the actual pipeline; do not hard-code the fast
-pipeline for safe/cloud jobs. Display the current stage's `output.text`, or
-download its video using `download --stage STAGE`. Preserve its `output_id`.
+`quality_gate` is the default on a Router that publishes modern workflow
+options and generates each customer video as one continuous H3 execution.
+`duration_ladder` is currently shelved and must only be used if a future Router
+explicitly publishes it. `legacy_pipeline` preserves the original Context IR and H3 stage sequence.
+If an old Router omits `workflow_mode`, the CLI omits all three new fields and
+uses the legacy behavior. An explicitly requested modern mode is rejected
+instead of silently changing it.
+
+The returned stages define the actual pipeline; do not hard-code stage names.
+Display the current stage's `output.text` or download its video using
+`download --stage STAGE`. Also show `review.scores`, issue time ranges and the
+suggested prompt when present. Preserve the exact `output_id` and `review_id`.
 
 After the user approves exactly that output:
 
@@ -71,12 +81,30 @@ Only after a separate instruction to start the next stage:
 python <cli> start --operation-id ANOTHER_OP --job-id vid_... --stage preview --output-id out_APPROVED_PREDECESSOR --confirmed
 ```
 
-An edited Context IR may be approved with `--prompt-file "reviewed.txt"`.
-That file must contain the exact prompt reviewed by the user. Other stages
-cannot accept an edited prompt through `approve`.
+An edited legacy Context IR may be approved with `--prompt-file "reviewed.txt"`.
+A managed `plan` is an immutable package of prompt, storyboard and anchors; to
+change it, explicitly regenerate the plan rather than changing its text during
+approval:
+
+```text
+python <cli> regenerate --operation-id NEW_OP --job-id vid_... --stage plan --output-id out_REVIEWED --prompt-file "revised.txt" --confirmed
+```
+
+Quality review is advisory and never causes an automatic retry. After showing
+the review, obtain an explicit instruction before requesting regeneration:
+
+```text
+python <cli> regenerate --operation-id NEW_OP --job-id vid_... --stage preview --output-id out_REVIEWED --review-id rev_REVIEWED --apply-suggestion --confirmed
+```
+
+This creates a new attempt for the same stage. It does not approve the current
+version and does not start its successor.
 
 Strategies: `fast`, `safe`, `cloud`; duration 4-15 seconds.
 Modes: `t2v`, `i2v`, `l2v`, `fl2v`, `reference`, `hybrid`.
+Workflow modes: `quality_gate`, `duration_ladder`, `legacy_pipeline`.
+Creative profiles and video aspect ratios are server-published values; query
+`options` before using them.
 For non-text-only modes, first query `options` and match `required_assets`.
 Upload each required field with `--asset "FIELD=path/to/file"`.
 Audio settings: `--audio-policy native|reference|lock_source`;
@@ -92,8 +120,9 @@ and key, or queries the already accepted job:
 python <cli> resume --operation-id ORIGINAL_OP
 ```
 
-A 409 conflict means the reviewed version or request changed. Fetch current
-state and ask the user; never silently approve a replacement version.
+A 409 conflict means the reviewed output, review, or request changed. Fetch
+current state and ask the user; never silently approve or regenerate a
+replacement version.
 
 Only cancel when requested:
 

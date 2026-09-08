@@ -67,14 +67,29 @@ def verify_options(key):
         "cloud_upload_metadata_clean": "upload-cleaning",
         "stage_heartbeat": "stage heartbeat",
         "local_768_gpu_exclusive": "local GPU exclusivity guard",
+        "workflow_contract_version": "managed execution contract",
     }
     for field, label in required.items():
-        if options.get(field) is not True:
+        expected = 2 if field == "workflow_contract_version" else True
+        if options.get(field) != expected:
             raise RuntimeError(f"The live H3 {label} capability is absent.")
     status, _ = d.request("/api/router/options")
     if status != 401:
         raise RuntimeError("H3 options authentication regressed.")
     return options, status
+
+
+def verify_executor(url):
+    origin = d.private_executor_url(url)
+    with d.OPENER.open(origin + "/api/health", timeout=15) as response:
+        value = json.load(response)
+    healthy = [lane for lane in value.get("lanes", []) if lane.get("ok") and lane.get("enabled")]
+    if not value.get("ok") or len(healthy) < 2:
+        raise RuntimeError("Ivan H3 executor does not have two healthy lanes.")
+    return {
+        "origin": origin,
+        "healthy_lanes": [lane.get("id") for lane in healthy],
+    }
 
 
 def deploy(payload):
@@ -85,6 +100,7 @@ def deploy(payload):
               "scope": "H3 extension only", "billable_calls": 0, "generation_started": False}
     report["before"] = before = snapshot(database)
     require_idle(before)
+    report["executor"] = verify_executor(payload["executor_url"])
     if (before["head"] != payload["expected_head"]
             or before["main_sha256"] != payload["expected_main_sha256"]
             or set(before["dirty"].splitlines()) != {"M app/main.py", "?? app/router_contract.py"}):
@@ -97,7 +113,8 @@ def deploy(payload):
     key = env.get("H3_ROUTER_KEY")
     if not key:
         raise RuntimeError("The existing private H3 Router key is unavailable.")
-    if before["extension_sha256"] == target_extension_sha256:
+    if (before["extension_sha256"] == target_extension_sha256
+            and env.get("H3_LOCAL_EXECUTOR_URL") == payload["executor_url"]):
         _, unauthenticated_status = verify_options(key)
         report["checks"] = [
             {"path": "/api/router/options", "authenticated": False,
@@ -108,6 +125,7 @@ def deploy(payload):
         ]
         report["after"] = after = snapshot(database)
         require_idle(after)
+        runtime_env = d.environment()
         report["invariants"] = {
             "projects_unchanged": before["projects_sha256"] == after["projects_sha256"],
             "original_outputs_unchanged": before["outputs"] == after["outputs"],
@@ -115,6 +133,7 @@ def deploy(payload):
             "main_unchanged": before["main_sha256"] == after["main_sha256"],
             "extension_matches": after["extension_sha256"] == target_extension_sha256,
             "h3_pid_unchanged": before["service"]["MainPID"] == after["service"]["MainPID"],
+            "executor_configured": runtime_env.get("H3_LOCAL_EXECUTOR_URL") == payload["executor_url"],
         }
         if not all(report["invariants"].values()):
             raise RuntimeError("An already-current deployment preservation invariant failed.")
@@ -132,8 +151,11 @@ def deploy(payload):
     if integrity != "ok":
         raise RuntimeError("Online SQLite backup did not pass integrity_check.")
     original = extension.read_bytes()
+    env_file = Path.home() / ".config/h3-video-studio/router.env"
+    original_env = env_file.read_bytes()
     d.private_write(backup / "router_contract.py.before", original)
     d.private_write(backup / "main.py.before", (d.ROOT / "app/main.py").read_bytes())
+    d.private_write(backup / "router.env.before", original_env)
     report["backup"] = {"directory": str(backup), "database": str(database_copy),
                         "database_sha256": d.digest(database_copy), "integrity_check": integrity,
                         "method": "sqlite3.Connection.backup while H3 was running"}
@@ -142,6 +164,11 @@ def deploy(payload):
     stopped = False
     try:
         d.private_write(extension, payload["extension"], mode=0o644)
+        d.private_write(
+            env_file,
+            "H3_ROUTER_KEY=" + key + "\n"
+            + "H3_LOCAL_EXECUTOR_URL=" + payload["executor_url"] + "\n",
+        )
         preflight = subprocess.run([
             str(d.ROOT / ".venv/bin/python"), "-c",
             "import app.main as m; from app.router_contract import Contract; "
@@ -168,6 +195,7 @@ def deploy(payload):
                              "cloud_upload_metadata_clean": True, "stage_heartbeat": True,
                              "local_768_gpu_exclusive": True}]
         report["after"] = after = snapshot(database)
+        runtime_env = d.environment()
         invariants = {
             "projects_unchanged": before["projects_sha256"] == after["projects_sha256"],
             "original_outputs_unchanged": before["outputs"] == after["outputs"],
@@ -175,6 +203,7 @@ def deploy(payload):
             "main_unchanged": before["main_sha256"] == after["main_sha256"],
             "extension_matches": after["extension_sha256"] == target_extension_sha256,
             "h3_pid_changed": before["service"]["MainPID"] != after["service"]["MainPID"],
+            "executor_configured": runtime_env.get("H3_LOCAL_EXECUTOR_URL") == payload["executor_url"],
         }
         report["invariants"] = invariants
         if not all(invariants.values()):
@@ -184,6 +213,7 @@ def deploy(payload):
     except Exception as error:
         report["first_fatal"] = {"type": type(error).__name__, "message": str(error)}
         d.private_write(extension, original, mode=0o644)
+        d.private_write(env_file, original_env)
         if stopped:
             # Only roll back while idle. Never interrupt a newly started task.
             current = snapshot(database)
@@ -203,13 +233,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--execute", action="store_true", required=True)
     parser.add_argument("--report", type=Path, required=True)
+    parser.add_argument("--executor-url", default="http://100.96.79.21:8789")
     args = parser.parse_args()
     here = Path(__file__).resolve().parent
     payload = {
         "expected_head": d.EXPECTED_HEAD,
-        "expected_extension_sha256": "f48d563786f811a35026b44dfad6682d1e381fefc3e05feb1ff40d94ce2a5944",
+        "expected_extension_sha256": "04496a9bfd4a990f8b4e1116a51017ee3d3fc9f5333b7ae486ff2935035534be",
         "expected_main_sha256": "be3c21801e1fc6e56aa64b7d4b0f343e9ec4e64159d4790873bd59fae30030ba",
         "extension": (here / "router_contract.py").read_text(),
+        "executor_url": d.private_executor_url(args.executor_url),
     }
     remote = ("import types,sys,json; d=types.ModuleType('deploy_edge'); "
               "sys.modules['deploy_edge']=d; exec(" + repr((here / "deploy_edge.py").read_text()) + ",d.__dict__); "

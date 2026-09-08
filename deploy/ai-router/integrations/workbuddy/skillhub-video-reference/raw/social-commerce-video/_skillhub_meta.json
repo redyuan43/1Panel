@@ -1,0 +1,10 @@
+{
+  "name": "带货视频",
+  "installedAt": 1788845536083,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508664944021504",
+  "description_zh": "基于 带货视频 的 AI 视频生成器，通用商业场景搜索入口，底层调用 AI Hive 裸接口。当用户需要 带货视频、直播带货、短视频带货、商品种草、转化视频、卖货视频、Seedance、MiniMax H3、Happy Horse、AI视频 时使用此 Skill。",
+  "description_en": "Generic video generation skill for Social Commerce Video scenarios. Model-agnostic, uses AI Hive open API. Use when users need this video scenario.",
+  "iconSource": "letter:auto"
+}

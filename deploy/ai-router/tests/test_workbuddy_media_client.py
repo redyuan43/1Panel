@@ -475,16 +475,61 @@ def test_video_always_uses_multipart_without_printing_assets(configured, tmp_pat
                      "--asset", f"reference_image={image}", "--asset", f"reference_audio={audio}"])
     code, result, stdout = invoke(env, *args)
     assert code == 0 and result["id"].startswith("vid_")
-    request = env.peer.requests[0]
+    assert env.peer.requests[0].path == "/v1/media/options"
+    request = env.peer.requests[1]
     assert request.path == "/v1/videos" and request.headers["Prefer"] == "respond-async"
     parts = parse_multipart(request)
     fields = {name: data.decode() for name, filename, _, data in parts if not filename}
     assert fields["duration"] == "4" and fields["strategy"] == "safe"
     assert fields["watermark"] == "true" and fields["use_embedded_video_audio"] == "false"
+    assert not {"workflow_mode", "creative_profile", "aspect_ratio"} & fields.keys()
     files = {name: data for name, filename, _, data in parts if filename}
     assert files == ({"reference_image": ARTIFACT, "reference_audio": b"test-audio"} if with_assets else {})
     assert_no_secrets(stdout)
     assert_no_secrets(read_receipt(env, "video"))
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_video_negotiates_modern_workflow_options(configured, explicit):
+    env = configured
+    default = env.peer.reply
+
+    def reply(request):
+        if request.path == "/v1/media/options":
+            return 200, {
+                "enabled": True,
+                "videos": {
+                    "workflow_mode": ["quality_gate", "duration_ladder", "legacy_pipeline"],
+                    "creative_profile": {"values": ["general", "product"], "default": "general"},
+                    "aspect_ratio": ["9:16", "16:9"],
+                    "defaults": {"aspect_ratio": "9:16"},
+                },
+            }, {"X-Request-ID": "options-request"}
+        return default(request)
+
+    env.peer.reply = reply
+    args = ["video", "--operation-id", "modern", "--prompt", "A product rotates",
+            "--confirm-context-cost"]
+    if explicit:
+        args.extend(["--workflow-mode", "duration_ladder", "--creative-profile", "product",
+                     "--aspect-ratio", "16:9"])
+    code, result, _ = invoke(env, *args)
+    assert code == 0 and result["id"].startswith("vid_")
+    request = env.peer.effects[0]
+    fields = {name: data.decode() for name, filename, _, data in parse_multipart(request) if not filename}
+    assert fields["workflow_mode"] == ("duration_ladder" if explicit else "quality_gate")
+    assert fields["creative_profile"] == ("product" if explicit else "general")
+    assert fields["aspect_ratio"] == ("16:9" if explicit else "9:16")
+
+
+def test_explicit_modern_workflow_is_not_silently_downgraded(configured):
+    code, result, _ = invoke(
+        configured, "video", "--operation-id", "modern-on-legacy", "--prompt", "A scene",
+        "--workflow-mode", "quality_gate", "--confirm-context-cost",
+    )
+    assert code == 2 and result["error"]["code"] == "unsupported_media_option"
+    assert [request.path for request in configured.peer.requests] == ["/v1/media/options"]
+    assert configured.peer.effects == []
 
 
 @pytest.mark.parametrize("selection", ["final", "stage", "history"])
@@ -560,33 +605,136 @@ def test_approve_and_start_are_separate_versioned_operations(configured):
     env = configured
     env.peer.jobs["vid_review"] = {
         "id": "vid_review", "status": "in_progress",
-        "stages": [{"id": "preview", "status": "awaiting_approval",
-                    "output": published_output()}],
+        "stages": [
+            {"id": "plan_custom", "status": "approved",
+             "output": published_output(id="out_plan_delivery", output_id="out_plan")},
+            {"id": "preview_custom", "status": "awaiting_approval",
+             "output": published_output()},
+            {"id": "final_custom", "status": "pending"},
+        ],
     }
-    code, _, _ = invoke(env, "approve", "--job-id", "vid_review", "--stage", "preview",
+    code, _, _ = invoke(env, "approve", "--job-id", "vid_review", "--stage", "preview_custom",
                         "--output-id", "out_reviewed", "--operation-id", "approve", "--confirmed")
     assert code == 0
     assert [(r.method, r.path) for r in env.peer.requests] == [
-        ("POST", "/v1/videos/vid_review/stages/preview/approve"),
+        ("GET", "/v1/videos/vid_review"),
+        ("POST", "/v1/videos/vid_review/stages/preview_custom/approve"),
     ]
-    assert json.loads(env.peer.requests[0].body) == {"output_id": "out_reviewed"}
+    assert json.loads(env.peer.requests[1].body) == {"output_id": "out_reviewed"}
     assert invoke(env, "resume", "--operation-id", "approve")[0] == 0
     assert len(env.peer.effects) == 1 and env.peer.requests[-1].method == "GET"
-    code, _, _ = invoke(env, "start", "--job-id", "vid_review", "--stage", "local_768",
+    env.peer.jobs["vid_review"]["stages"][1]["status"] = "approved"
+    code, _, _ = invoke(env, "start", "--job-id", "vid_review", "--stage", "final_custom",
                         "--output-id", "out_reviewed", "--operation-id", "start", "--confirmed")
     assert code == 0
     assert [request.path for request in env.peer.effects] == [
-        "/v1/videos/vid_review/stages/preview/approve", "/v1/videos/vid_review/stages/local_768/start",
+        "/v1/videos/vid_review/stages/preview_custom/approve",
+        "/v1/videos/vid_review/stages/final_custom/start",
     ]
     assert [request.headers["Idempotency-Key"] for request in env.peer.effects] == ["wb-approve", "wb-start"]
     assert json.loads(env.peer.effects[1].body) == {"output_id": "out_reviewed"}
 
 
-@pytest.mark.parametrize("action", ["approve", "start", "video"])
+def test_regenerate_binds_current_output_and_review(configured):
+    env = configured
+    env.peer.jobs["vid_review"] = {
+        "id": "vid_review", "status": "in_progress",
+        "stages": [{
+            "id": "preview_custom", "status": "awaiting_approval",
+            "output": {
+                **published_output(),
+                "review": {
+                    "review_id": "rev_current",
+                    "semantic": {
+                        "verdict": "FAIL",
+                        "scores": {"identity": 62, "motion": 48},
+                        "issues": [{"start_seconds": 2.1, "end_seconds": 2.8,
+                                    "message": "Hand distortion"}],
+                        "revised_prompt": "Keep both hands anatomically stable.",
+                    },
+                },
+            },
+        }],
+    }
+    code, value, _ = invoke(
+        env, "status", "--job-id", "vid_review",
+    )
+    assert code == 0
+    review = value["stages"][0]["output"]["review"]
+    assert review["semantic"]["scores"] == {"identity": 62, "motion": 48}
+    assert review["semantic"]["issues"][0]["start_seconds"] == 2.1
+    code, _, _ = invoke(
+        env, "regenerate", "--job-id", "vid_review", "--stage", "preview_custom",
+        "--output-id", "out_reviewed", "--review-id", "rev_current",
+        "--apply-suggestion", "--operation-id", "regenerate", "--confirmed",
+    )
+    assert code == 0
+    assert env.peer.effects[-1].path == "/v1/videos/vid_review/stages/preview_custom/regenerate"
+    assert json.loads(env.peer.effects[-1].body) == {
+        "output_id": "out_reviewed", "review_id": "rev_current", "apply_suggestion": True,
+    }
+
+
+def test_plan_regeneration_uses_output_without_review(configured, tmp_path):
+    env = configured
+    prompt = tmp_path / "revised.txt"
+    prompt.write_text("Preserve all four approved anchor states.", encoding="utf-8")
+    env.peer.jobs["vid_plan"] = {
+        "id": "vid_plan",
+        "status": "in_progress",
+        "stages": [{
+            "id": "plan",
+            "status": "awaiting_approval",
+            "output": published_output(output_id="out_plan"),
+        }],
+    }
+    code, _, _ = invoke(
+        env,
+        "regenerate",
+        "--job-id", "vid_plan",
+        "--stage", "plan",
+        "--output-id", "out_plan",
+        "--prompt-file", str(prompt),
+        "--operation-id", "regenerate-plan",
+        "--confirmed",
+    )
+    assert code == 0
+    assert json.loads(env.peer.effects[-1].body) == {
+        "output_id": "out_plan",
+        "prompt": "Preserve all four approved anchor states.",
+    }
+
+
+@pytest.mark.parametrize("changed", ["output", "review"])
+def test_regenerate_rejects_stale_review_binding(configured, changed):
+    env = configured
+    env.peer.jobs["vid_review"] = {
+        "id": "vid_review", "status": "in_progress",
+        "stages": [{
+            "id": "preview", "status": "awaiting_approval",
+            "output": {**published_output(), "review": {"review_id": "rev_current"}},
+        }],
+    }
+    output_id = "out_old" if changed == "output" else "out_reviewed"
+    review_id = "rev_old" if changed == "review" else "rev_current"
+    code, value, _ = invoke(
+        env, "regenerate", "--job-id", "vid_review", "--stage", "preview",
+        "--output-id", output_id, "--review-id", review_id,
+        "--operation-id", "stale", "--confirmed",
+    )
+    assert code == 2 and value["error"]["code"] == "stale_review"
+    assert env.peer.effects == []
+
+
+@pytest.mark.parametrize("action", ["approve", "start", "regenerate", "video"])
 def test_mutations_require_explicit_confirmation_flags(configured, action):
-    arguments = (["video", "--prompt", "A cup", "--operation-id", "unconfirmed"] if action == "video"
-                 else [action, "--job-id", "vid_review", "--stage", "preview",
-                       "--output-id", "out_reviewed", "--operation-id", "unconfirmed"])
+    if action == "video":
+        arguments = ["video", "--prompt", "A cup", "--operation-id", "unconfirmed"]
+    else:
+        arguments = [action, "--job-id", "vid_review", "--stage", "preview",
+                     "--output-id", "out_reviewed", "--operation-id", "unconfirmed"]
+        if action == "regenerate":
+            arguments.extend(["--review-id", "rev_reviewed"])
     with pytest.raises(SystemExit) as error:
         configured.media.arguments(arguments)
     assert error.value.code == 2

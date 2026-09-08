@@ -1,0 +1,8 @@
+[Unit]
+Description=Aggregate memory guard for MiniMax H3 GPU workers
+
+[Slice]
+MemoryAccounting=yes
+MemoryHigh=72G
+MemoryMax=80G
+MemorySwapMax=8G

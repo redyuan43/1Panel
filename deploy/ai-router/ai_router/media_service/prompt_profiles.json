@@ -1,0 +1,237 @@
+{
+  "schema_version": 1,
+  "profile_set": "siyuan_h3_video",
+  "policy": {
+    "purpose": "Deterministic prompt planning and review guidance for the local H3 workflow.",
+    "derived_rules_only": true,
+    "runtime_code_imports": false,
+    "external_api_dependency": false,
+    "executable_scripts": false
+  },
+  "categories": {
+    "h3": {
+      "supported_modes": {
+        "t2va": {
+          "required_assets": [],
+          "timeline_goal": "Describe the complete audiovisual progression from text."
+        },
+        "i2va": {
+          "required_assets": [
+            "first_frame"
+          ],
+          "timeline_goal": "Begin exactly from the supplied first frame and develop forward."
+        },
+        "fl2va": {
+          "required_assets": [
+            "first_frame",
+            "last_frame"
+          ],
+          "timeline_goal": "Describe an observable continuous path from the first frame to the last frame."
+        },
+        "l2va": {
+          "required_assets": [
+            "last_frame"
+          ],
+          "timeline_goal": "Infer a plausible opening and converge exactly to the supplied last frame."
+        },
+        "ref2va": {
+          "required_assets": [
+            "reference_media"
+          ],
+          "timeline_goal": "State what each reference controls and preserve stable reference labels."
+        }
+      },
+      "base_section_order": [
+        "integrated_multimodal_description",
+        "overall_soundscape",
+        "non_diegetic_music"
+      ],
+      "reference_section_order": [
+        "subject_definitions",
+        "summary",
+        "retention_analysis",
+        "detailed_description",
+        "overall_soundscape",
+        "non_diegetic_music"
+      ],
+      "rules": [
+        {
+          "id": "h3-language",
+          "requirement": "Render structural prompt sections in English while preserving dialogue, lyrics, and visible text in their requested language."
+        },
+        {
+          "id": "h3-timeline",
+          "requirement": "Use explicit time ranges whose total matches the requested duration and describe visible intermediate changes rather than only start and end states."
+        },
+        {
+          "id": "h3-reference-labels",
+          "requirement": "Assign every reference a stable label and state whether it controls identity, appearance, product, style, motion, camera, or sound."
+        },
+        {
+          "id": "h3-sound-separation",
+          "requirement": "Separate diegetic action and ambience from non-diegetic music."
+        },
+        {
+          "id": "h3-no-generic-negative-field",
+          "requirement": "Express concrete continuity constraints in the positive plan; do not inject a generic negative-prompt template into an unsupported field."
+        }
+      ]
+    },
+    "cinematography": {
+      "shot_fields": [
+        "time_range",
+        "narrative_function",
+        "subject",
+        "action",
+        "expression",
+        "environment",
+        "shot_size",
+        "camera_position",
+        "focal_length",
+        "composition",
+        "depth_of_field",
+        "camera_motion",
+        "lighting",
+        "color_temperature",
+        "materials",
+        "sound"
+      ],
+      "rules": [
+        {
+          "id": "camera-primary-motion",
+          "requirement": "Use one dominant camera movement per generated segment and specify its direction, amplitude, and speed."
+        },
+        {
+          "id": "segment-single-action",
+          "requirement": "Keep each H3 segment centered on one continuous, observable action even when the overall plan contains multiple shots."
+        },
+        {
+          "id": "continuity-lexicon",
+          "requirement": "Reuse the same canonical wording for recurring people, wardrobe, props, environment, lighting, and materials."
+        },
+        {
+          "id": "composition-purpose",
+          "requirement": "Every framing or camera change must support a stated narrative or product-display purpose."
+        }
+      ]
+    },
+    "first_last_frame": {
+      "approval_requirements": [
+        "Both boundary assets exist before FL2VA execution.",
+        "Each boundary asset has an immutable asset identifier and SHA-256.",
+        "The customer-approved prompt version names the exact boundary asset versions."
+      ],
+      "segment_prompt_order": [
+        "first_frame_state",
+        "observable_transition_path",
+        "last_frame_convergence"
+      ],
+      "parallel_split": {
+        "allowed_when": [
+          "Every adjacent segment shares the same approved boundary asset.",
+          "Actions have natural boundary states.",
+          "Identity, wardrobe, props, environment, lighting, and camera constraints are global.",
+          "A continuous audio plan exists independently of segment generation."
+        ],
+        "disallowed_when": [
+          "Dialogue or lip movement crosses a boundary.",
+          "A continuous camera move crosses a boundary.",
+          "Fast action, object handoff, or complex physical motion crosses a boundary.",
+          "Precise musical timing spans multiple segments."
+        ]
+      },
+      "stitching_rules": [
+        "Use the same boundary image as the previous segment's last frame and the next segment's first frame.",
+        "Remove the duplicate first boundary frame from every segment after the first.",
+        "Keep frame rate, color characteristics, dimensions, and encoding settings consistent.",
+        "Report measured duration instead of assuming the requested nominal duration."
+      ],
+      "audio_rules": [
+        "Prefer one continuous source or final track for the complete composition.",
+        "Do not treat independently generated segment audio as a continuous dialogue track.",
+        "Only use short normalized crossfades for non-dialogue ambience when no continuous source exists."
+      ]
+    },
+    "commercial": {
+      "global_rules": [
+        "Do not invent price, efficacy, certification, availability, brand ownership, or legal claims.",
+        "Keep supplied product geometry, material, labeling, and visible text stable.",
+        "End advertising-oriented videos with a deliberate product or brand state instead of an accidental final frame."
+      ],
+      "profiles": {
+        "ecommerce": [
+          "Describe product structure, material, demonstration action, use context, and verified benefit as separate fields."
+        ],
+        "social_commerce": [
+          "Use the sequence problem, use process, observable benefit, and call to action without unsupported claims."
+        ],
+        "seeding": [
+          "Favor credible first-person discovery, concrete use details, and an honest recommendation tone."
+        ],
+        "tvc": [
+          "Give every shot a brand-building purpose and reserve a stable closing beat for the product or mark."
+        ],
+        "ai_ad": [
+          "Establish the subject quickly, create one memorable visual transformation, and finish with clear brand information."
+        ],
+        "short_drama": [
+          "Lock character, wardrobe, location, and visual style before generation; keep one continuous dramatic action per segment."
+        ],
+        "dynamic_comic": [
+          "Lock character sheets, art style, panel composition, and shot plan before animating individual segments."
+        ]
+      }
+    },
+    "quality_feedback": {
+      "technical_checks": [
+        "container_decode",
+        "dimensions",
+        "frame_rate",
+        "frame_count",
+        "measured_duration",
+        "audio_stream",
+        "black_frames",
+        "frozen_frames",
+        "boundary_discontinuity",
+        "artifact_sha256"
+      ],
+      "semantic_scores": [
+        "prompt_adherence",
+        "identity_consistency",
+        "temporal_coherence",
+        "anatomy_and_geometry",
+        "camera_execution",
+        "visible_text_and_brand",
+        "audio_visual_sync",
+        "segment_boundaries"
+      ],
+      "verdicts": [
+        "pass",
+        "conditional_pass",
+        "fail"
+      ],
+      "rules": [
+        {
+          "id": "review-binding",
+          "requirement": "Bind every review to the exact output identifier, prompt version, input hashes, and output SHA-256."
+        },
+        {
+          "id": "feedback-scope",
+          "requirement": "Translate each issue into a time range, severity, affected prompt field, and minimal revision; leave unrelated fields unchanged."
+        },
+        {
+          "id": "no-auto-approval",
+          "requirement": "A model verdict may recommend approval or regeneration but never approves a customer stage."
+        },
+        {
+          "id": "no-auto-retry",
+          "requirement": "Generate a revised prompt suggestion without submitting a new generation task until the customer explicitly requests regeneration."
+        },
+        {
+          "id": "learning-gate",
+          "requirement": "Only customer-approved successful outputs may become reusable examples or preference data."
+        }
+      ]
+    }
+  }
+}

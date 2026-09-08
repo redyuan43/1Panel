@@ -1,0 +1,1122 @@
+{
+  "schema_version": 1,
+  "archive_created_at": "2026-09-08T16:12:52+08:00",
+  "source": {
+    "host": "ivan-laptop",
+    "path": "C:\\Users\\Ivan\\.workbuddy\\skills",
+    "transport": "ssh tar stream"
+  },
+  "archive_policy": {
+    "usage": "reference_only",
+    "runtime_import_allowed": false,
+    "script_execution_allowed": false,
+    "requested_directory_count": 19,
+    "supplemental_directory_count": 1,
+    "captured_directory_count": 20,
+    "captured_file_count": 112,
+    "excluded_private_state": [
+      "user credential stores",
+      "live API keys and tokens",
+      "generated task records and downloads",
+      "workstation-private configuration outside selected skill directories"
+    ],
+    "placeholder_examples_retained": true
+  },
+  "builtin_capabilities": [
+    {
+      "display_name": "Excel file processing",
+      "implementation": "WorkBuddy built-in",
+      "copied": false,
+      "reason": "app.asar is not a user skill archive"
+    },
+    {
+      "display_name": "Word document generation",
+      "implementation": "WorkBuddy built-in",
+      "copied": false,
+      "reason": "app.asar is not a user skill archive"
+    },
+    {
+      "display_name": "PDF document generation",
+      "implementation": "WorkBuddy built-in",
+      "copied": false,
+      "reason": "app.asar is not a user skill archive"
+    }
+  ],
+  "logical_mappings": [
+    {
+      "display_name": "MiniMax H3 prompt writing",
+      "directories": [
+        "h3-prompt-writing"
+      ]
+    },
+    {
+      "display_name": "MiniMax H3 video generation",
+      "directories": [
+        "minimax-h3"
+      ]
+    },
+    {
+      "display_name": "AI video generation",
+      "directories": [
+        "video-generation"
+      ]
+    },
+    {
+      "display_name": "Cinematic shot prompt expert",
+      "directories": [
+        "cinematic-shot-prompt-expert"
+      ]
+    },
+    {
+      "display_name": "Image to video",
+      "directories": [
+        "image-to-video",
+        "minimax-h3-image-to-video"
+      ],
+      "supplemental_alias": "minimax-h3-image-to-video"
+    },
+    {
+      "display_name": "MiniMax H3 video generation and editing",
+      "directories": [
+        "minimax-h3-video-generation-and-editing"
+      ]
+    },
+    {
+      "display_name": "Image reference to video",
+      "directories": [
+        "image-reference-to-video",
+        "minimax-h3-image-reference-to-video"
+      ]
+    },
+    {
+      "display_name": "Seeding video",
+      "directories": [
+        "seeding-video",
+        "minimax-h3-seeding-video"
+      ]
+    },
+    {
+      "display_name": "Social commerce video",
+      "directories": [
+        "social-commerce-video",
+        "minimax-h3-social-commerce-video"
+      ]
+    },
+    {
+      "display_name": "Short drama video",
+      "directories": [
+        "short-drama-video"
+      ]
+    },
+    {
+      "display_name": "Dynamic comic video",
+      "directories": [
+        "dynamic-comic-video"
+      ]
+    },
+    {
+      "display_name": "Ecommerce video",
+      "directories": [
+        "ecommerce-video"
+      ]
+    },
+    {
+      "display_name": "TVC video",
+      "directories": [
+        "tvc-video"
+      ]
+    },
+    {
+      "display_name": "AI advertising video",
+      "directories": [
+        "ai-ad-video"
+      ]
+    },
+    {
+      "display_name": "First-last-frame to video",
+      "directories": [
+        "first-last-frame-to-video"
+      ]
+    },
+    {
+      "display_name": "Image prompt",
+      "directories": [
+        "image-prompt-skill__skillhub"
+      ]
+    }
+  ],
+  "skills": [
+    {
+      "directory": "h3-prompt-writing",
+      "capture_class": "requested",
+      "display_name": "MiniMax H3 提示词编写",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2095195552571396096",
+      "canonical_name": null,
+      "installed_at_ms": 1788845456689,
+      "installed_at_utc": "2026-09-08T05:30:56.689000+00:00",
+      "file_count": 6,
+      "tree_sha256": "066d04d2ed9a5fac1032267815cb51657eff0ccb51250337c9e5495f20f7eff6",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": false
+    },
+    {
+      "directory": "minimax-h3",
+      "capture_class": "requested",
+      "display_name": "MiniMax H3 视频生成",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087447306503159808",
+      "canonical_name": null,
+      "installed_at_ms": 1788845458880,
+      "installed_at_utc": "2026-09-08T05:30:58.880000+00:00",
+      "file_count": 5,
+      "tree_sha256": "72a890ec6a8666f5e71510017348a068adf7cc4d4dbc767b80aaed163f988a05",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "video-generation",
+      "capture_class": "requested",
+      "display_name": "AI 视频生成",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087496014908571648",
+      "canonical_name": null,
+      "installed_at_ms": 1788845454003,
+      "installed_at_utc": "2026-09-08T05:30:54.003000+00:00",
+      "file_count": 5,
+      "tree_sha256": "b5c5bf9a59ddb1d6e5394b2733a18122671e5f8306f166a2fae458d5f22c57aa",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "cinematic-shot-prompt-expert",
+      "capture_class": "requested",
+      "display_name": "电影级镜头提示词专家",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2095295003900637184",
+      "canonical_name": null,
+      "installed_at_ms": 1788845469403,
+      "installed_at_utc": "2026-09-08T05:31:09.403000+00:00",
+      "file_count": 5,
+      "tree_sha256": "4eabb196287df382194acb8089e291a0637c1fe5bd81c4567ba470edc82ecf22",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": "MIT",
+        "status": "declared_in_skill_metadata"
+      },
+      "contains_network_capable_script": false
+    },
+    {
+      "directory": "image-to-video",
+      "capture_class": "requested",
+      "display_name": "图生视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508115529375744",
+      "canonical_name": null,
+      "installed_at_ms": 1788845539203,
+      "installed_at_utc": "2026-09-08T05:32:19.203000+00:00",
+      "file_count": 5,
+      "tree_sha256": "523291a3ac0dc9f7925bafd51e57bf04ee0c1c51dfb11a0bdf7dab1e529bda52",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "minimax-h3-video-generation-and-editing",
+      "capture_class": "requested",
+      "display_name": "Minimax H3 视频生成与编辑",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2089189570053644288",
+      "canonical_name": null,
+      "installed_at_ms": 1788845461424,
+      "installed_at_utc": "2026-09-08T05:31:01.424000+00:00",
+      "file_count": 5,
+      "tree_sha256": "52d5906eefc7fe9f5fdc6c862cf4a2f614f41f93d1b63ca62b4f01563b3f5244",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "image-reference-to-video",
+      "capture_class": "requested",
+      "display_name": "参考图生视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508260600676352",
+      "canonical_name": null,
+      "installed_at_ms": 1788845554134,
+      "installed_at_utc": "2026-09-08T05:32:34.134000+00:00",
+      "file_count": 5,
+      "tree_sha256": "d201327950fdea8f3b402991749fb981fb296a7fce8f7f698ca9bc1872bb21f0",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "minimax-h3-image-reference-to-video",
+      "capture_class": "requested",
+      "display_name": "MiniMax H3 参考图生视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087463228060172288",
+      "canonical_name": null,
+      "installed_at_ms": 1788845462535,
+      "installed_at_utc": "2026-09-08T05:31:02.535000+00:00",
+      "file_count": 5,
+      "tree_sha256": "b3a5ece1225693da676136635c2190c7a92f3389884642199fd78d0881f8fcb5",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "seeding-video",
+      "capture_class": "requested",
+      "display_name": "种草视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508711124738048",
+      "canonical_name": null,
+      "installed_at_ms": 1788845546457,
+      "installed_at_utc": "2026-09-08T05:32:26.457000+00:00",
+      "file_count": 5,
+      "tree_sha256": "79b308d601e4ee3983dec692e03863767d8ac84e94c1d54e033a167ebb33707a",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "minimax-h3-seeding-video",
+      "capture_class": "requested",
+      "display_name": "MiniMax H3 种草视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087495322897637376",
+      "canonical_name": null,
+      "installed_at_ms": 1788845463990,
+      "installed_at_utc": "2026-09-08T05:31:03.990000+00:00",
+      "file_count": 5,
+      "tree_sha256": "0f143647a6c07fa39bf9d9168141cce49fc951a5fafd18692ed1c9a43c8fac7a",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "social-commerce-video",
+      "capture_class": "requested",
+      "display_name": "带货视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508664944021504",
+      "canonical_name": null,
+      "installed_at_ms": 1788845536083,
+      "installed_at_utc": "2026-09-08T05:32:16.083000+00:00",
+      "file_count": 5,
+      "tree_sha256": "7532ec97d3f16917b542d767666a243c04a7ddd746a45bdcd6679928b8b6ef4e",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "minimax-h3-social-commerce-video",
+      "capture_class": "requested",
+      "display_name": "MiniMax H3 带货视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087495272570183680",
+      "canonical_name": null,
+      "installed_at_ms": 1788845551241,
+      "installed_at_utc": "2026-09-08T05:32:31.241000+00:00",
+      "file_count": 5,
+      "tree_sha256": "5968887095215a535b432866ce44ef62cc509270c096d01b765dc5910d74bb05",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "short-drama-video",
+      "capture_class": "requested",
+      "display_name": "短剧视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508899912015872",
+      "canonical_name": null,
+      "installed_at_ms": 1788845535134,
+      "installed_at_utc": "2026-09-08T05:32:15.134000+00:00",
+      "file_count": 5,
+      "tree_sha256": "a41a903b9f46ad48949acda672ec1e7ee4672c1a57fa6183cb81a123dd1d4b8b",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "dynamic-comic-video",
+      "capture_class": "requested",
+      "display_name": "动态漫画",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508849485008896",
+      "canonical_name": null,
+      "installed_at_ms": 1788845552778,
+      "installed_at_utc": "2026-09-08T05:32:32.778000+00:00",
+      "file_count": 5,
+      "tree_sha256": "8611bb931b5fbf4cd85e9c1e1d7355b38194c8c318d4cd294b8c4401c47eb1ab",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "ecommerce-video",
+      "capture_class": "requested",
+      "display_name": "电商视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508681721237504",
+      "canonical_name": null,
+      "installed_at_ms": 1788845537283,
+      "installed_at_utc": "2026-09-08T05:32:17.283000+00:00",
+      "file_count": 5,
+      "tree_sha256": "b9a221b584c5194d74b93b887bb3bd21d992349d0e57702b1c97430d3e573e4f",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "tvc-video",
+      "capture_class": "requested",
+      "display_name": "TVC 广告片",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508660788895744",
+      "canonical_name": null,
+      "installed_at_ms": 1788845544949,
+      "installed_at_utc": "2026-09-08T05:32:24.949000+00:00",
+      "file_count": 5,
+      "tree_sha256": "73c55e232c755eb69bfdb5c6a5b520f373b31075c27d10fbe15ccb0dd07633ae",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "ai-ad-video",
+      "capture_class": "requested",
+      "display_name": "AI 广告视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508472006037504",
+      "canonical_name": null,
+      "installed_at_ms": 1788845549884,
+      "installed_at_utc": "2026-09-08T05:32:29.884000+00:00",
+      "file_count": 5,
+      "tree_sha256": "a401b86400687258adc956ea28134d467a68cffae3623a925e3e8c8bf98a7c76",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "first-last-frame-to-video",
+      "capture_class": "requested",
+      "display_name": "首尾帧生视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087508228748988416",
+      "canonical_name": null,
+      "installed_at_ms": 1788845555925,
+      "installed_at_utc": "2026-09-08T05:32:35.925000+00:00",
+      "file_count": 5,
+      "tree_sha256": "e3629fe42979fbd0ae3441dbf98312d327153bb4c1336ff0869408dac2df7ab6",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    },
+    {
+      "directory": "image-prompt-skill__skillhub",
+      "capture_class": "requested",
+      "display_name": "提示词生成大师",
+      "source": "skillhub",
+      "version": "1.0.15",
+      "skill_id": null,
+      "canonical_name": "@user_5d00e27d/image-prompt-skill",
+      "installed_at_ms": 1788539707943,
+      "installed_at_utc": "2026-09-04T16:35:07.943000+00:00",
+      "file_count": 16,
+      "tree_sha256": "e403e58ff7eb3b73c6cac8cf68c65d2535dbe97865b870a948bee158113031f7",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": false
+    },
+    {
+      "directory": "minimax-h3-image-to-video",
+      "capture_class": "supplemental_alias",
+      "display_name": "MiniMax H3 图生视频",
+      "source": "marketplace",
+      "version": "1.0.0",
+      "skill_id": "skill_2087462416896397312",
+      "canonical_name": null,
+      "installed_at_ms": 1788845465450,
+      "installed_at_utc": "2026-09-08T05:31:05.450000+00:00",
+      "file_count": 5,
+      "tree_sha256": "16db0cb4484fcc9f99c6d05ddc731f8aa626ed7aa8efe58926278b2f99b26e38",
+      "license": {
+        "files": [],
+        "declared_in_skill_metadata": null,
+        "status": "not_declared_in_captured_files"
+      },
+      "contains_network_capable_script": true
+    }
+  ],
+  "external_api_risk": {
+    "affected_directories": [
+      "minimax-h3",
+      "video-generation",
+      "image-to-video",
+      "minimax-h3-video-generation-and-editing",
+      "image-reference-to-video",
+      "minimax-h3-image-reference-to-video",
+      "seeding-video",
+      "minimax-h3-seeding-video",
+      "social-commerce-video",
+      "minimax-h3-social-commerce-video",
+      "short-drama-video",
+      "dynamic-comic-video",
+      "ecommerce-video",
+      "tvc-video",
+      "ai-ad-video",
+      "first-last-frame-to-video",
+      "minimax-h3-image-to-video"
+    ],
+    "observed_capabilities": [
+      "read an API key from a command argument, environment variable, or user config file",
+      "override the API base URL and send bearer authorization to that destination",
+      "upload local image, video, or audio assets",
+      "query models and prices, create potentially billable tasks, and poll task status",
+      "download generated artifacts and create local directories",
+      "open a browser and write or chmod a user configuration file during initialization"
+    ],
+    "mitigation": "Archive files are non-executable reference material and are forbidden as runtime imports or subprocess targets."
+  },
+  "files": [
+    {
+      "path": "raw/ai-ad-video/CHANGELOG.md",
+      "size": 517,
+      "sha256": "faf9383be8a7b84c2e72e8d6b5c0d24b83b7dbdeff73014ef9aefc1a4e91c388"
+    },
+    {
+      "path": "raw/ai-ad-video/SKILL.md",
+      "size": 8958,
+      "sha256": "95bea60b4d863c72033402244e0fc4c56111946f2eb2af39de26d499f449a6d6"
+    },
+    {
+      "path": "raw/ai-ad-video/_skillhub_meta.json",
+      "size": 657,
+      "sha256": "5dc3733e6a03d40e4d28027babfeb73eb6168bb6818c273759c2055407939c8e"
+    },
+    {
+      "path": "raw/ai-ad-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/ai-ad-video/scripts/videogen.py",
+      "size": 32811,
+      "sha256": "969e49fb4e556aeef8fb4fa21d4be5073e9b325c6bc514d3ccd43a1669b885a2"
+    },
+    {
+      "path": "raw/cinematic-shot-prompt-expert/SKILL.md",
+      "size": 8167,
+      "sha256": "95ea145eefc66e89bb8ab97ec304f76c98bbd6d0512c7e7b644449f4cc1cd35d"
+    },
+    {
+      "path": "raw/cinematic-shot-prompt-expert/_icon.png",
+      "size": 322061,
+      "sha256": "7ebb9b34f863d0f41aa77f0435327e6e853c1cd55883271a5497ae386da92235"
+    },
+    {
+      "path": "raw/cinematic-shot-prompt-expert/_skillhub_meta.json",
+      "size": 2275,
+      "sha256": "db10f4c238677815d02d89132b96a6740fb8b011fd51ae82d03071240a00bd17"
+    },
+    {
+      "path": "raw/cinematic-shot-prompt-expert/references/50镜提示词库.md",
+      "size": 22505,
+      "sha256": "75366365bcedf98a2f1d0b7eceb8d2d317284ab6bf4689f034bbb87cad944ede"
+    },
+    {
+      "path": "raw/cinematic-shot-prompt-expert/references/组合与纪律.md",
+      "size": 3644,
+      "sha256": "39be995ad742c2a98ba850e69fde80b96a84a082327098b9d92a03a7adefeaf6"
+    },
+    {
+      "path": "raw/dynamic-comic-video/CHANGELOG.md",
+      "size": 532,
+      "sha256": "05d8322bf33e448a444a0ab245925dc91e4afd17e6f1eb73a98d9b64193c13a1"
+    },
+    {
+      "path": "raw/dynamic-comic-video/SKILL.md",
+      "size": 8997,
+      "sha256": "72148432bad05ec925a06978db3b59e5793b20f74ba6202611cc3b85cc4bf47f"
+    },
+    {
+      "path": "raw/dynamic-comic-video/_skillhub_meta.json",
+      "size": 666,
+      "sha256": "2e4a57995eb574d19b78249c953b20be3d606e540bf4f4ec3de2cca4ac43a439"
+    },
+    {
+      "path": "raw/dynamic-comic-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/dynamic-comic-video/scripts/videogen.py",
+      "size": 32820,
+      "sha256": "86341ffc1bd28f49b6cbf7a3d83e74fe2452ea41492474328a1b8aaf1c1a4c0b"
+    },
+    {
+      "path": "raw/ecommerce-video/CHANGELOG.md",
+      "size": 528,
+      "sha256": "9f615fa36844dab5d94f664932999cf182fab733ea4e6d9ae7d3b5a7b1f6025c"
+    },
+    {
+      "path": "raw/ecommerce-video/SKILL.md",
+      "size": 8977,
+      "sha256": "cd4c634d2f611bd692efc57a6c3fc23ef7e6cc09fc2700117b6ea80d581fb7ac"
+    },
+    {
+      "path": "raw/ecommerce-video/_skillhub_meta.json",
+      "size": 662,
+      "sha256": "e1675c0f876117c64480f590b39f3b203fdc35e84075da65a120a616c5db00b0"
+    },
+    {
+      "path": "raw/ecommerce-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/ecommerce-video/scripts/videogen.py",
+      "size": 32816,
+      "sha256": "5a4d51552e3fcf27f15cf32d20c9172c1501f57e48ce43319f4e5dddf7dcdddc"
+    },
+    {
+      "path": "raw/first-last-frame-to-video/CHANGELOG.md",
+      "size": 550,
+      "sha256": "0685ada951df4f11ac33034412cbf504307db016239cf35725d9f2fc4378fa5d"
+    },
+    {
+      "path": "raw/first-last-frame-to-video/SKILL.md",
+      "size": 9073,
+      "sha256": "300136a922311c4bb1aa751d087af55a831bb4a29aa0b73c9e3a7cd09f47fecb"
+    },
+    {
+      "path": "raw/first-last-frame-to-video/_skillhub_meta.json",
+      "size": 717,
+      "sha256": "a851b4b70f2f15b80443bf84929cec68b540cbba61b2f443b15e384e62dd5472"
+    },
+    {
+      "path": "raw/first-last-frame-to-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/first-last-frame-to-video/scripts/videogen.py",
+      "size": 32799,
+      "sha256": "d6da5f730c7fac3c970139b5c20fe041c6a2a0918a3d57a79bb3b0ed13d06e69"
+    },
+    {
+      "path": "raw/h3-prompt-writing/SKILL.md",
+      "size": 3428,
+      "sha256": "c846575a98cee189929ae681e748b91f21d66a98edcd842b4697097cd60b7128"
+    },
+    {
+      "path": "raw/h3-prompt-writing/_icon.png",
+      "size": 38621,
+      "sha256": "72a37529da488fb96a9c97044a2348d1934ca926bf69b5d71954b8f02154d228"
+    },
+    {
+      "path": "raw/h3-prompt-writing/_skillhub_meta.json",
+      "size": 1253,
+      "sha256": "98e277cb9f25b48e644d38de7450631f3539611674ebf031cce1953fe01797e7"
+    },
+    {
+      "path": "raw/h3-prompt-writing/agents/openai.yaml",
+      "size": 240,
+      "sha256": "7770c9d784b7251ab882ee29a738219a3f01811e57ba7fc7822fa83eb8438c1a"
+    },
+    {
+      "path": "raw/h3-prompt-writing/references/base-en.txt",
+      "size": 15773,
+      "sha256": "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
+    },
+    {
+      "path": "raw/h3-prompt-writing/references/ref-en.txt",
+      "size": 23553,
+      "sha256": "1e574f356716ad55612247ffb7bbccbcdb484ad96599d63c7dca1af186b1fab7"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/SKILL.md",
+      "size": 21274,
+      "sha256": "39702e796f77bae15eea3c1501fa48e8a56ed99751bc6ee2f95a2ff397083964"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/_icon.png",
+      "size": 1577,
+      "sha256": "ee2e706c86cda03f66c5aa286de9d5da3195cb9a3a1882a0abc34d47b401d161"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/_skillhub_meta.json",
+      "size": 949,
+      "sha256": "810617026488cbfd1366ada8796cf39320d8bfe23d5dd055bdada08810dc4f7c"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/rules/negative-build.md",
+      "size": 1832,
+      "sha256": "1e90d44fd9191ec278b32c06bf038df64d010b67617d3887559e75c02e2c9a7e"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/rules/positive-build.md",
+      "size": 2417,
+      "sha256": "b4413c44ebb99363217e0b0a1f8c92f3be595762136189646314cb81f4c360c3"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/rules/safety-check.md",
+      "size": 1071,
+      "sha256": "ac19094544639a3f27e52a779eea9055ac2421a27746609b26014aebd9c82518"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/rules/teach-mode.md",
+      "size": 2859,
+      "sha256": "52f33aea2891edaee19661ca5fef91c15c5634af89e957e34c3ae6b71d621bff"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/decompile-image.md",
+      "size": 2533,
+      "sha256": "bd21f58634dab6073a385d87237a06680bf61271d81f1c60b10f6beb1dedd50a"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/decompile-video.md",
+      "size": 2111,
+      "sha256": "99a5980ef78825672f7c98fbac92c8f5856ad5d3bbdc04f227aaec4a6036bd3e"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/image-fields.md",
+      "size": 1863,
+      "sha256": "b37019212a74c5f4ce64a83e9c2082f3cb3f28b22582e26cea60888cf86f8e32"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/image2image.md",
+      "size": 4850,
+      "sha256": "165fa7d0f7b1ed422682d7a865084929ba6a896e41ab39313df6a5a1decb5775"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/platform-syntax.md",
+      "size": 2362,
+      "sha256": "aa65915c6fde73ec7c473ea6945e63055a9b799de72efc3f92fc3322ef5b6653"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/rag-config.md",
+      "size": 1392,
+      "sha256": "5b1fe1b678faf5c1397d42906f0fa7b3e2a79828bdcb72cd8973de66edd5696b"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/rag-enhance.md",
+      "size": 1591,
+      "sha256": "1ed0b31a3b1c5eb0ad3aa24215ffe03a56a7ed6e2b9254b9bdb3668f7dc293e3"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/rag-user-memory.md",
+      "size": 2181,
+      "sha256": "96d3f5b376595c06caefc60281e2596e18bdac23cb0365fead1f97a82fec2af6"
+    },
+    {
+      "path": "raw/image-prompt-skill__skillhub/spec/video-fields.md",
+      "size": 1683,
+      "sha256": "be924d91942a83491132a50d3b2ee06df81dfa6136b8b1b2c904c8489d448d6c"
+    },
+    {
+      "path": "raw/image-reference-to-video/CHANGELOG.md",
+      "size": 570,
+      "sha256": "2cbf8be28d9c23739514bb9751231ac0d1598f9decf12313cf231672eecf9499"
+    },
+    {
+      "path": "raw/image-reference-to-video/SKILL.md",
+      "size": 8990,
+      "sha256": "8f76017b515271dc670a0ba110048f87213b1c47776ddd94a421f6c6cf3cf51a"
+    },
+    {
+      "path": "raw/image-reference-to-video/_skillhub_meta.json",
+      "size": 737,
+      "sha256": "de06c169889966d53ab3223195996a95ba05aaf6f57c0ecd3dae17f2448401eb"
+    },
+    {
+      "path": "raw/image-reference-to-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/image-reference-to-video/scripts/videogen.py",
+      "size": 32814,
+      "sha256": "ed85a1ec803de4d268b7fd22c84d48922b92b8baf614808fff95bd17b0524f67"
+    },
+    {
+      "path": "raw/image-to-video/CHANGELOG.md",
+      "size": 541,
+      "sha256": "5f666a943000fb3cccbed820a002d74ff341acf51e597b2580a6f3670f3f1258"
+    },
+    {
+      "path": "raw/image-to-video/SKILL.md",
+      "size": 8890,
+      "sha256": "24057567aaeed8f00255f9caba78f04861885722311269042c6ebe5673f3df7d"
+    },
+    {
+      "path": "raw/image-to-video/_skillhub_meta.json",
+      "size": 696,
+      "sha256": "3502fc7666436f42d77422e762b0127b6bef46467059d26f3e9cb388d607bdcd"
+    },
+    {
+      "path": "raw/image-to-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/image-to-video/scripts/videogen.py",
+      "size": 32773,
+      "sha256": "9b5775fae372a25c08655e4940fc8a4d79f58f8b129e4e18ae4892a1688cd789"
+    },
+    {
+      "path": "raw/minimax-h3/CHANGELOG.md",
+      "size": 567,
+      "sha256": "68dbc6027373433796c0eda31d957f0d0e63c7c6c9e96332c711c533659ddfbc"
+    },
+    {
+      "path": "raw/minimax-h3/SKILL.md",
+      "size": 9144,
+      "sha256": "b54406a728ce1f16ecaf90340c4459e2bf00b936e4fd88cbbe3bee7d3afdf815"
+    },
+    {
+      "path": "raw/minimax-h3/_skillhub_meta.json",
+      "size": 755,
+      "sha256": "8a0fefe44d6b15147ae17e3ec1b248ca160f498d9eff9789ef8f4a98acd40618"
+    },
+    {
+      "path": "raw/minimax-h3/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/minimax-h3/scripts/videogen.py",
+      "size": 32893,
+      "sha256": "875e770104dbd617c0dbe6512fc61b0de310269a9baa3d4ec20a61f0611831af"
+    },
+    {
+      "path": "raw/minimax-h3-image-reference-to-video/CHANGELOG.md",
+      "size": 607,
+      "sha256": "f17e146e366fe08b0a5cf216b926444567537e7ff4e708fdd6e9404f2c7813ea"
+    },
+    {
+      "path": "raw/minimax-h3-image-reference-to-video/SKILL.md",
+      "size": 9107,
+      "sha256": "3cef9e12e421231fd48cac0fdcc7069aed72af27a4135e8a07af0c3b1f9a7b2f"
+    },
+    {
+      "path": "raw/minimax-h3-image-reference-to-video/_skillhub_meta.json",
+      "size": 779,
+      "sha256": "f2097154fd40271abb5d259e1fe7a83842144ffae8bf236a53772fd5574e8e16"
+    },
+    {
+      "path": "raw/minimax-h3-image-reference-to-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/minimax-h3-image-reference-to-video/scripts/videogen.py",
+      "size": 32848,
+      "sha256": "dd29b1ade323fca888d934e1996694d585db5c4f000d37d0f74e5a777d38d1f5"
+    },
+    {
+      "path": "raw/minimax-h3-image-to-video/CHANGELOG.md",
+      "size": 578,
+      "sha256": "1e7fb28cf07af6f4277a46e5d83bed6154b67cab947dc54e1946780229455209"
+    },
+    {
+      "path": "raw/minimax-h3-image-to-video/SKILL.md",
+      "size": 8995,
+      "sha256": "050f819317e47e2e37fffe60ffd171574f7e35aa690199c75981ee03c91c8f4e"
+    },
+    {
+      "path": "raw/minimax-h3-image-to-video/_skillhub_meta.json",
+      "size": 732,
+      "sha256": "bb078f070f7cc856cb13a65d23b41c3a342c3624e352673a0775e891729caf68"
+    },
+    {
+      "path": "raw/minimax-h3-image-to-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/minimax-h3-image-to-video/scripts/videogen.py",
+      "size": 32801,
+      "sha256": "c6cbc3d0f5c6bfdd1f970a93de555b47b39017aa55923679513a7b24eace7773"
+    },
+    {
+      "path": "raw/minimax-h3-seeding-video/CHANGELOG.md",
+      "size": 572,
+      "sha256": "35758877786ce40a4aa2e7b50d74a87c05c5c556558eee651d6d47b75edcf732"
+    },
+    {
+      "path": "raw/minimax-h3-seeding-video/SKILL.md",
+      "size": 9079,
+      "sha256": "01a297be19ec85568072b494c62c926039f2ddf687a82452f92822b7b0b4522d"
+    },
+    {
+      "path": "raw/minimax-h3-seeding-video/_skillhub_meta.json",
+      "size": 712,
+      "sha256": "4d50a02f1412abff119292e5d8cf4b7b719c641ab82feef2b63e7af0603f38f5"
+    },
+    {
+      "path": "raw/minimax-h3-seeding-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/minimax-h3-seeding-video/scripts/videogen.py",
+      "size": 32847,
+      "sha256": "b7b4efa727fb3e85067699d19d8c24218c6abfecfede04c327d4236d3b92640c"
+    },
+    {
+      "path": "raw/minimax-h3-social-commerce-video/CHANGELOG.md",
+      "size": 583,
+      "sha256": "e683a41b4d6d6f9e27dbb2e2125205cf715dcbbb47f85da61a95b2e7e3285ee8"
+    },
+    {
+      "path": "raw/minimax-h3-social-commerce-video/SKILL.md",
+      "size": 9125,
+      "sha256": "a520fec33e34118c458d0c075eaf3f4f75c2a3ef59eff563072ff49447d59d36"
+    },
+    {
+      "path": "raw/minimax-h3-social-commerce-video/_skillhub_meta.json",
+      "size": 723,
+      "sha256": "770d762b51e4d7f1d30742a54adbd94a601f7a3c42c290d5ec93f97160547bd6"
+    },
+    {
+      "path": "raw/minimax-h3-social-commerce-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/minimax-h3-social-commerce-video/scripts/videogen.py",
+      "size": 32858,
+      "sha256": "bbd06545edb150bc0205734bfb0d556e65a1c357d9de0f3437b51fc86665dbb6"
+    },
+    {
+      "path": "raw/minimax-h3-video-generation-and-editing/CHANGELOG.md",
+      "size": 1790,
+      "sha256": "0090353081af2bba605ec365774338b12840d9bae83a6c4551205af7d790bead"
+    },
+    {
+      "path": "raw/minimax-h3-video-generation-and-editing/SKILL.md",
+      "size": 19491,
+      "sha256": "163d9338cdcd793160e96715ca8748ecf94e6e9f8d3c38141bf1612e9dbc63ea"
+    },
+    {
+      "path": "raw/minimax-h3-video-generation-and-editing/_skillhub_meta.json",
+      "size": 1002,
+      "sha256": "72fbbeeb51903648ce2c8f6e2ca6da7fcbe3eb036bf5e70e79a902d12fa4c9e2"
+    },
+    {
+      "path": "raw/minimax-h3-video-generation-and-editing/resources/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/minimax-h3-video-generation-and-editing/scripts/videogen.py",
+      "size": 35700,
+      "sha256": "52b7eb24e37a009e506e57d131a5a38fdbbb1556b5d0fcff9853ac0f2560cba3"
+    },
+    {
+      "path": "raw/seeding-video/CHANGELOG.md",
+      "size": 520,
+      "sha256": "a1d2be314f63f5c17b25b5daea45f36e438decfcaccdfb3efd6e81720cc8c95d"
+    },
+    {
+      "path": "raw/seeding-video/SKILL.md",
+      "size": 8955,
+      "sha256": "ba0dd967126059b985112790eb67c9d643639058204cc33b725aeb007ae606bb"
+    },
+    {
+      "path": "raw/seeding-video/_skillhub_meta.json",
+      "size": 654,
+      "sha256": "aa837cbc62b5fc5cfda93509a633078c19ad609d3852a6d92e198f814e88f89f"
+    },
+    {
+      "path": "raw/seeding-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/seeding-video/scripts/videogen.py",
+      "size": 32808,
+      "sha256": "62a8382538286bcd8541e2c00285388e48a16afd43843c5f6d625ee324904b20"
+    },
+    {
+      "path": "raw/short-drama-video/CHANGELOG.md",
+      "size": 520,
+      "sha256": "f5c6f38387f933054117787e0d9b80618b5507e88121d4919017fc3a9ebecc7b"
+    },
+    {
+      "path": "raw/short-drama-video/SKILL.md",
+      "size": 8967,
+      "sha256": "8869dc15609f1ab733e0cd8e8af2aa622a2fbaee38afab11a4077c7f5bde89c5"
+    },
+    {
+      "path": "raw/short-drama-video/_skillhub_meta.json",
+      "size": 654,
+      "sha256": "72c651ca6b77c95291a515720ed54940a973710d697cd36ea1276ad7b59f4ffb"
+    },
+    {
+      "path": "raw/short-drama-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/short-drama-video/scripts/videogen.py",
+      "size": 32808,
+      "sha256": "5ba2b62d4e86f1f936bf0bb0183507bdfdb057702d18272be75c089df2a66a8f"
+    },
+    {
+      "path": "raw/social-commerce-video/CHANGELOG.md",
+      "size": 531,
+      "sha256": "f3a227763f408a5acaa18efd4f00c708dc97c53ae6b58d7df562a08cee146cba"
+    },
+    {
+      "path": "raw/social-commerce-video/SKILL.md",
+      "size": 9001,
+      "sha256": "19859a48bff39304bfa648b6bb5f46f39e6c910f163984f0d9598275fe744177"
+    },
+    {
+      "path": "raw/social-commerce-video/_skillhub_meta.json",
+      "size": 665,
+      "sha256": "c81fb0d699980f2b970e5d2ebe59b202da314423d2388038f1e9926f7adaabc9"
+    },
+    {
+      "path": "raw/social-commerce-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/social-commerce-video/scripts/videogen.py",
+      "size": 32819,
+      "sha256": "619b3e44e887968071d4bc3771cfe5a14899a61b80cbf451d65fd94b68c94ae2"
+    },
+    {
+      "path": "raw/tvc-video/CHANGELOG.md",
+      "size": 502,
+      "sha256": "db62b18391db977d2ebd3bf1b371045ea8b9c3054e520d431372ce6a9ea7ffcb"
+    },
+    {
+      "path": "raw/tvc-video/SKILL.md",
+      "size": 8912,
+      "sha256": "4c99bff710fbddd96338c22184cea19018d7a985d8d4123ed10a8ff62d6677d1"
+    },
+    {
+      "path": "raw/tvc-video/_skillhub_meta.json",
+      "size": 638,
+      "sha256": "c0a81286c0f742c2598a4d885d8c9f4c6f4a16c7cdabf20e1e6a669591fcf41b"
+    },
+    {
+      "path": "raw/tvc-video/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/tvc-video/scripts/videogen.py",
+      "size": 32792,
+      "sha256": "3ba5e09296180484fb5c324bc68cbc49be297a89bf7eef090bde8f3464ad64a2"
+    },
+    {
+      "path": "raw/video-generation/CHANGELOG.md",
+      "size": 494,
+      "sha256": "4bc5057152ef0a0b94f4e83d4cb921516068b720ad1df37e9151a039d28a9737"
+    },
+    {
+      "path": "raw/video-generation/SKILL.md",
+      "size": 8979,
+      "sha256": "e355665f42e928a51d0ce4fe96b4891ca155cb0c16ba788fd793ea5d8bf422b1"
+    },
+    {
+      "path": "raw/video-generation/_skillhub_meta.json",
+      "size": 685,
+      "sha256": "77d9c3096f945c05a68f2889d3dae0e9597e12ee151f30c7439404bbdeae6613"
+    },
+    {
+      "path": "raw/video-generation/references/config.example.json",
+      "size": 97,
+      "sha256": "60e45bdf6ada6b751c5b6adcedb945c367232dbab1812a5e32d39d7a894d8115"
+    },
+    {
+      "path": "raw/video-generation/scripts/videogen.py",
+      "size": 32795,
+      "sha256": "521d9d20ec5f448dbf3ddfb9409c6c648560bb6acc29e1e7e4a6817c523d81b2"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "参考图生视频",
+  "installedAt": 1788845554134,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508260600676352",
+  "description_zh": "基于 参考图生视频 的 AI 视频生成器，不限定用户必须知道模型名，使用 AI Hive 裸接口完成该能力。当用户需要 参考图生视频、图片参考生视频、参考图片生成视频、风格参考视频、角色参考视频、Seedance、MiniMax H3、Happy Horse、AI视频、视频生成 时使用此 Skill。",
+  "description_en": "Generic Image-Reference-to-Video capability via AI Hive open API. Model-agnostic, auto-selects the best model. Use when users request this video capability.",
+  "iconSource": "letter:auto"
+}

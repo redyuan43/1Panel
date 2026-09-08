@@ -1,0 +1,10 @@
+{
+  "name": "首尾帧生视频",
+  "installedAt": 1788845555925,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508228748988416",
+  "description_zh": "基于 首尾帧生视频 的 AI 视频生成器，不限定用户必须知道模型名，使用 AI Hive 裸接口完成该能力。当用户需要 首尾帧生视频、首尾帧视频、首帧尾帧、两张图生成视频、转场视频、Seedance、MiniMax H3、Happy Horse、AI视频、视频生成 时使用此 Skill。",
+  "description_en": "Generic First-Last-Frame-to-Video capability via AI Hive open API. Model-agnostic, auto-selects the best model. Use when users request this video capability.",
+  "iconSource": "letter:auto"
+}

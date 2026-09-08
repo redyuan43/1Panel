@@ -22,8 +22,14 @@ separate. The latest local tool-schema normalization does not apply to media.
 - Both Router API and control processes need `AI_ROUTER_MEDIA_INTERNAL_KEY`,
   matching the host daemon. The daemon listens only on `127.0.0.1:14020`.
 - The host daemon also needs `AI_ROUTER_MEDIA_ROOT` (default
-  `/opt/1panel/ai-router/media`), `AI_ROUTER_H3_KEY` and optionally
-  `AI_ROUTER_DASHSCOPE_API_KEY`. The Qwen base URL must be the exact workspace
+  `/opt/1panel/ai-router/media`), `AI_ROUTER_H3_KEY`, and
+  `AI_ROUTER_H3_EXECUTOR_URL=http://100.96.79.21:8789`. Managed workflows call
+  Ivan directly. `AI_ROUTER_H3_URL` remains only for explicit
+  `legacy_pipeline` compatibility. The daemon may optionally use
+  `AI_ROUTER_DASHSCOPE_API_KEY`. Managed video quality review uses an internal
+  1Panel client key in `AI_ROUTER_VIDEO_REVIEW_KEY` and calls the local Router
+  `/v1/chat/completions` endpoint with `model: siyuan/auto`; it does not register or
+  call a separate reviewer model. The Qwen base URL must be the exact workspace
   origin in `AI_ROUTER_DASHSCOPE_BASE_URL`, not a guessed workspace or region.
 - H3 requires `H3_ROUTER_KEY`, matching the daemon's H3 key.
 - Put host credentials in a private service environment file, not Git. The
@@ -81,11 +87,14 @@ Endpoints:
   only the owned original turn; timeout or daemon shutdown only detaches the
   relay. Qwen cancellation is advisory. This is not a refund guarantee.
 - `POST /v1/videos` accepts H3 project fields and uploaded reference assets.
-  Initial status is `queued`; creation starts only Context IR.
+  It also accepts `workflow_mode`, `creative_profile`, and `aspect_ratio`.
+  New clients should send `quality_gate`, `duration_ladder`, or
+  `legacy_pipeline` explicitly; omitted mode remains the legacy pipeline for
+  compatibility.
 - `GET /v1/videos`, `GET /v1/videos/{id}`, `GET|HEAD /v1/videos/{id}/content`.
 - `GET /v1/videos/{id}/stages`, `GET /v1/videos/{id}/stages/{stage}`,
   `GET|HEAD /v1/videos/{id}/stages/{stage}/content`.
-- `POST /v1/videos/{id}/stages/{stage}/{start|approve|cancel}`.
+- `POST /v1/videos/{id}/stages/{stage}/{start|approve|cancel|regenerate}`.
 - `GET /v1/images/{id}/outputs`, `GET /v1/videos/{id}/outputs`: immutable output
   history, including outputs from previous stage attempts.
 - `DELETE /v1/videos/{id}` soft-deletes a terminal task. Image deletion is
@@ -117,6 +126,29 @@ Approve a stage with `{"output_id":"out_..."}`. Context IR additionally accepts 
 edited `prompt`. Start the next stage with the approved predecessor's `output_id`.
 Neither approval nor artifact retrieval starts the next stage. A stale version
 returns 409. Failed or cancelled stages can be explicitly retried with a new key.
+Managed generated stages include an advisory SIYUAN review. Regeneration binds
+the current `output_id` and its `review_id`; the review never approves, starts,
+or regenerates a stage by itself.
+
+`quality_gate` always produces an approval package containing the prompt,
+storyboard and approved boundary anchors. A segmentable 15-second request uses
+T0/T5/T10/T15; a request that must remain continuous uses T0/T15 and one
+15-second H3 execution. The package hash is recomputed after the anchor contact
+sheet is created, so its `output_id` identifies the exact prompt-and-anchor
+combination. Shared T5/T10 anchor SHA-256 values are retained on assembled
+outputs. `duration_ladder` rejects prompts that require continuous dialogue,
+continuous camera motion, cross-boundary fast action, complex physics or strict
+musical timing instead of silently switching workflows or forcing a bad split.
+
+The SIYUAN reviewer receives a chronological contact sheet, dense frames around
+every join and the approved anchor contact sheet. Its strict JSON result records
+technical checks, time-scoped issues, scores, prompt revisions and the actual
+internal Router trace. Low confidence, a non-PASS verdict or a verdict/action
+conflict is marked for human review.
+
+Managed Ivan workflows currently accept `t2v`, `i2v`, `l2v`, and `fl2v` with
+native audio. Reference-video, hybrid, and source-locked audio requests must use
+the explicit legacy workflow; they are never silently converted.
 
 Creation may incur Context IR API costs even on a local generation strategy.
 Cloud stages require explicit starts. Paid image fallback reserves a slot against
@@ -164,9 +196,10 @@ in the independent media directory, not the 30-day route-trace store.
 
 ## H3 installation and recovery
 
-See `integrations/h3/README.md`. The prepared patch targets `be1edf4` and was
-read-only checked against that checkout. Applying it, its SQLite migration and
-restarting H3 require the approved deployment window.
+Managed tasks use `../h3-fleet` on Ivan directly. Deploying its authenticated
+execution contract, aggregate memory slice, or media-daemon endpoint requires
+the approved deployment window. `integrations/h3/README.md` remains the legacy
+Edge contract and recovery reference.
 
 Router-managed projects are read-only in H3's legacy UI and cannot enter legacy
 batch schedules. Use the Router media console for version-bound approval. This
@@ -193,7 +226,9 @@ The runner verifies a fixture marker before any writes. The preview has only fak
 providers and synthetic artifacts; passing it is not real image/video acceptance.
 
 Real acceptance requires explicit authorization for account usage and cloud fees:
-one Codex generation, one edit, Qwen fallback, and serial short H3 samples covering
-all advertised stages. Each output must be downloaded through the client-facing
-Router API and each stage must be approved separately. Do not declare the
-integration deployed or the included image allowance verified from unit tests.
+one Codex generation, one edit, Qwen fallback, three overlapping short H3
+preview executions on distinct Ivan lanes, and two overlapping quality
+executions with the third segment queued. Each output must be downloaded through
+the client-facing Router API and each stage must be approved separately. Do not
+declare the integration deployed or the included image allowance verified from
+unit tests.

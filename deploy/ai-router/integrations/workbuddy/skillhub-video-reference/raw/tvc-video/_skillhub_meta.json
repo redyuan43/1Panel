@@ -1,0 +1,10 @@
+{
+  "name": "TVC 广告片",
+  "installedAt": 1788845544949,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508660788895744",
+  "description_zh": "基于 TVC 广告片 的 AI 视频生成器，通用商业场景搜索入口，底层调用 AI Hive 裸接口。当用户需要 TVC 广告片、TVC、电视广告、品牌TVC、产品TVC、广告短片、Seedance、MiniMax H3、Happy Horse、AI视频 时使用此 Skill。",
+  "description_en": "Generic video generation skill for Tvc Video scenarios. Model-agnostic, uses AI Hive open API. Use when users need this video scenario.",
+  "iconSource": "letter:auto"
+}

@@ -1,0 +1,17 @@
+{
+  "slug": "image-prompt-skill",
+  "name": "提示词生成大师",
+  "version": "1.0.15",
+  "installedAt": 1788539707943,
+  "source": "skillhub",
+  "namespace": "user_5d00e27d",
+  "canonicalName": "@user_5d00e27d/image-prompt-skill",
+  "iconSource": "https://cloudcache.tencent-cloud.com/qcloud/ui/static/other_external_resource/e9a58ede-ead5-43fd-9523-d1ba7f1b78cd.png",
+  "labels": {
+    "requires_api_key": "false"
+  },
+  "description_zh": "统一提示词生成器，支持图片与视频双模态。文/图生图、文/图生视频、图片/视频反编译、上下文微调，自动适配画风与平台语法，内置RAG增强风格预设与安全校验，高效精准。",
+  "installs": 23751,
+  "iconLocalPath": "C:\\Users\\Ivan\\.workbuddy\\skills\\image-prompt-skill__skillhub\\_icon.png",
+  "iconDownloadedFrom": "https://cloudcache.tencent-cloud.com/qcloud/ui/static/other_external_resource/e9a58ede-ead5-43fd-9523-d1ba7f1b78cd.png"
+}

@@ -10,6 +10,7 @@ import contextlib
 import csv
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import shutil
@@ -19,15 +20,52 @@ import threading
 import time
 from fractions import Fraction
 from pathlib import Path
+from urllib.parse import urlencode, urlparse
 from uuid import uuid4
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 
 class StaleRun(Exception):
     pass
+
+
+def _executor_base() -> str:
+    value = os.environ.get("H3_LOCAL_EXECUTOR_URL", "").rstrip("/")
+    parsed = urlparse(value)
+    try:
+        address = ipaddress.ip_address(parsed.hostname or "")
+    except ValueError:
+        address = None
+    private_host = (
+        parsed.hostname in {"127.0.0.1", "localhost"}
+        or (parsed.hostname or "").endswith(".taild500c8.ts.net")
+        or bool(address and (address.is_loopback or address in ipaddress.ip_network("100.64.0.0/10")))
+    )
+    if parsed.scheme != "http" or not private_host or parsed.path or parsed.username or parsed.password:
+        raise HTTPException(503, "private H3 executor is not configured")
+    return value
+
+
+async def _executor_request(method: str, path: str, **kwargs) -> httpx.Response:
+    try:
+        async with httpx.AsyncClient(
+            base_url=_executor_base(),
+            timeout=httpx.Timeout(180, read=300),
+            trust_env=False,
+            follow_redirects=False,
+        ) as client:
+            response = await client.request(method, path, **kwargs)
+    except httpx.HTTPError as error:
+        raise HTTPException(503, "Ivan H3 executor is unavailable") from error
+    if response.status_code == 503:
+        raise HTTPException(503, "No eligible Ivan H3 execution lane is available")
+    if response.is_error:
+        raise HTTPException(502, "Ivan H3 executor request failed")
+    return response
 
 
 def assert_local_gpu_exclusive():
@@ -289,6 +327,12 @@ class Contract:
             db.execute("""CREATE TABLE IF NOT EXISTS router_operations (
                 operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL,
                 project_id TEXT, result_json TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS router_executions (
+                execution_id TEXT PRIMARY KEY, digest TEXT NOT NULL,
+                value_json TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS router_execution_operations (
+                operation_id TEXT PRIMARY KEY, digest TEXT NOT NULL,
+                result_json TEXT NOT NULL)""")
 
     @contextlib.contextmanager
     def connect(self):
@@ -409,9 +453,85 @@ class Contract:
                        (key, digest, project_id or value["id"], json.dumps(value)))
             return value
 
+    def execution(self, execution_id):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT digest,value_json FROM router_executions WHERE execution_id=?",
+                (execution_id,),
+            ).fetchone()
+        return (row[0], json.loads(row[1])) if row else None
+
+    def save_execution(self, execution_id, digest, value):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT digest,value_json FROM router_executions WHERE execution_id=?",
+                (execution_id,),
+            ).fetchone()
+            if row:
+                if row[0] != digest:
+                    raise HTTPException(409, "execution operation conflict")
+                return json.loads(row[1])
+            db.execute(
+                "INSERT INTO router_executions VALUES (?,?,?)",
+                (execution_id, digest, json.dumps(value)),
+            )
+        return value
+
+    def update_execution(self, execution_id, **changes):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT value_json FROM router_executions WHERE execution_id=?",
+                (execution_id,),
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "execution not found")
+            value = {**json.loads(row[0]), **changes, "updated_at": time.time()}
+            db.execute(
+                "UPDATE router_executions SET value_json=? WHERE execution_id=?",
+                (json.dumps(value), execution_id),
+            )
+        return value
+
+    def execution_operation(self, operation_id, digest):
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise HTTPException(400, "operation_id is required")
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT digest,result_json FROM router_execution_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+        if not row:
+            return None
+        if row[0] != digest:
+            raise HTTPException(409, "execution operation conflict")
+        return json.loads(row[1])
+
+    def save_execution_operation(self, operation_id, digest, value):
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT digest,result_json FROM router_execution_operations WHERE operation_id=?",
+                (operation_id,),
+            ).fetchone()
+            if row:
+                if row[0] != digest:
+                    raise HTTPException(409, "execution operation conflict")
+                return json.loads(row[1])
+            db.execute(
+                "INSERT INTO router_execution_operations VALUES (?,?,?)",
+                (operation_id, digest, json.dumps(value)),
+            )
+        return value
+
 
 def install(module):
-    from .workflows import VALID_AUDIO_POLICIES, VALID_MODES, VALID_STRATEGIES
+    from .workflows import (
+        VALID_AUDIO_POLICIES,
+        VALID_MODES,
+        VALID_STRATEGIES,
+        actual_duration,
+        build_workflow,
+        validate_project_config,
+    )
     from starlette.datastructures import UploadFile
 
     contract = Contract(module)
@@ -442,17 +562,373 @@ def install(module):
                 "prompt_approved": project["prompt_approved"], "actual_duration": project["actual_duration"],
                 "internal_errors": {name: stage["error"] for name, stage in project["stages"].items() if stage.get("error")}}
 
+    def public_execution(value):
+        return {
+            key: value.get(key)
+            for key in (
+                "execution_id", "status", "progress", "run_id", "output_id",
+                "actual_duration", "lane_id", "gpu_uuid", "created_at", "updated_at",
+                "error",
+            )
+            if value.get(key) is not None
+        }
+
+    async def refresh_execution(value):
+        if value["status"] in {"completed", "failed", "cancelled"}:
+            return value
+        response = await _executor_request("GET", f"/api/jobs/{value['prompt_id']}")
+        job = response.json()
+        status = {
+            "submitted": "submitted",
+            "running": "running",
+            "completed": "completed",
+            "error": "failed",
+            "missing": "failed",
+            "cancelled": "cancelled",
+        }.get(job.get("status"), "running")
+        changes = {
+            "status": status,
+            "progress": 100 if status == "completed" else 50 if status == "running" else 0,
+        }
+        if status == "completed":
+            if not job.get("output_filename"):
+                changes.update(
+                    status="failed",
+                    progress=0,
+                    error="Ivan H3 execution completed without a video output.",
+                )
+            else:
+                changes["output"] = {
+                    "filename": job["output_filename"],
+                    "subfolder": job.get("output_subfolder") or "",
+                    "type": job.get("output_type") or "output",
+                }
+        elif status == "failed":
+            changes["error"] = "Ivan H3 execution failed."
+        return await run_in_threadpool(
+            contract.update_execution,
+            value["execution_id"],
+            **changes,
+        )
+
+    async def execution_form(form):
+        fields, uploads, hashes = {}, {}, {}
+        total = 0
+        for name, value in form.multi_items():
+            if name in fields or name in uploads:
+                raise HTTPException(400, "duplicate execution field")
+            if isinstance(value, UploadFile):
+                content = await value.read()
+                total += len(content)
+                if not content or total > 512 * 1024 * 1024:
+                    raise HTTPException(413, "execution assets exceed the upload limit")
+                uploads[name] = {
+                    "content": content,
+                    "filename": value.filename or name,
+                    "content_type": value.content_type or "application/octet-stream",
+                }
+                hashes[name] = hashlib.sha256(content).hexdigest()
+            else:
+                fields[name] = value
+        allowed = {
+            "operation_id", "profile", "mode", "prompt", "duration", "seed",
+            "audio_policy", "aspect_ratio", "watermark", "metadata",
+        }
+        asset_names = {
+            "first_frame", "last_frame", "reference_image",
+            "reference_video", "reference_audio",
+        }
+        if set(fields) - allowed or set(uploads) - asset_names:
+            raise HTTPException(400, "invalid execution fields")
+        execution_id = fields.get("operation_id")
+        if not isinstance(execution_id, str) or not 1 <= len(execution_id) <= 128:
+            raise HTTPException(400, "operation_id is required")
+        digest = hashlib.sha256(
+            json.dumps([fields, hashes], sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return fields, uploads, execution_id, digest
+
+    async def upload_execution_assets(execution_id, uploads):
+        assets = {}
+        allowed_extensions = {
+            "first_frame": {".png", ".jpg", ".jpeg", ".webp"},
+            "last_frame": {".png", ".jpg", ".jpeg", ".webp"},
+            "reference_image": {".png", ".jpg", ".jpeg", ".webp"},
+            "reference_video": {".mp4", ".mov", ".mkv", ".webm"},
+            "reference_audio": {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"},
+        }
+        prefix = hashlib.sha256(execution_id.encode()).hexdigest()[:20]
+        for name, upload in uploads.items():
+            extension = Path(upload["filename"]).suffix.lower()
+            if extension not in allowed_extensions[name]:
+                raise HTTPException(400, f"unsupported {name} asset")
+            comfy_name = f"h3exec_{prefix}_{name}{extension}"
+            await _executor_request(
+                "POST",
+                f"/api/inputs/{comfy_name}",
+                files={
+                    "file": (
+                        upload["filename"],
+                        upload["content"],
+                        upload["content_type"],
+                    )
+                },
+            )
+            assets[name] = {
+                "name": upload["filename"],
+                "comfy_name": comfy_name,
+                "mime": upload["content_type"],
+                "size": len(upload["content"]),
+            }
+        return assets
+
+    def execution_workflow(fields, assets, execution_id):
+        profile = fields.get("profile", "preview")
+        if profile not in {"preview", "quality"}:
+            raise HTTPException(400, "profile must be preview or quality")
+        mode = fields.get("mode")
+        prompt = fields.get("prompt")
+        if mode not in VALID_MODES or not isinstance(prompt, str) or not prompt.strip():
+            raise HTTPException(400, "valid mode and prompt are required")
+        try:
+            duration = int(fields.get("duration", 5))
+            seed = int(fields.get("seed", -1))
+        except ValueError as error:
+            raise HTTPException(400, "invalid duration or seed") from error
+        if seed < 0:
+            seed = int.from_bytes(hashlib.sha256(execution_id.encode()).digest()[:8], "big") % (2**63)
+        audio_policy = fields.get("audio_policy", "native")
+        aspect_ratio = fields.get("aspect_ratio", "16:9")
+        if aspect_ratio not in {"16:9", "9:16"}:
+            raise HTTPException(400, "invalid aspect_ratio")
+        if fields.get("watermark", "false") not in {"true", "false"}:
+            raise HTTPException(400, "invalid watermark")
+        project = {
+            "id": "router-" + hashlib.sha256(execution_id.encode()).hexdigest()[:20],
+            "mode": mode,
+            "strategy": "fast",
+            "duration": duration,
+            "actual_duration": actual_duration(duration),
+            "seed": seed,
+            "audio_policy": audio_policy,
+            "watermark": fields.get("watermark", "false") == "true",
+            "use_embedded_video_audio": False,
+            "prompt_original": prompt.strip(),
+            "prompt_approved": prompt.strip(),
+            "assets": assets,
+        }
+        try:
+            validate_project_config(project)
+            stage = "preview" if profile == "preview" else "local_768"
+            workflow, template = build_workflow(project, stage, module.SETTINGS.workflow_root)
+        except (FileNotFoundError, ValueError) as error:
+            raise HTTPException(400, str(error)) from error
+        width, height = (
+            (480, 864) if profile == "preview" else (768, 1344)
+        ) if aspect_ratio == "9:16" else (
+            (864, 480) if profile == "preview" else (1344, 768)
+        )
+        steps = 6 if profile == "preview" else 14
+        for node in workflow.values():
+            inputs = node.setdefault("inputs", {})
+            if node.get("class_type") in {
+                "MiniMaxH3AudioConditioningT8",
+                "MiniMaxH3ImageToVideo",
+                "MiniMaxH3ReferenceToVideo",
+            }:
+                inputs["width"] = width
+                inputs["height"] = height
+            if node.get("class_type") in {"MiniMaxH3DualClockSamplerT8", "BasicScheduler"}:
+                inputs["steps"] = steps
+            if node.get("class_type") == "SaveVideo":
+                inputs["filename_prefix"] = f"video/router/{project['id']}"
+        return project, workflow, template, profile, stage
+
     @api.get("/options")
     def options(request: Request):
         protected(request)
         return {"contract_version": 1, "mode": sorted(VALID_MODES), "strategy": sorted(VALID_STRATEGIES),
                 "audio_policy": sorted(VALID_AUDIO_POLICIES), "duration": {"min": 4, "max": 15},
+                "workflow_contract_version": 2,
+                "execution_profiles": {"preview": {"max_parallel": 3, "steps": 6},
+                                       "quality": {"max_parallel": 2, "steps": 14}},
                 "context_ir_billable": True, "stage_outputs": "immutable",
                 "cloud_upload_metadata_clean": True,
                 "stage_heartbeat": True, "local_768_gpu_exclusive": True,
                 "required_assets": {"i2v": ["first_frame"], "l2v": ["last_frame"],
                                     "fl2v": ["first_frame", "last_frame"],
                                     "hybrid": ["first_frame", "last_frame", "reference_image"]}}
+
+    @api.post("/executions")
+    async def create_execution(request: Request):
+        protected(request)
+        form = await request.form()
+        try:
+            fields, uploads, execution_id, digest = await execution_form(form)
+            existing = await run_in_threadpool(contract.execution, execution_id)
+            if existing:
+                if existing[0] != digest:
+                    raise HTTPException(409, "execution operation conflict")
+                return public_execution(await refresh_execution(existing[1]))
+            assets = await upload_execution_assets(execution_id, uploads)
+            project, workflow, template, profile, stage = execution_workflow(
+                fields,
+                assets,
+                execution_id,
+            )
+            metadata = {}
+            if fields.get("metadata"):
+                try:
+                    metadata = json.loads(fields["metadata"])
+                except (TypeError, ValueError) as error:
+                    raise HTTPException(400, "metadata must be a JSON object") from error
+                if not isinstance(metadata, dict):
+                    raise HTTPException(400, "metadata must be a JSON object")
+            response = await _executor_request(
+                "POST",
+                "/prompt",
+                json={
+                    "prompt": workflow,
+                    "extra_data": {
+                        "h3": {
+                            **metadata,
+                            "execution_id": execution_id,
+                            "stage": stage,
+                            "profile": profile,
+                        }
+                    },
+                },
+            )
+            payload = response.json()
+            prompt_id = str(payload.get("prompt_id", "")).strip()
+            if not prompt_id:
+                raise HTTPException(502, "Ivan H3 executor returned no prompt id")
+            now = time.time()
+            value = {
+                "execution_id": execution_id,
+                "status": "submitted",
+                "progress": 3,
+                "run_id": prompt_id,
+                "prompt_id": prompt_id,
+                "output_id": "out_" + hashlib.sha256(execution_id.encode()).hexdigest(),
+                "actual_duration": project["actual_duration"],
+                "lane_id": payload.get("h3_lane"),
+                "gpu_uuid": payload.get("h3_gpu_uuid"),
+                "workflow_template": template,
+                "profile": profile,
+                "metadata": metadata,
+                "created_at": now,
+                "updated_at": now,
+            }
+            saved = await run_in_threadpool(
+                contract.save_execution,
+                execution_id,
+                digest,
+                value,
+            )
+            return public_execution(saved)
+        finally:
+            await form.close()
+
+    @api.get("/executions/{execution_id}")
+    async def get_execution(execution_id: str, request: Request):
+        protected(request)
+        existing = await run_in_threadpool(contract.execution, execution_id)
+        if not existing:
+            raise HTTPException(404, "execution not found")
+        return public_execution(await refresh_execution(existing[1]))
+
+    @api.post("/executions/{execution_id}/cancel")
+    async def cancel_execution(execution_id: str, request: Request):
+        protected(request)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as error:
+            raise HTTPException(400, "invalid JSON body") from error
+        if not isinstance(body, dict) or set(body) != {"operation_id"}:
+            raise HTTPException(400, "cancel requires operation_id")
+        digest = hashlib.sha256(
+            json.dumps([execution_id, body], sort_keys=True).encode()
+        ).hexdigest()
+        replay = await run_in_threadpool(
+            contract.execution_operation,
+            body["operation_id"],
+            digest,
+        )
+        if replay:
+            return replay
+        existing = await run_in_threadpool(contract.execution, execution_id)
+        if not existing:
+            raise HTTPException(404, "execution not found")
+        value = await refresh_execution(existing[1])
+        if value["status"] not in {"completed", "failed", "cancelled"}:
+            await _executor_request(
+                "POST",
+                f"/api/jobs/{value['prompt_id']}/cancel",
+                json={},
+            )
+            value = await run_in_threadpool(
+                contract.update_execution,
+                execution_id,
+                status="cancelled",
+                progress=0,
+            )
+        result = public_execution(value)
+        await run_in_threadpool(
+            contract.save_execution_operation,
+            body["operation_id"],
+            digest,
+            result,
+        )
+        return result
+
+    @api.get("/executions/{execution_id}/output")
+    async def execution_output(execution_id: str, request: Request):
+        protected(request)
+        existing = await run_in_threadpool(contract.execution, execution_id)
+        if not existing:
+            raise HTTPException(404, "execution not found")
+        value = await refresh_execution(existing[1])
+        if value["status"] != "completed" or not value.get("output"):
+            raise HTTPException(409, "execution output is not ready")
+        output = value["output"]
+        query = urlencode({
+            "filename": output["filename"],
+            "subfolder": output["subfolder"],
+            "type": output["type"],
+        })
+        client = httpx.AsyncClient(
+            base_url=_executor_base(),
+            timeout=httpx.Timeout(180, read=300),
+            trust_env=False,
+            follow_redirects=False,
+        )
+        try:
+            response = await client.send(
+                client.build_request("GET", f"/view?{query}"),
+                stream=True,
+            )
+            if response.is_error:
+                await response.aclose()
+                await client.aclose()
+                raise HTTPException(502, "Ivan H3 output download failed")
+        except BaseException:
+            await client.aclose()
+            raise
+
+        async def chunks():
+            try:
+                async for chunk in response.aiter_bytes():
+                    yield chunk
+            finally:
+                await response.aclose()
+                await client.aclose()
+
+        return StreamingResponse(
+            chunks(),
+            media_type=response.headers.get("content-type", "video/mp4"),
+            headers={"Cache-Control": "private, no-store"},
+        )
 
     @api.post("/projects")
     async def create(request: Request):

@@ -1,0 +1,27 @@
+[Unit]
+Description=ComfyUI MiniMax H3 lane %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ivan
+Group=ivan
+Slice=h3-compute.slice
+WorkingDirectory=/mnt/ivan-ext4-offload/ComfyUI
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+EnvironmentFile=/etc/h3-fleet/lanes/%i.env
+ExecStart=/usr/bin/python3 main.py --listen ${H3_LISTEN} --port ${H3_PORT} --input-directory ${H3_INPUT_DIR} --output-directory ${H3_OUTPUT_DIR} --temp-directory ${H3_TEMP_DIR} --user-directory ${H3_USER_DIR} --database-url ${H3_DATABASE_URL} --reserve-vram 1 --disable-pinned-memory --disable-auto-launch
+KillSignal=SIGINT
+TimeoutStopSec=60
+Restart=no
+MemoryHigh=42G
+MemoryMax=50G
+MemorySwapMax=12G
+OOMPolicy=stop
+LimitNOFILE=65535
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

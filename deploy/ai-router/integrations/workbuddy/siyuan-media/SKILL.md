@@ -37,15 +37,32 @@ Linux/macOS). Commands below use `python <skill>/scripts/media.py`.
 Read [video workflow and commands](references/usage.md#video-workflow) when
 creating or advancing a video.
 
-1. Confirm the requested strategy/duration and disclose that creating the task
-   starts billable Context IR preparation. Only then use `video` with
-   `--confirm-context-cost`.
-2. Poll and show the current stage's text or downloaded video to the user.
-3. Approval requires the user's explicit approval of that exact `output_id`.
+1. Run `options`, then confirm the workflow, strategy, duration and creation
+   cost boundary. The current Router publishes `quality_gate` (default) and
+   `legacy_pipeline`. Only use `duration_ladder` when a future Router explicitly
+   publishes it; old Routers without workflow options are treated as legacy and
+   receive no unsupported fields.
+2. Only after confirmation use `video` with `--confirm-context-cost`. Supply
+   `--workflow-mode`, `--creative-profile`, and `--aspect-ratio` only from the
+   values published by `options`.
+   Do not split one customer video into independent five-second H3 generations
+   unless `duration_ladder` is explicitly published. Independent native audio
+   and visible state changes at the joins are not accepted as a production
+   continuity strategy.
+3. Poll and show the current stage's text or downloaded video and its quality
+   review to the user. Read the returned `stages`; never assume stage names.
+4. Approval requires the user's explicit approval of that exact `output_id`.
    Use `approve`; it does not start the next stage.
-4. Starting a stage requires a separate explicit user instruction. Use `start`
+5. Starting a stage requires a separate explicit user instruction. Use `start`
    with the approved predecessor's `output_id`. Warn before cloud stages.
-5. Stop after returning each stage's result. Do not interpret "make a video" as
+6. A review may include scores, issue time ranges, and a revised prompt. It is
+   advice only. Run `regenerate` only after the user explicitly accepts that
+   suggestion, binding both the current `output_id` and `review_id`.
+   Use `--apply-suggestion` only when the user explicitly chose the review's
+   revised prompt. The `plan` stage has no quality `review_id`; regenerate it
+   with its current `output_id` and an optional explicitly approved
+   `--prompt-file`.
+7. Stop after returning each stage's result. Do not interpret "make a video" as
    permission to approve unseen outputs or start every stage automatically.
 
 `--confirmed` records the caller's assertion; it is not proof of a human click.
@@ -57,6 +74,7 @@ replace this client-side confirmation boundary.
 - For a timeout/unknown outcome, run `resume --operation-id OP`; the saved
   request uses the original idempotency key. Do not create a replacement task.
 - `status`, `wait`, `outputs` and `download` do not advance a video.
+- A SIYUAN model or technical review never approves, starts, or regenerates a stage.
 - A download uses the delivery artifact `id`. Approval uses `output_id`; they
   are different for sanitized videos. Do not interchange them.
 - Never read, echo, attach or summarize the credential/configuration files.

@@ -148,7 +148,7 @@ def router(*, admin: bool = False) -> APIRouter:
                 raise MediaError("invalid_json", "Expected a JSON object.")
             return data
         value, assets, images, total = {}, {}, [], 0
-        async with request.form(max_files=5, max_fields=20, max_part_size=MAX_UPLOAD_BYTES) as form:
+        async with request.form(max_files=5, max_fields=30, max_part_size=MAX_UPLOAD_BYTES) as form:
             for name, item in form.multi_items():
                 if isinstance(item, UploadFile):
                     data = bytearray()
@@ -207,6 +207,8 @@ def router(*, admin: bool = False) -> APIRouter:
         for stage in job.get("stages", []):
             if stage.get("output"):
                 await decorate_output(stage["output"])
+            for output in stage.get("artifacts", []):
+                await decorate_output(output)
         return job
 
     async def options(request):
@@ -295,7 +297,7 @@ def router(*, admin: bool = False) -> APIRouter:
             if request.method == "POST":
                 stage = request.path_params["stage"]
                 action = request.path_params["action"]
-                if action == "start" and await request.app.state.runtime.store.increment_window(
+                if action in {"start", "regenerate"} and await request.app.state.runtime.store.increment_window(
                     f"router:media-submit:{principal['owner']}", 1, 60,
                 ) > principal["rpm_limit"]:
                     raise MediaError("media_rate_limit", "Media submission limit reached.", 429)

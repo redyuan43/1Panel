@@ -1,0 +1,10 @@
+{
+  "name": "电商视频",
+  "installedAt": 1788845537283,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508681721237504",
+  "description_zh": "基于 电商视频 的 AI 视频生成器，通用商业场景搜索入口，底层调用 AI Hive 裸接口。当用户需要 电商视频、电商广告、商品视频、电商主图视频、详情页视频、SKU视频、Seedance、MiniMax H3、Happy Horse、AI视频 时使用此 Skill。",
+  "description_en": "Generic video generation skill for Ecommerce Video scenarios. Model-agnostic, uses AI Hive open API. Use when users need this video scenario.",
+  "iconSource": "letter:auto"
+}

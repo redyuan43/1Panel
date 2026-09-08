@@ -1,0 +1,10 @@
+{
+  "name": "种草视频",
+  "installedAt": 1788845546457,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087508711124738048",
+  "description_zh": "基于 种草视频 的 AI 视频生成器，通用商业场景搜索入口，底层调用 AI Hive 裸接口。当用户需要 种草视频、小红书种草、抖音种草、社媒种草、好物推荐、UGC种草、Seedance、MiniMax H3、Happy Horse、AI视频 时使用此 Skill。",
+  "description_en": "Generic video generation skill for Seeding Video scenarios. Model-agnostic, uses AI Hive open API. Use when users need this video scenario.",
+  "iconSource": "letter:auto"
+}

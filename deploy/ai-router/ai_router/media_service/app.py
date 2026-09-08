@@ -57,7 +57,7 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
 
     @app.get("/health")
     async def health(request: Request):
-        return {"ok": True, "contract_version": 1}
+        return {"ok": True, "contract_version": 1, "workflow_contract_version": 2}
 
     @app.get("/settings")
     async def settings(request: Request):
@@ -126,12 +126,14 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
         owner, admin = principal(request)
         current(request).store.get(job_id, None if admin else owner)
         return {"data": [value for output in current(request).store.outputs(job_id)
-                         if (value := current(request).public_output(output)) is not None]}
+                         if (value := current(request).public_output(output, internal=admin)) is not None]}
 
     @app.post("/jobs/{job_id}/stages/{stage}/{action}")
     async def action(job_id: str, stage: str, action: str, request: Request):
         owner, admin = principal(request)
-        if action == "start" and not admin and "siyuan-video" not in request.headers.get("x-media-models", "").split(","):
+        if action in {"start", "regenerate"} and not admin and (
+            "siyuan-video" not in request.headers.get("x-media-models", "").split(",")
+        ):
             raise MediaError("media_forbidden", "Video generation is not permitted.", 403)
         idem = request.headers.get("idempotency-key")
         if not idem or len(idem) > 128:

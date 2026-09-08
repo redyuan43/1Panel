@@ -54,6 +54,35 @@ def fixture(tmp_path, monkeypatch):
     workflows.VALID_MODES = {"t2v"}
     workflows.VALID_STRATEGIES = {"fast"}
     workflows.VALID_AUDIO_POLICIES = {"native"}
+    workflows.actual_duration = lambda duration: duration + 0.17
+
+    def validate_project_config(project):
+        if project["mode"] not in workflows.VALID_MODES:
+            raise ValueError("invalid mode")
+        if not 4 <= int(project["duration"]) <= 15:
+            raise ValueError("invalid duration")
+        if not project["prompt_original"]:
+            raise ValueError("missing prompt")
+
+    workflows.validate_project_config = validate_project_config
+
+    def build_workflow(project, stage, workflow_root):
+        return {
+            "1": {
+                "class_type": "MiniMaxH3AudioConditioningT8",
+                "inputs": {"width": 1, "height": 1},
+            },
+            "2": {
+                "class_type": "MiniMaxH3DualClockSamplerT8",
+                "inputs": {"steps": 1},
+            },
+            "3": {
+                "class_type": "SaveVideo",
+                "inputs": {"filename_prefix": "fixture"},
+            },
+        }, f"{stage}-fixture.json"
+
+    workflows.build_workflow = build_workflow
     monkeypatch.setitem(sys.modules, "fixture_h3", package)
     monkeypatch.setitem(sys.modules, "fixture_h3.workflows", workflows)
     path = Path(__file__).parents[1] / "integrations/h3/router_contract.py"
@@ -72,6 +101,7 @@ def fixture(tmp_path, monkeypatch):
     )
     m._require_project = m.STORE.get
     m._project_dir = lambda key: tmp_path / key
+    m.SETTINGS = types.SimpleNamespace(workflow_root=tmp_path)
     m.pipeline_for = lambda value: [{"id": key, **stage} for key, stage in value["stages"].items()]
 
     def create_project(**body):
@@ -223,3 +253,132 @@ def test_h3_atomic_receipt_rollback_and_old_callback_fencing(tmp_path, monkeypat
     finally:
         contract.local.execution = None
     assert m.STORE.get(key)["prompt_ir"] == ""
+
+
+def test_managed_executions_overlap_and_build_requested_profiles(tmp_path, monkeypatch):
+    m, _, extension = fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("H3_LOCAL_EXECUTOR_URL", "http://100.96.79.21:8789")
+    active = 0
+    peak = 0
+    workflows = {}
+
+    async def executor(method, path, **kwargs):
+        nonlocal active, peak
+        if method == "POST" and path == "/prompt":
+            execution_id = kwargs["json"]["extra_data"]["h3"]["execution_id"]
+            workflows[execution_id] = kwargs["json"]["prompt"]
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return httpx.Response(200, json={
+                "prompt_id": "prompt-" + execution_id,
+                "h3_lane": {"preview-1": "fast", "preview-2": "main", "preview-3": "preview"}[execution_id],
+                "h3_gpu_uuid": "gpu-" + execution_id,
+            })
+        if method == "GET" and path.startswith("/api/jobs/"):
+            return httpx.Response(200, json={
+                "status": "completed",
+                "output_filename": "result.mp4",
+                "output_subfolder": "",
+                "output_type": "output",
+            })
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(extension, "_executor_request", executor)
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=m.app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test"},
+        ) as client:
+            async def create(index):
+                return await client.post("/api/router/executions", data={
+                    "operation_id": f"preview-{index}",
+                    "profile": "preview",
+                    "mode": "t2v",
+                    "prompt": "three stable shots",
+                    "duration": "5",
+                    "seed": str(index),
+                    "audio_policy": "native",
+                    "aspect_ratio": "9:16",
+                    "watermark": "false",
+                })
+
+            responses = await asyncio.gather(*(create(index) for index in range(1, 4)))
+            assert [response.status_code for response in responses] == [200, 200, 200]
+            assert [response.json()["lane_id"] for response in responses] == ["fast", "main", "preview"]
+            replay = await create(1)
+            assert replay.status_code == 200
+            assert replay.json()["execution_id"] == "preview-1"
+            assert len(workflows) == 3
+            status = await client.get("/api/router/executions/preview-1")
+            assert status.json()["status"] == "completed"
+
+    asyncio.run(scenario())
+    assert peak == 3
+    for workflow in workflows.values():
+        assert workflow["1"]["inputs"]["width"] == 480
+        assert workflow["1"]["inputs"]["height"] == 864
+        assert workflow["2"]["inputs"]["steps"] == 6
+
+
+def test_managed_quality_profile_and_cancel_are_versioned(tmp_path, monkeypatch):
+    m, _, extension = fixture(tmp_path, monkeypatch)
+    monkeypatch.setenv("H3_LOCAL_EXECUTOR_URL", "http://100.96.79.21:8789")
+    submitted = []
+    cancelled = []
+
+    async def executor(method, path, **kwargs):
+        if method == "POST" and path == "/prompt":
+            submitted.append(kwargs["json"])
+            return httpx.Response(200, json={
+                "prompt_id": "quality-prompt",
+                "h3_lane": "main",
+                "h3_gpu_uuid": "quality-gpu",
+            })
+        if method == "GET" and path == "/api/jobs/quality-prompt":
+            return httpx.Response(200, json={"status": "running"})
+        if method == "POST" and path == "/api/jobs/quality-prompt/cancel":
+            cancelled.append(path)
+            return httpx.Response(200, json={"status": "cancelled"})
+        raise AssertionError((method, path))
+
+    monkeypatch.setattr(extension, "_executor_request", executor)
+
+    async def scenario():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=m.app),
+            base_url="http://test",
+            headers={"Authorization": "Bearer test"},
+        ) as client:
+            created = await client.post("/api/router/executions", data={
+                "operation_id": "quality-1",
+                "profile": "quality",
+                "mode": "t2v",
+                "prompt": "high quality product shot",
+                "duration": "5",
+                "seed": "7",
+                "audio_policy": "native",
+                "aspect_ratio": "16:9",
+                "watermark": "false",
+            })
+            assert created.status_code == 200
+            workflow = submitted[0]["prompt"]
+            assert workflow["1"]["inputs"]["width"] == 1344
+            assert workflow["1"]["inputs"]["height"] == 768
+            assert workflow["2"]["inputs"]["steps"] == 14
+            body = {"operation_id": "cancel-quality-1"}
+            first = await client.post("/api/router/executions/quality-1/cancel", json=body)
+            replay = await client.post("/api/router/executions/quality-1/cancel", json=body)
+            assert first.json()["status"] == "cancelled"
+            assert replay.json() == first.json()
+            assert cancelled == ["/api/jobs/quality-prompt/cancel"]
+            conflict = await client.post(
+                "/api/router/executions/quality-1/cancel",
+                json={"operation_id": "cancel-quality-1", "extra": True},
+            )
+            assert conflict.status_code == 400
+
+    asyncio.run(scenario())

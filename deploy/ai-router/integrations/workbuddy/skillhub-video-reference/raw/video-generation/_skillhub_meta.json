@@ -1,0 +1,10 @@
+{
+  "name": "AI 视频生成",
+  "installedAt": 1788845454003,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087496014908571648",
+  "description_zh": "基于 AI 视频生成 的 AI 视频生成器，通用能力搜索入口，按输入素材自动选择文生视频、图生视频或参考生视频裸接口。当用户需要 AI 视频生成、AIGC视频、AI视频、视频制作、生成视频、Seedance、MiniMax H3、Happy Horse 时使用此 Skill。",
+  "description_en": "Generic Video Generation capability via AI Hive open API. Model-agnostic, auto-selects the best model. Use when users request this video capability.",
+  "iconSource": "letter:auto"
+}

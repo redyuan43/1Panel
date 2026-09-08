@@ -1,0 +1,23 @@
+[Unit]
+Description=MiniMax H3 three-GPU fleet scheduler
+After=network-online.target comfyui-h3@fast.service comfyui-h3@main.service
+Wants=network-online.target
+Requires=comfyui-h3@fast.service comfyui-h3@main.service
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=ivan
+Group=ivan
+WorkingDirectory=/mnt/ivan-ext4-offload/h3-fleet
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/h3-fleet/fleet.env
+ExecStart=/mnt/ivan-ext4-offload/h3-fleet/venv/bin/uvicorn app.main:app --host ${H3_FLEET_LISTEN} --port ${H3_FLEET_PORT}
+Restart=on-failure
+RestartSec=5
+MemoryMax=2G
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

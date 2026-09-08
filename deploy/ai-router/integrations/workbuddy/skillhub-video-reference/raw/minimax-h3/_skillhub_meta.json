@@ -1,0 +1,10 @@
+{
+  "name": "MiniMax H3 视频生成",
+  "installedAt": 1788845458880,
+  "source": "marketplace",
+  "version": "1.0.0",
+  "skillId": "skill_2087447306503159808",
+  "description_zh": "基于 MiniMax H3 视频生成 的 AI 视频生成器，覆盖 MiniMax H3、MiniMaxH3、海螺 H3、Hailuo H3、海螺视频 的裸接口与全部公开模式。当用户需要 MiniMax H3、MiniMaxH3、海螺 H3、Hailuo H3、海螺视频、文生视频、图生视频、参考生视频、AI视频、视频生成、广告、TVC、带货、种草、短剧、漫剧 时使用此 Skill。",
+  "description_en": "AI video generator via AI Hive open API for MiniMax H3. Covers all public modes. Use when users need MiniMax H3 video generation.",
+  "iconSource": "letter:auto"
+}

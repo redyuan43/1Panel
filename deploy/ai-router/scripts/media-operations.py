@@ -30,6 +30,7 @@ def prepare():
     values = {
         "AI_ROUTER_MEDIA_INTERNAL_KEY": key,
         "AI_ROUTER_MEDIA_ROOT": "/opt/1panel/ai-router/media",
+        "AI_ROUTER_H3_EXECUTOR_URL": "http://100.96.79.21:8789",
     }
     h3 = PRIVATE / "h3-key"
     if h3.exists():
@@ -82,20 +83,21 @@ def accounts():
     target = PRIVATE / "acceptance.env"
     saved = dotenv_values(target)
     specifications = (
-        ("media-acceptance-20260904", "public", ["siyuan-image", "siyuan-video"], "MEDIA_CLIENT_KEY"),
-        ("media-other-20260904", "public", [], "MEDIA_OTHER_KEY"),
-        ("media-paid-20260904", "internal", ["qwen-image-3.0-pro"], "MEDIA_PAID_KEY"),
+        ("media-acceptance-20260904", "public", ["siyuan-image", "siyuan-video"], "MEDIA_CLIENT_KEY", 1),
+        ("media-other-20260904", "public", [], "MEDIA_OTHER_KEY", 1),
+        ("media-paid-20260904", "internal", ["qwen-image-3.0-pro"], "MEDIA_PAID_KEY", 1),
+        ("media-video-review-20260908", "internal", [], "MEDIA_REVIEW_KEY", 2),
     )
     with http:
         response = http.get("http://127.0.0.1:4001/api/clients")
         response.raise_for_status()
         existing = {item["id"] for item in response.json()["clients"]}
-        for name, disclosure, grants, variable in specifications:
+        for name, disclosure, grants, variable, parallel in specifications:
             if name not in existing:
                 response = http.post("http://127.0.0.1:4001/api/clients", json={
                     "id": name, "name": name, "enabled": True, "disclosure_mode": disclosure,
                     "models": ["siyuan/auto"], "media_models": grants,
-                    "rpm_limit": 30, "tpm_limit": 100000, "max_parallel_requests": 1,
+                    "rpm_limit": 30, "tpm_limit": 100000, "max_parallel_requests": parallel,
                 })
                 response.raise_for_status()
             if not saved.get(variable):
@@ -105,6 +107,11 @@ def accounts():
                 set_key(target, variable, response.json()["api_key"])
                 set_key(target, variable + "_ID", response.json()["key"]["key_id"])
         target.chmod(0o600)
+        saved = dotenv_values(target)
+        service = PRIVATE / "service.env"
+        if saved.get("MEDIA_REVIEW_KEY"):
+            set_key(service, "AI_ROUTER_VIDEO_REVIEW_KEY", saved["MEDIA_REVIEW_KEY"])
+            service.chmod(0o600)
         print(json.dumps({"acceptance_accounts": [row[0] for row in specifications]}))
 
 def manifest():
