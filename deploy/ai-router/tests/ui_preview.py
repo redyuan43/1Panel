@@ -40,12 +40,69 @@ async def prepare(directory):
     })
     settings = Settings(defaults_path=ROOT / "config/defaults.yaml",
                         runtime_path=directory / "settings.yaml")
+    settings.write_runtime({"lmcache": {"enabled": True}})
     registry = Registry(ROOT / "config/registry.yaml")
     runtime = build_runtime(settings=settings, registry=registry, store=InMemoryStateStore(),
                             token_counter=SimpleTokenCounter(), instance_id="ui-preview")
     await runtime.health.client.aclose()
-    runtime.health = FakeHealth({endpoint.id: healthy(endpoint.id, context=endpoint.safe_context_tokens)
-                                for endpoint in registry.endpoints})
+    health_statuses = {
+        endpoint.id: healthy(
+            endpoint.id,
+            context=endpoint.safe_context_tokens,
+        )
+        for endpoint in registry.endpoints
+    }
+    health_statuses["ai-qwen38-27b"].detail.update({
+        "prefix_cache_queries": 4800000,
+        "prefix_cache_hits": 1937600,
+        "lmcache": {
+            "supported": True,
+            "healthy": True,
+            "registered": False,
+            "registered_count": 0,
+            "expected_registrations": 2,
+            "connector_active": False,
+            "generation": "preview-lmcache",
+            "chunk_size": 1600,
+            "memory_used_bytes": 64 * 1024**3,
+            "memory_total_bytes": 80 * 1024**3,
+            "lookup_requested_tokens": 9408000,
+            "lookup_hit_tokens": 8736000,
+        },
+    })
+    health_statuses["edge-qwen38-flash"].detail.update({
+        "prefix_cache_queries": 7400000,
+        "prefix_cache_hits": 6275200,
+        "external_prefix_cache_queries": 180000,
+        "external_prefix_cache_hits": 152000,
+        "prompt_tokens_external_transfer": 152000,
+    })
+    health_statuses["qwen36-shared-fleet"].detail["workers"] = [
+        {
+            "worker_id": worker_id,
+            "ready": True,
+            "state": "available",
+            "safe_context_tokens": safe_context,
+            "context_size": configured_context,
+            "cache_type_k": cache_type,
+            "cache_type_v": cache_type,
+            "context_checkpoints": checkpoints,
+            "modalities": ["text", "image"],
+            "config_drift": [],
+        }
+        for (
+            worker_id,
+            safe_context,
+            configured_context,
+            cache_type,
+            checkpoints,
+        ) in (
+            ("qwen36-nx3", 57344, 57344, "q4_0", 2),
+            ("qwen36-nx4", 57344, 57344, "q4_0", 2),
+            ("qwen36-agx", 255000, 262144, "q8_0", 8),
+        )
+    ]
+    runtime.health = FakeHealth(health_statuses)
     runtime.policy.health = runtime.health
 
     def reject_network(request):

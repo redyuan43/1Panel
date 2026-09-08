@@ -16,6 +16,10 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from .cache_deployments import (
+    cache_deployment_view,
+    load_cache_deployment_catalog,
+)
 from .errors import RouterError
 from .identity import IdentityProfile
 from .media_service.gateway import router as media_router
@@ -46,6 +50,8 @@ EDITABLE_SECTIONS = {
 
 
 def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
+    cache_catalog = load_cache_deployment_catalog()
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         owned = runtime is None
@@ -485,6 +491,21 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         current = _authorized_runtime(request)
         await current.reload_endpoint_config()
         return {"endpoints": await _endpoint_values(current)}
+
+    @app.get("/api/cache/deployments")
+    async def cache_deployments(request: Request) -> JSONResponse:
+        current = _authorized_runtime(request)
+        current.reload_settings()
+        await current.reload_endpoint_config()
+        payload = cache_deployment_view(
+            cache_catalog,
+            await _endpoint_values(current),
+            current.settings.value,
+        )
+        return JSONResponse(
+            payload,
+            headers={"Cache-Control": "no-store"},
+        )
 
     @app.patch("/api/endpoints/{endpoint_id}")
     async def update_endpoint_draft(

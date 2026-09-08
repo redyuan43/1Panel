@@ -16,6 +16,8 @@ Agent 与第三方调用示例见
 - `POST /v1/responses`
 - `GET /v1/models`
 - `GET /api/dashboard`：控制面运行总览、节点、物理 worker、请求记录和云端预算
+- `GET /api/cache/deployments`：AI、Edge、NX3、NX4、AGX 的声明配置、
+  实际运行、验证证据和安全管理边界
 - `GET /api/route-graph` 与 `/api/route-traces`：真实路由决策图、证据和人工审核
 - `GET/POST/PATCH /api/clients`：客户端账号、独立限额、模型权限和多 Key 管理
 - `model=auto` 的能力、上下文、健康、质量、负载和层级筛选
@@ -27,11 +29,15 @@ Agent 与第三方调用示例见
 - 同模型换 worker 可携带完整历史；跨模型迁移必须生成加密迁移胶囊
 - 独立设置页与 JSONL 审计日志
 - 自动刷新的运维控制台，展示运行中请求、路由结果、告警和最近流量
+- 独立“缓存部署”页面，区分 APC、LMCache、原生磁盘和网关快照
 - Redis 持久会话分支状态；LiteLLM 和 Redis 不暴露宿主端口
 - 独立 SQLite 训练归档；完整对话压缩并加密后永久保存
 - Codex Pro 订阅通过独立 OAuth 适配器接入，凭据不与桌面 Codex 共用
 - 图片和音频二进制数据不按 Base64 文本计入 TPM；媒体使用独立保守 Token
   估算，请求体大小由 32 MiB 上限单独保护
+
+缓存部署目录、证据边界和设备策略见
+[`docs/cache-deployments.md`](docs/cache-deployments.md)。
 
 ## 生图与分阶段视频
 

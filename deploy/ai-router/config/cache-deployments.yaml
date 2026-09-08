@@ -1,0 +1,278 @@
+version: 1
+updated_at: "2026-09-08"
+
+deployments:
+  - id: ai-v100-tp2
+    title: AI V100 TP2
+    node: ai
+    strategy: lmcache_dram
+    flow_label: GPU APC -> LMCache DRAM -> Prefill
+    target:
+      endpoint_id: ai-qwen38-27b
+    lifecycle: deployed
+    layers:
+      - id: gpu-apc
+        label: GPU APC
+        medium: gpu
+        backend: vllm-apc
+        capacity: GPU KV Cache
+        persistence: vllm-process
+        description: vLLM 进程内最快的前缀复用层。
+      - id: lmcache-dram
+        label: LMCache DRAM
+        medium: dram
+        backend: LMCacheMPConnector
+        capacity: 80 GiB
+        persistence: lmcache-process
+        description: 位于 NUMA1 的 CPU DRAM 二级缓存。
+      - id: recompute
+        label: Recompute Prefill
+        medium: compute
+        backend: vllm
+        capacity: unbounded
+        persistence: none
+        description: GPU 和 DRAM 都未命中时重新计算 Prompt。
+    services:
+      - manager: systemd-user
+        unit: qwen38-v100-tp2-vllm.service
+      - manager: systemd-user
+        unit: qwen38-v100-tp2-lmcache.service
+    paths:
+      source: deploy/ai-router/docs/qwen38-v100-tp2-lmcache.md
+      deployment: /home/ai
+    validation:
+      status: partial
+      validated_at: "2026-09-08"
+      summary: GPU APC 与 LMCache 指标可观测；必须独立检查 Connector 是否真实附着。
+    telemetry:
+      mode: native
+      status: installed
+    management:
+      endpoint_actions: true
+      lmcache_settings: true
+      remote_restart: false
+      cache_clear: false
+    limitations:
+      - LMCache 服务健康和 vLLM Connector 附着是两个独立状态。
+      - 配置变化需要受控重启模型服务才能生效。
+
+  - id: edge-qwen38-flash
+    title: Edge Qwen3.8 Flash
+    node: edge
+    strategy: native_disk
+    flow_label: GPU APC -> Native Disk -> Prefill
+    target:
+      endpoint_id: edge-qwen38-flash
+    lifecycle: deployed
+    layers:
+      - id: gpu-apc
+        label: GPU APC
+        medium: gpu
+        backend: vllm-apc
+        capacity: GPU KV Cache
+        persistence: vllm-process
+        description: vLLM 进程内最快的前缀复用层。
+      - id: disk-backend
+        label: Native Disk
+        medium: disk
+        backend: SimpleCPUOffloadConnector
+        capacity: 32 GiB
+        persistence: same-vllm-process
+        description: 使用 O_DIRECT 将被淘汰的 Prefix Block 延迟写入磁盘。
+      - id: recompute
+        label: Recompute Prefill
+        medium: compute
+        backend: vllm
+        capacity: unbounded
+        persistence: none
+        description: APC 和 DiskBackend 都未命中时重新计算 Prompt。
+    services:
+      - manager: systemd
+        unit: qwen38-flash-next-vllm.service
+    paths:
+      source: deploy/ai-router/integrations/edge-disk-cache
+      deployment: /home/admin
+    validation:
+      status: validated
+      validated_at: "2026-09-08"
+      summary: 同进程 20K、40K、50K 磁盘淘汰与恢复已通过语义和 TTFT 验收。
+    telemetry:
+      mode: native
+      status: installed
+    management:
+      endpoint_actions: true
+      lmcache_settings: false
+      remote_restart: false
+      cache_clear: false
+    limitations:
+      - 跨 vLLM 进程和系统重启后的复用仍未验证。
+      - 安装远端聚合遥测前，文件系统占用量不可实时观测。
+
+  - id: nx3-qwen36
+    title: NX3 Qwen3.6
+    node: nx3
+    strategy: gateway_snapshot
+    flow_label: Checkpoint -> Gateway Snapshot -> Prefill
+    target:
+      endpoint_id: qwen36-shared-fleet
+      worker_id: qwen36-nx3
+    lifecycle: deployed
+    layers:
+      - id: checkpoint
+        label: Native Checkpoint
+        medium: process
+        backend: llama.cpp
+        capacity: 2 checkpoints
+        persistence: llama-process
+        description: llama.cpp 进程内保存目标状态、MTP 状态和 Checkpoint。
+      - id: gateway-snapshot
+        label: Gateway Snapshot
+        medium: disk
+        backend: qwen36-prefix-gateway
+        capacity: 3 snapshots / 2 GiB
+        persistence: local-disk
+        description: 网关使用 Manifest 校验并恢复本地 Prefix 快照。
+      - id: recompute
+        label: Recompute Prefill
+        medium: compute
+        backend: llama.cpp
+        capacity: unbounded
+        persistence: none
+        description: 短前缀、多模态、损坏或不兼容快照会明确回退到重新计算。
+    services:
+      - manager: systemd
+        unit: nx3-qwen36.service
+      - manager: systemd
+        unit: nx3-qwen36-cache-gateway.service
+    paths:
+      source: deploy/ai-router/scripts/qwen36_prefix_gateway.py
+      deployment: /home/nx/llama/prefix-cache-production
+      cache: /home/nx/.local/share/qwen36-prefix-cache
+    validation:
+      status: validated
+      validated_at: "2026-09-07"
+      summary: 原生 Checkpoint 与网关磁盘恢复已通过请求级语义检查。
+    telemetry:
+      mode: request
+      status: partial
+    management:
+      endpoint_actions: false
+      lmcache_settings: false
+      remote_restart: false
+      cache_clear: false
+    limitations:
+      - 网关事件、原生缓存 Token 和 TTFT 必须共同作为命中证据。
+      - 多模态请求会绕过文本 Prefix 快照。
+
+  - id: nx4-qwen36
+    title: NX4 Qwen3.6
+    node: nx4
+    strategy: gateway_snapshot
+    flow_label: Checkpoint -> Planned Snapshot -> Prefill
+    target:
+      endpoint_id: qwen36-shared-fleet
+      worker_id: qwen36-nx4
+    lifecycle: planned
+    layers:
+      - id: checkpoint
+        label: Native Checkpoint
+        medium: process
+        backend: llama.cpp
+        capacity: 2 checkpoints
+        persistence: llama-process
+        description: 保持当前 57K、Q4 KV 和 MTP2 运行参数不变。
+      - id: gateway-snapshot
+        label: Planned Snapshot
+        medium: disk
+        backend: qwen36-prefix-gateway
+        capacity: 3 snapshots / 2 GiB
+        persistence: planned-local-disk
+        description: 候选和生产缓存数据统一放在 /mnt/data。
+      - id: recompute
+        label: Recompute Prefill
+        medium: compute
+        backend: llama.cpp
+        capacity: unbounded
+        persistence: none
+        description: 构建或语义验收失败时继续保留当前直连服务。
+    services:
+      - manager: systemd-user
+        unit: qwen36-shared.service
+      - manager: systemd-user
+        unit: qwen36-shared-cache-gateway.service
+        state: planned
+    paths:
+      source: deploy/ai-router/scripts/qwen36_prefix_gateway.py
+      deployment: /mnt/data/qwen36-prefix-cache-production
+      cache: /mnt/data/qwen36-prefix-cache
+    validation:
+      status: planned
+      validated_at: null
+      summary: 需要完成可审计的 NX4 本机构建及隔离的 20K、40K、50K 验收。
+    telemetry:
+      mode: aggregate
+      status: planned
+    management:
+      endpoint_actions: false
+      lmcache_settings: false
+      remote_restart: false
+      cache_clear: false
+    limitations:
+      - 当前生产服务仍直接监听 8081。
+      - 不得复制 NX3 二进制到 NX4；原生库必须在 NX4 上审计并重新构建。
+
+  - id: agx-qwen36
+    title: AGX Qwen3.6
+    node: agx
+    strategy: gateway_snapshot
+    flow_label: Checkpoint -> Gateway Snapshot -> Prefill
+    target:
+      endpoint_id: qwen36-shared-fleet
+      worker_id: qwen36-agx
+    lifecycle: deployed
+    layers:
+      - id: checkpoint
+        label: Native Checkpoint
+        medium: process
+        backend: llama.cpp
+        capacity: 8 checkpoints
+        persistence: llama-process
+        description: llama.cpp 进程内保存 Q8 KV 和 MTP2 Checkpoint 状态。
+      - id: gateway-snapshot
+        label: Gateway Snapshot
+        medium: disk
+        backend: qwen36-prefix-gateway
+        capacity: 3 snapshots / 12 GiB
+        persistence: local-disk
+        description: 使用 Manifest 绑定并保存在 AGX 本地存储的快照。
+      - id: recompute
+        label: Recompute Prefill
+        medium: compute
+        backend: llama.cpp
+        capacity: unbounded
+        persistence: none
+        description: 被绕过或不兼容的快照会明确回退到重新计算。
+    services:
+      - manager: systemd
+        unit: agx-cerebellum.service
+      - manager: systemd
+        unit: agx-qwen36-cache-gateway.service
+    paths:
+      source: deploy/ai-router/scripts/qwen36_prefix_gateway.py
+      deployment: /data/agx-runtimes/qwen36-prefix-cache-production
+      cache: /data/agx-runtimes/qwen36-prefix-cache
+    validation:
+      status: validated
+      validated_at: "2026-09-07"
+      summary: 持久化网关快照已有历史请求证据。
+    telemetry:
+      mode: request
+      status: partial
+    management:
+      endpoint_actions: false
+      lmcache_settings: false
+      remote_restart: false
+      cache_clear: false
+    limitations:
+      - 本次控制台变更不会重启、测试或修改 AGX 生产服务。
+      - 单独部署聚合遥测前，磁盘用量和累计计数仍不可实时观测。
