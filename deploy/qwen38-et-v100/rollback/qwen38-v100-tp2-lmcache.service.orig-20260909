@@ -1,0 +1,24 @@
+[Unit]
+Description=LMCache DRAM L1 for Qwen3.8 V100 TP2
+After=network-online.target
+Wants=network-online.target
+Before=qwen38-v100-tp2-vllm.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/1cat-vllm/qwen38-v100-tp2.env
+ExecStart=/home/ai/github/1Panel/deploy/ai-router/scripts/run-qwen38-v100-tp2-lmcache-container.sh
+ExecStop=-/usr/bin/docker stop --time 120 qwen38-v100-tp2-lmcache
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=600
+TimeoutStopSec=180
+KillMode=mixed
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+MemoryMax=96G
+NUMAPolicy=bind
+NUMAMask=1
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,117 @@
+{
+  "status": "completed",
+  "configuration": "TP2 GPU4/5, context32768, DFlash2 8 speculative tokens, max-num-seqs4",
+  "timing_note": "Client SSE TTFT; post-first-token rate approximate because speculative tokens can arrive in bursts. Not server-only prefill throughput. Synthetic prompts, ignore_eos for timing, not a quality benchmark.",
+  "rows": [
+    {
+      "case": "warmup",
+      "elapsed_s": 4.182602555985795,
+      "ttft_s": 1.6766264259931631,
+      "post_first_token_tps_approx": 25.14212921485559,
+      "usage": {
+        "prompt_tokens": 20,
+        "total_tokens": 84,
+        "completion_tokens": 64
+      },
+      "sample": "\n\nTo understand why independent GPU memory is not automatically pooled across two GPUs, we must look at the fundamental architectural differences between how GPUs are designed to operate versus how a single, unified memory system functions. The short answer is that **GPUs are designed for massive parallelism with strict locality, and the hardware cost of making"
+    },
+    {
+      "case": "short_0",
+      "elapsed_s": 4.979534106008941,
+      "ttft_s": 0.19065374301862903,
+      "post_first_token_tps_approx": 53.25021814319163,
+      "usage": {
+        "prompt_tokens": 20,
+        "total_tokens": 276,
+        "completion_tokens": 256
+      },
+      "sample": "\n\nTo understand why independent GPU memory is not automatically pooled across two GPUs, we must look at the fundamental architectural differences between how GPUs are designed to operate versus how a single, unified memory system functions. The short answer is that **GPUs are designed for massive parallelism with strict locality, and the hardware cost of making memory \"global\" across two separate chips is prohibitive for the vast majority of workloads.**\n\nHere is the precise engineering explanation, broken down by the key technical constraints:\n\n### 1. The Memory Hierarchy and Locality\nA single GPU is not just a processor with memory; it is a **memory hierarchy** optimized for locality.\n*   **L1/L2 Cache:** Each GPU has on-die caches (L1 per SM, L2 shared across the chip). These are nanoseconds fast.\n*   **HBM/GDDR:** The main memory (HBM3, GDDR6) is attached directly to the GPU die via high-bandwidth, low-latency interconnects (e.g., HBM stacks are physically stacked on the same substrate as the GPU die).\n*   **The Problem:** If you pool memory across two GPUs, a thread on GPU 0 accessing data on GPU 1 must"
+    },
+    {
+      "case": "short_1",
+      "elapsed_s": 5.185349767998559,
+      "ttft_s": 0.1925849579856731,
+      "post_first_token_tps_approx": 51.07607337778327,
+      "usage": {
+        "prompt_tokens": 20,
+        "total_tokens": 276,
+        "completion_tokens": 256
+      },
+      "sample": "\n\nTo understand why independent GPU memory is not automatically pooled across two GPUs, we must look at the fundamental architectural differences between how GPUs are designed to operate versus how a single, unified memory system functions. The short answer is that **GPUs are designed for massive parallelism with strict locality, and the hardware cost of making memory \"global\" across two separate chips is prohibitive for the vast majority of workloads.**\n\nHere is the precise engineering explanation, broken down by the key technical constraints:\n\n### 1. The Memory Hierarchy and Locality\nA single GPU is not just a processor with memory; it is a **memory hierarchy** optimized for locality.\n*   **L1/L2 Cache:** Each GPU has on-die caches (L1 per SM, L2 shared across the chip). These are nanoseconds fast.\n*   **HBM/GDDR:** The main memory (HBM3, GDDR6) is attached directly to the GPU die via high-bandwidth, low-latency interconnects (e.g., HBM stacks are physically stacked on the same substrate as the GPU die).\n*   **The Problem:** If you pool memory across two GPUs, a thread on GPU 0 accessing data on GPU 1 must"
+    },
+    {
+      "case": "input_8192",
+      "elapsed_s": 12.002149025996914,
+      "ttft_s": 8.158950815006392,
+      "post_first_token_tps_approx": 66.35334399029517,
+      "usage": {
+        "prompt_tokens": 8192,
+        "total_tokens": 8448,
+        "completion_tokens": 256
+      },
+      "sample": ". Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU"
+    },
+    {
+      "case": "input_24576",
+      "elapsed_s": 23.681652582017705,
+      "ttft_s": 19.33672436501365,
+      "post_first_token_tps_approx": 58.69143019321205,
+      "usage": {
+        "prompt_tokens": 24576,
+        "total_tokens": 24832,
+        "completion_tokens": 256
+      },
+      "sample": " its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory. Each GPU owns its own memory. A deterministic benchmark record contains facts about CPU memory and GPU memory"
+    },
+    {
+      "case": "concurrent4_0",
+      "elapsed_s": 7.059588731994154,
+      "ttft_s": 0.9096278069773689,
+      "post_first_token_tps_approx": 41.46487059038601,
+      "usage": {
+        "prompt_tokens": 23,
+        "total_tokens": 279,
+        "completion_tokens": 256
+      },
+      "sample": ": Two GPUs with independent memory. Case 1: Two GPUs with shared memory.\n\nTo explain why independent GPU memory is not automatically pooled, we must look at the fundamental architectural differences between **Case 0 (Independent Memory)** and **Case 1 (Shared Memory)** and the specific engineering constraints that prevent a simple \"pooling\" of Case 0 into Case 1.\n\n### The Core Engineering Problem: Address Space and Latency\n\nIn **Case 0**, each GPU has its own local High-Bandwidth Memory (HBM or GDDR). This memory is physically attached to the GPU die via a very wide, high-speed bus (e.g., 512-bit or 1024-bit). The GPU's memory controller is designed to access *only* this local memory with extremely low latency (nanoseconds) and massive bandwidth (TB/s).\n\nIn **Case 1**, \"shared memory\" implies that any GPU can access any part of the memory pool as if it were local. This requires a unified address space and a mechanism for one GPU to read/write data residing in another GPU's local memory.\n\n**Why isn't this automatic?**\n\n1.  **Address Space Fragmentation:**\n    *   In Case "
+    },
+    {
+      "case": "concurrent4_1",
+      "elapsed_s": 7.157401828997536,
+      "ttft_s": 0.9081547930254601,
+      "post_first_token_tps_approx": 40.80703802586196,
+      "usage": {
+        "prompt_tokens": 23,
+        "total_tokens": 279,
+        "completion_tokens": 256
+      },
+      "sample": ": A single process uses both GPUs. Case 2: Two separate processes each use one GPU.\n\nTo explain why independent GPU memory is not automatically pooled, we must look at the fundamental architecture of modern GPUs and the operating system's memory management. The short answer is that **GPU memory is not a single, unified address space by default; it is a set of isolated, hardware-specific resources.**\n\nHere is the precise engineering explanation for both cases.\n\n### Core Architectural Constraint: The IOMMU and Address Translation\n\nThe root cause lies in how the CPU and GPU communicate.\n\n1.  **Physical vs. Virtual Addressing:**\n    *   The CPU operates in a **Virtual Address Space (VAS)**. When a process allocates memory, the OS gives it virtual addresses. The CPU’s Memory Management Unit (MMU) translates these to physical addresses.\n    *   The GPU has its own **Video RAM (VRAM)**. This VRAM is physically separate from system RAM.\n    *   To allow the GPU to access system memory (or vice versa), the system uses an **IOMMU (Input-Output Memory Management Unit)**. The IOMMU translates GPU virtual addresses to physical addresses.\n\n2.  **The \"Isolation"
+    },
+    {
+      "case": "concurrent4_2",
+      "elapsed_s": 7.156515037990175,
+      "ttft_s": 0.9069949839904439,
+      "post_first_token_tps_approx": 40.80459607297831,
+      "usage": {
+        "prompt_tokens": 23,
+        "total_tokens": 279,
+        "completion_tokens": 256
+      },
+      "sample": ": If the user has two GPUs and wants to run a single model that is too large for one GPU, how should they configure PyTorch to split the model across both GPUs? Provide a model-parallelism approach (not data parallelism).\n\n<think>\nThe user is asking two distinct questions:\n\n1. Why isn't GPU memory automatically pooled across two GPUs? They want a precise engineering explanation.\n2. How to configure PyTorch for model parallelism (not data parallelism) across two GPUs when a single model is too large for one GPU.\n\nLet me think carefully about both.\n\n**Question 1: Why isn't GPU memory automatically pooled?**\n\nThis is a deep systems question. Let me think about the actual hardware and software architecture:\n\n- Each GPU is a separate compute device with its own HBM (High Bandwidth Memory) or GDDR. These are physically separate memory chips soldered to separate PCBs (or on separate modules).\n- The GPU's memory controller is local to that GPU. It manages its own DRAM. There is no shared memory fabric between two discrete GPUs by default.\n- The PCIe bus (or NVLink) connects GPUs to the CPU and to each other, but these are interconnect"
+    },
+    {
+      "case": "concurrent4_3",
+      "elapsed_s": 7.0066402980010025,
+      "ttft_s": 0.9059807609883137,
+      "post_first_token_tps_approx": 41.80011231623707,
+      "usage": {
+        "prompt_tokens": 23,
+        "total_tokens": 279,
+        "completion_tokens": 256
+      },
+      "sample": ": Two GPUs, each with 16 GB of HBM, and the application allocates 20 GB.\n\nHere is a precise engineering explanation of why independent GPU memory is not automatically pooled, followed by an analysis of your specific case.\n\n### Why GPU Memory is Not Automatically Pooled\n\nThe fundamental reason GPU memory is not automatically pooled is that **GPU memory is not a single, unified address space by default.**\n\n1.  **Discrete Address Spaces:** Each GPU (e.g., GPU 0 and GPU 1) has its own physical memory (HBM) and its own memory controller. From the perspective of the CPU and the operating system, these are two separate, discrete devices.\n2.  **No Automatic Translation:** When a CPU program calls `cudaMalloc` (or the equivalent for other GPU stacks), it is asking *one specific GPU* to allocate memory from *its own* HBM. The GPU's memory controller manages this memory using its own page tables. There is no hardware or software mechanism that automatically makes GPU 0's memory visible to GPU 1, or vice versa, without explicit setup.\n3.  **The Role of the CPU:** The CPU acts as the intermediary. To move data between GPUs"
+    }
+  ],
+  "concurrent4_wall_s": 7.162787594977999,
+  "concurrent4_total_tokens_per_s": 142.96110088730688
+}
