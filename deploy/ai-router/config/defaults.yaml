@@ -66,10 +66,7 @@ routing:
     enabled: false
     members: [ai-qwen38-27b, edge-qwen38-flash, amd-qwen38-rocmfpx-128k]
     recent_seconds: 600
-    min_samples: 5
-    min_saving_seconds: 5
     min_saving_ratio: 0.20
-    recheck_seconds: 5
   affinity_capacity_wait_seconds: 120
   client_deployment_pins:
     - client_id: workbuddy-qwen36-shared

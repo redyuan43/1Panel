@@ -170,7 +170,9 @@ class RouterRuntime:
             suffix = key.removeprefix(history_prefix)
             if not conversation_id or ":" not in suffix:
                 continue
-            client_id, _identity = suffix.rsplit(":", 1)
+            client_id, _identity = suffix.split(":", 1)
+            if _identity.startswith("wb-raw-v1:"):
+                continue  # Raw aliases must be rebuilt from the raw encrypted archive.
             clients_by_conversation.setdefault(
                 conversation_id,
                 set(),
@@ -304,6 +306,8 @@ class RouterRuntime:
             **cleanup,
         )
         await self._publish_instance_state("running")
+        from .history_index import rebuild_verified_history
+        self._verified_history_backfill = asyncio.create_task(rebuild_verified_history(self))
 
     async def track_request_started(
         self,
@@ -450,6 +454,13 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        backfill = getattr(self, "_verified_history_backfill", None)
+        if backfill is not None:
+            backfill.cancel()
+            try:
+                await backfill
+            except asyncio.CancelledError:
+                pass
         close_health = getattr(self.health, "close", None)
         if close_health is not None:
             await close_health()

@@ -135,7 +135,7 @@ def test_choose_explicit_endpoint_directive_is_not_overridden_by_local_pool():
     asyncio.run(case())
 
 
-def test_choose_local_pool_can_migrate_busy_edge_after_five_cost_samples():
+def test_choose_keeps_busy_edge_even_when_old_cost_samples_predict_faster_ai():
     async def case():
         policy, endpoints = make_policy()
         now = time.time()
@@ -154,6 +154,6 @@ def test_choose_local_pool_can_migrate_busy_edge_after_five_cost_samples():
             endpoint_id=edge.id, deployment_id=None,
             tier_rank=edge.tier_rank, task="general", last_seen=now)
         decision = await choose(policy, conversation=conversation, prompt_tokens=40000, output_reserve_tokens=16000, trace=trace("migrate", "migrate"))
-        assert decision.endpoint.id == "ai-qwen38-27b"
-        assert decision.migration is True
+        assert decision.endpoint.id == "edge-qwen38-flash"
+        assert decision.migration is False
     asyncio.run(case())

@@ -21,3 +21,25 @@ def test_independent_router_clients_share_atomic_allocations():
             for rid in ids: await pools[0].release(rid)
             for store in stores: await store.close()
     asyncio.run(case())
+
+
+@pytest.mark.skipif(not os.environ.get("LOCAL_POOL_TEST_REDIS"), reason="requires disposable Redis")
+def test_verified_history_atomic_writes_preserve_all_candidates_and_bound_memory():
+    async def case():
+        from ai_router.policy import ConversationRepository
+        from ai_router.history import history_identities, history_lookup_identities
+        from tests.test_verified_history import histories, save
+        template, _, _ = fixtures()
+        stores = [RedisStateStore(os.environ["LOCAL_POOL_TEST_REDIS"]) for _ in range(2)]
+        repos = [ConversationRepository(s, template.settings) for s in stores]
+        a, b = histories()
+        try:
+            for i in range(20): await save(repos[i%2], "parallel-"+str(i))
+            await asyncio.gather(*(repos[i%2].map_history("isolated", history_identities(a), "parallel-"+str(i)) for i in range(20)))
+            values = await stores[0].list_json("router:verified-history:isolated:")
+            assert len(values) == 1 and len(values[0]["branches"]) == 16 and values[0]["overflow"] is True
+            parent, evidence = await repos[1].verified_history_match("isolated", history_lookup_identities([*b, {"role":"user","content":"next"}]))
+            assert parent is None and evidence["reason"] == "ambiguous_history"
+        finally:
+            for store in stores: await store.close()
+    asyncio.run(case())

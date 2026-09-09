@@ -995,7 +995,7 @@
                 <label class="toggle-row"><span>自动选型时平衡分配新会话</span><input id="local-pool-enabled" type="checkbox"></label>
                 <label>近期会话占用窗口（分钟）<input id="local-pool-recent" type="number" min="1" max="60" step="1"></label>
                 <p class="wide field-hint">新会话按空闲程度、近期会话数与并发容量分散；已确认的续请求优先原设备。保留各设备真实上下文与能力，明确指定设备或模型仍优先。</p>
-                <p class="wide field-hint">原设备繁忙时，至少 5 个同版本、相近输入规模及缓存状态的实测样本才估算首字等待。默认异机至少快 5 秒且快 20% 才迁移；证据不足每 5 秒复评，沿用会话等待上限。跨设备可能需要重新计算输入。</p>
+                <p class="wide field-hint">续请求固定使用已验证的设备，不再按预测速度主动迁移。每 5 秒检查原设备健康与容量；仅故障、能力不足、排队超时或明确指定时切换。默认等待上限 120 秒，跨设备可能需要重新计算输入。</p>
               </div>
             </section>
             <div class="policy-flow-connector"></div>

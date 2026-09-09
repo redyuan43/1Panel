@@ -98,7 +98,7 @@ function renderUnifiedAudit() {
   }).join("");
   byId("audit-pipeline").querySelectorAll("[data-pipeline-stage]").forEach(b=>b.addEventListener("click",()=>selectPipelineStage(b.dataset.pipelineStage)));
   byId("audit-routing-detail").hidden=cacheView.stage!=="routing";
-  byId("local-pool-audit").innerHTML=localPoolHtml(trace.local_pool);
+  byId("local-pool-audit").innerHTML=historyMatchHtml(trace.history_match)+localPoolHtml(trace.local_pool);
   byId("audit-stage-detail").hidden=!cacheView.stage||cacheView.stage==="routing";
   byId("cache-content").hidden=cacheView.stage!=="content";
   if(cacheView.stage&&cacheView.stage!=="routing")renderPipelineDetail();
@@ -214,8 +214,15 @@ function initializeCacheAudit() {
 
 function localPoolHtml(pool) {
   if (!pool) return "";
-  const labels={allocation_lock_busy:"分配锁繁忙，按既有容量机制选型；未保证分散",spread_new_conversations:"分散分配新会话",estimated_faster_first_output:"预计更快的首个输出",insufficient_cost_evidence_keep_affinity:"估算证据不足，保留原设备",original_device_available_keep_affinity:"原设备可用，保持会话亲和",migration_not_materially_faster:"异机收益不足，保持会话亲和",insufficient_matching_samples:"匹配样本不足",unknown_remaining_service_time:"剩余执行时间未知",capacity_timeout_cold_fallback:"等待达到上限，按容量回退；异机缓存未保证"};
+  const labels={keep_verified_device:"已验证续请求，保持当前设备",waiting_for_verified_device:"等待当前设备容量；仅故障、能力不足或超时后迁移",allocation_lock_busy:"分配锁繁忙，按既有容量机制选型；未保证分散",spread_new_conversations:"分散分配新会话",estimated_faster_first_output:"预计更快的首个输出",insufficient_cost_evidence_keep_affinity:"估算证据不足，保留原设备",original_device_available_keep_affinity:"原设备可用，保持会话亲和",migration_not_materially_faster:"异机收益不足，保持会话亲和",insufficient_matching_samples:"匹配样本不足",unknown_remaining_service_time:"剩余执行时间未知",capacity_timeout_cold_fallback:"等待达到上限，按容量回退；异机缓存未保证"};
   const candidates=(pool.candidates||[]).map(c=>`<tr><td>${escapeHtml(c.endpoint_id)}</td><td>${c.available?"有容量":"占用中"}</td><td>${Number(c.running)} / ${Number(c.capacity)}</td><td>${Number(c.recent_conversations)} / ${Number(c.capacity)}</td></tr>`).join("");
   const costs=(pool.costs||[]).map(c=>`<tr><td>${escapeHtml(c.endpoint_id)}</td><td>${c.cache_assumption==="hot"?"近期同会话高复用（估算假设）":"冷计算（保守估算）"}</td><td>${Number(c.sample_count)}</td><td>${c.queue_s==null?"未知":escapeHtml(cacheFormat(c.queue_s*1000))}</td><td>${c.total_s==null?escapeHtml(labels[c.unavailable_reason]||"未知"):escapeHtml(cacheFormat(c.total_s*1000))}</td></tr>`).join("");
-  return `<section class="cache-prefix-break"><strong>本地候选组 · AMD / AI / Edge</strong><p>${escapeHtml(labels[pool.selection]||labels[pool.wait_reason]||"按实际容量选择设备")}${pool.target?` → ${escapeHtml(pool.target)}`:""}</p>${pool.estimated_saving_s!=null?`<p>预计减少等待 ${escapeHtml(cacheFormat(pool.estimated_saving_s*1000))}（历史估算）</p>`:""}${candidates?`<div class="table-wrap"><table><thead><tr><th>候选设备</th><th>实际容量</th><th>在途 / 并发</th><th>近期会话 / 并发</th></tr></thead><tbody>${candidates}</tbody></table></div>`:""}${costs?`<div class="table-wrap"><table><thead><tr><th>设备</th><th>计算成本假设</th><th>有效样本</th><th>预计排队</th><th>预计首个输出总等待</th></tr></thead><tbody>${costs}</tbody></table></div>`:""}<p class="section-meta">容量不满足的端点及原始模型评分见下方完整路由判断。预计总等待包含排队与输入准备；路由亲和和估算均不能证明实际缓存命中。</p></section>`;
+  return `<section class="cache-prefix-break"><strong>本地候选组 · AMD / AI / Edge</strong>${pool.policy==="fixed_continuation_v1"?"<p>固定续跑策略：新任务均衡分配；续请求保持设备，停用速度预测迁移。</p>":""}<p>${escapeHtml(labels[pool.selection]||labels[pool.wait_reason]||"按实际容量选择设备")}${pool.target?` → ${escapeHtml(pool.target)}`:""}</p>${pool.estimated_saving_s!=null?`<p>预计减少等待 ${escapeHtml(cacheFormat(pool.estimated_saving_s*1000))}（历史估算）</p>`:""}${candidates?`<div class="table-wrap"><table><thead><tr><th>候选设备</th><th>实际容量</th><th>在途 / 并发</th><th>近期会话 / 并发</th></tr></thead><tbody>${candidates}</tbody></table></div>`:""}${costs?`<div class="table-wrap"><table><thead><tr><th>设备</th><th>计算成本假设</th><th>有效样本</th><th>预计排队</th><th>预计首个输出总等待</th></tr></thead><tbody>${costs}</tbody></table></div>`:""}<p class="section-meta">容量不满足的端点及原始模型评分见下方完整路由判断。${pool.policy==="fixed_continuation_v1"?"同设备续跑不代表计算缓存命中，实际复用量以逐请求计数为准。":"预计总等待包含排队与输入准备；路由亲和和估算均不能证明实际缓存命中。"}</p></section>`;
+}
+
+function historyMatchHtml(match) {
+  if (!match) return "";
+  const reasons={historical_prefix_only:"仅匹配旧分支，最近历史未验证",unique_history_match:"历史内容唯一匹配（含正文与工具事务校验）",shared_opening_only:"只有共同开场，关联未确认",no_verified_history:"缺少可靠历史证据",ambiguous_history:"存在多个分支候选，关联未确认"};
+  const sources={previous_response_id:"明确的上一条响应 ID",explicit_conversation_id:"明确的会话 ID",verified_history_v5:"第 5 版历史校验",history:"历史匹配"};
+  return `<section class="cache-prefix-break"><strong>会话关联 · ${match.status==="verified"?"已验证":"未确认，按新任务分配"}</strong><p>${escapeHtml(reasons[match.reason]||sources[match.source]||"证据未采集")}</p>${match.semantic_items!=null?`<p>校验边界 ${Number(match.semantic_items)} 个语义项（不是 tokens）；候选 ${Number(match.candidate_count)}</p>`:""}${match.inherited_endpoint_id?`<p>继承设备 ${escapeHtml(match.inherited_endpoint_id)}</p>`:""}<p class="section-meta">历史识别仅决定路由关联，不改写模型输入，不代表缓存命中。</p></section>`;
 }

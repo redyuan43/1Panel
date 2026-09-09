@@ -141,6 +141,11 @@ class ConversationRepository:
     ) -> None:
         ttl = int(self.settings.section("affinity").get("ttl_seconds", 86400))
         for identity in identities:
+            if "v5-history-" in identity:
+                # Independent version; bounded multi-candidate value prevents last-writer wins.
+                key = f"router:verified-history:{client_id}:{identity}"
+                await self.store.add_history_candidate(key, branch_id, ttl)
+                continue
             await self.store.set_json(
                 f"router:history-conversation:{client_id}:{identity}",
                 {"branch_id": branch_id},
@@ -159,6 +164,77 @@ class ConversationRepository:
             if value and (value.get("branch_id") or value.get("conversation_id")):
                 return str(value.get("branch_id") or value["conversation_id"])
         return None
+
+    async def verified_history_match(self, client_id, identities):
+        weak_seen = False
+        for identity in identities:
+            version = identity.removeprefix("wb-raw-v1:")
+            if not version.startswith("v5-history-"):
+                continue  # Legacy hashes cannot prove the v5 conservation contract.
+            if not version.startswith("v5-history-strong-"):
+                weak_seen = weak_seen or bool(await self.store.get_json(f"router:verified-history:{client_id}:{identity}"))
+                continue
+            value = await self.store.get_json(f"router:verified-history:{client_id}:{identity}")
+            if not value:
+                continue
+            states = [state for branch in value.get("branches", []) if (state := await self.get(branch)) is not None]
+            evidence = {"source": "verified_history_v5", "semantic_items": int(version.split("-")[3]),
+                        "candidate_count": len(states), "matched_branch_id": None}
+            if value.get("overflow") or len(states) > 1:
+                return None, {**evidence, "status": "unconfirmed", "reason": "ambiguous_history"}
+            if states:
+                parent = states[0]
+                latest_id = await self.branch_for_lineage(client_id, parent.conversation_id)
+                latest = await self.get(latest_id)
+                # Reject a proven ancestor, but preserve independently matched siblings.
+                # Completion order is not branch ancestry; never substitute devices.
+                if latest and not await self._matched_branch_can_continue(parent, latest):
+                    return None, {**evidence, "status": "unconfirmed", "reason": "historical_prefix_only"}
+                return parent, {**evidence, "status": "verified", "reason": "unique_history_match",
+                                "matched_branch_id": parent.branch_id or parent.conversation_id,
+                                "inherited_endpoint_id": parent.endpoint_id}
+        return None, {"status": "unconfirmed", "source": "history", "reason": "shared_opening_only" if weak_seen else "no_verified_history"}
+
+    async def _matched_branch_can_continue(self, matched, latest):
+        matched_id = matched.branch_id or matched.conversation_id
+        latest_id = latest.branch_id or latest.conversation_id
+        if matched_id == latest_id:
+            return True
+        # Walk actual parent links. A shared parent proves independent branches;
+        # an unrelated/missing chain cannot establish that relationship.
+        latest_path = set()
+        branch_id, state = latest_id, latest
+        for _ in range(128):
+            if branch_id == matched_id:
+                return False  # Only an ancestor of the latest branch matched.
+            if branch_id in latest_path:
+                return False
+            latest_path.add(branch_id)
+            if state is None:
+                break
+            if state.conversation_id != matched.conversation_id:
+                return False
+            branch_id = state.parent_branch_id
+            if not branch_id:
+                break
+            state = await self.get(branch_id)
+        else:
+            return False
+        visited = set()
+        branch_id, state = matched_id, matched
+        for _ in range(128):
+            if branch_id in latest_path:
+                return True  # Sibling branch, or matched branch newer than pointer.
+            if branch_id in visited or state is None:
+                return False
+            visited.add(branch_id)
+            if state.conversation_id != matched.conversation_id:
+                return False
+            branch_id = state.parent_branch_id
+            if not branch_id:
+                return False
+            state = await self.get(branch_id)
+        return False
 
     async def conversation_for_history(
         self,
@@ -200,15 +276,18 @@ class ConversationRepository:
                 mode="stateful" if explicit_lineage_id else "inferred",
                 relation="compaction_reset",
             )
+        match = {"status": "verified", "source": "previous_response_id"}
         parent_id = await self.branch_for_response(previous_response_id)
         if not parent_id:
             parent_id = await self.branch_for_lineage(
                 client_id,
                 explicit_lineage_id,
             )
-        if not parent_id:
-            parent_id = await self.branch_for_history(client_id, identities)
+            if parent_id:
+                match = {"status": "verified", "source": "explicit_conversation_id"}
         parent = await self.get(parent_id)
+        if parent is None:
+            parent, match = await self.verified_history_match(client_id, identities)
         if parent:
             return LineageContext(
                 lineage_id=explicit_lineage_id or parent.conversation_id,
@@ -217,6 +296,7 @@ class ConversationRepository:
                 mode="stateful" if explicit_lineage_id else "inferred",
                 relation="continuation",
                 parent=parent,
+                history_match=match,
             )
         return LineageContext(
             lineage_id=explicit_lineage_id or f"lineage-{uuid4().hex}",
@@ -224,6 +304,7 @@ class ConversationRepository:
             parent_branch_id=None,
             mode="stateful" if explicit_lineage_id else "inferred",
             relation="new",
+            history_match=match,
         )
 
 
@@ -670,6 +751,7 @@ class RoutingPolicy:
             )
             if (
                 recovery
+                and not self.local_pool.member(recovery)
                 and recovery_mode in {"next_turn", "when_idle"}
                 and (
                     recovery_mode == "next_turn"
@@ -730,13 +812,10 @@ class RoutingPolicy:
                 (item for item in candidates if item.id == conversation.endpoint_id),
                 None,
             )
-            if pinned and requested_model == "auto" and not directed and self.local_pool.member(pinned):
-                target = await self.local_pool.alternative(
-                    pinned, candidates, statuses, trace=trace, conversation=conversation,
-                    prompt_tokens=prompt_tokens, output_tokens=output_reserve_tokens)
-                if target is not None:
-                    candidates = [target]
-                    pinned = None
+            if pinned and self.local_pool.member(pinned) and trace:
+                trace.payload.setdefault("local_pool", {}).update(
+                    group="local-peers", policy="fixed_continuation_v1", selection="keep_verified_device",
+                    generation=statuses[pinned.id].cache_generation)
             if pinned:
                 cache_reset = bool(
                     conversation.cache_generation
@@ -1164,8 +1243,6 @@ class RoutingPolicy:
                 endpoint = chosen
                 score = next(value for value, e in scored if e.id == chosen.id)
                 selection_reason = "local_pool_spread"
-                if trace.payload["local_pool"].get("target") == chosen.id:
-                    selection_reason = "local_pool_faster_first_output"
                 if trace:
                     trace.record(trace_attempt, "score_candidates", "selected", branch="local_pool",
                                  reason=selection_reason, evidence=trace.payload["local_pool"])

@@ -800,6 +800,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             "client" if client_compacted else None
         ),
     )
+    trace.payload["history_match"] = lineage.history_match
     if identity.enabled:
         identity_view = review_view(body, api_kind)
         trace.payload["privacy_input"] = {
@@ -2367,8 +2368,10 @@ async def _acquire_route_capacity(
                              and not evaluation.required_endpoint_id and decision.affinity != "admin-pin"
                              and conversation is not None and wait_seconds > 0)
         if adaptive_wait:
+            if trace:
+                trace.payload.setdefault("local_pool", {}).update(policy="fixed_continuation_v1", wait_reason="waiting_for_verified_device")
             deadline = pool_wait_deadlines.setdefault("request", time.monotonic() + wait_seconds)
-            wait_seconds = min(float(pool.config.get("recheck_seconds", 5)), max(0, deadline - time.monotonic()))
+            wait_seconds = min(5.0, max(0, deadline - time.monotonic()))
         wait_started = time.monotonic()
         try:
             if wait_seconds <= 0:
@@ -2748,7 +2751,7 @@ def _capacity_wait_seconds(
     pin = decision.endpoint.metadata.get("client_deployment_pin")
     if pin is not None:
         return float(pin["capacity_wait_seconds"])
-    if requested_model != "auto" or decision.reason == "local_pool_faster_first_output" or decision.affinity in {
+    if requested_model != "auto" or decision.affinity in {
         "hit",
         "logical-hit",
         "prefix-hit",
@@ -4191,10 +4194,12 @@ async def _audit(
     if client_id in {"workbuddy-public", "workbuddy-qwen36-shared"} and decision.trace and decision.trace.terminal:
         if decision.trace.payload.get("status") == "succeeded":
             try:
+                from .history_index import index_completed
+                await index_completed(current, decision.trace.payload)
                 await asyncio.to_thread(WorkBuddyHistory(current.route_traces.database_path).record, decision.trace.payload)
                 history = next((c for c in decision.trace.payload.get("observation", {}).get("content", {}).get("checks", []) if c.get("check") == "workbuddy_history"), {})
                 # Only metadata aliases are stored in Redis; raw content remains encrypted.
-                aliases = history.get("raw_identities", [])
+                aliases = [value for value in history.get("raw_identities", []) if "v5-history-" not in value]
                 if aliases and decision.trace.payload.get("branch_id"):
                     await current.conversations.map_history(client_id, tuple(aliases), decision.trace.payload["branch_id"])
             except Exception as error:

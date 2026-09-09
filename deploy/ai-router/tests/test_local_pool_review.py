@@ -37,7 +37,7 @@ class LocalPoolAttributionReview(unittest.IsolatedAsyncioTestCase):
     async def test_matching_success_is_observed(self):
         pool = await self.make_finished(MEMBERS[1])
         self.assertEqual(len(await pool.store.list_json(PREFIX + "recent:")), 1)
-        self.assertEqual(len(await pool.store.list_json(PREFIX + "samples:")), 1)
+        self.assertEqual(await pool.store.list_json(PREFIX + "samples:"), [])
 
     async def test_cancelled_request_releases_without_warming(self):
         pool = await self.make_finished(MEMBERS[1], status="interrupted")
@@ -46,7 +46,7 @@ class LocalPoolAttributionReview(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await pool.store.list_json(PREFIX + "samples:"), [])
 
 class LocalPoolCostReview(unittest.IsolatedAsyncioTestCase):
-    async def test_reserved_single_slot_is_not_costed_as_idle(self):
+    async def test_reserved_single_slot_is_not_counted_as_idle(self):
         pool = LocalPool(InMemoryStateStore(), NS(section=lambda _: {"local_pool": {"enabled": True}}))
         endpoint = NS(id=MEMBERS[2], cloud=False, max_concurrency=1)
         status = NS(detail={"processing": 0}, load_headroom=1, cache_generation="g1")
@@ -58,10 +58,12 @@ class LocalPoolCostReview(unittest.IsolatedAsyncioTestCase):
         await pool.store.set_json(PREFIX + "samples:" + endpoint.id, {"items": [
             {"request_id": str(i), "generation": "g1", "at": time.time(), "prompt_bucket": 65536,
              "output_bucket": bucket(16000, 1024), "cache_state": "cold", "first_s": 1, "duration_s": 10} for i in range(5)]}, 3600)
-        rows = await pool.costs([endpoint], {endpoint.id: status}, trace=trace, conversation=None,
-                               prompt_tokens=40000, output_tokens=16000)
-        self.assertEqual(rows[0]["sample_count"], 5)
-        self.assertIsNone(rows[0]["queue_s"], "a selected reservation already occupies this single-slot target")
+        await pool.select([endpoint], {endpoint.id: status}, trace=trace, conversation=None,
+                          prompt_tokens=40000, output_tokens=16000)
+        row = trace.payload["local_pool"]["candidates"][0]
+        self.assertFalse(row["available"], "a selected reservation occupies this single-slot target")
+        self.assertEqual(row["running"], 1)
+
 
 class LocalPoolTierReview(unittest.TestCase):
     def test_approved_peer_migration_survives_fallback_tier_filter(self):

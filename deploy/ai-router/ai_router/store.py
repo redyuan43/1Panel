@@ -17,6 +17,8 @@ class StateStore(Protocol):
 
     async def delete(self, key: str) -> None: ...
 
+    async def add_history_candidate(self, key: str, branch_id: str, ttl_seconds: int) -> None: ...
+
     async def list_json(self, prefix: str) -> list[dict[str, Any]]: ...
 
     async def list_json_items(
@@ -117,6 +119,18 @@ class InMemoryStateStore:
                     continue
                 result.append((key, json.loads(json.dumps(item.value))))
             return result
+
+    async def add_history_candidate(self, key: str, branch_id: str, ttl_seconds: int) -> None:
+        async with self._lock:
+            self._purge_locked()
+            old = self._values.get(key)
+            value = old.value if old is not None else {"branches": [], "overflow": False}
+            if branch_id not in value["branches"]:
+                if len(value["branches"]) < 16:
+                    value["branches"].append(branch_id)
+                else:
+                    value["overflow"] = True
+            self._values[key] = _ExpiringValue(value, time.time() + ttl_seconds)
 
     async def increment_counters(
         self,
@@ -338,6 +352,28 @@ class RedisStateStore:
             if isinstance(parsed, dict):
                 result.append((str(key), parsed))
         return result
+
+    async def add_history_candidate(self, key: str, branch_id: str, ttl_seconds: int) -> None:
+        # Single atomic operation: ambiguity cannot be lost to concurrent writers
+        # or expiration of a client-side lock. Overflow remains fail-closed.
+        script = """
+        local encoded = redis.call('get', KEYS[1])
+        local value = encoded and cjson.decode(encoded) or {branches={}, overflow=false}
+        local found = false
+        for _, branch in ipairs(value.branches) do
+          if branch == ARGV[1] then found = true end
+        end
+        if not found then
+          if #value.branches < 16 then
+            table.insert(value.branches, ARGV[1])
+          else
+            value.overflow = true
+          end
+        end
+        redis.call('set', KEYS[1], cjson.encode(value), 'EX', ARGV[2])
+        return 1
+        """
+        await self._client.eval(script, 1, key, branch_id, ttl_seconds)
 
     async def increment_counters(
         self,

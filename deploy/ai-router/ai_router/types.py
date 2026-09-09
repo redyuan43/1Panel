@@ -291,6 +291,7 @@ class LineageContext:
     mode: str
     relation: str
     parent: ConversationState | None = None
+    history_match: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

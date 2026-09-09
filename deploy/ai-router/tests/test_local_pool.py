@@ -99,40 +99,8 @@ async def busy_original(pool, es, sts):
     return original
 
 
-def test_compare_total_first_output_switches_only_when_materially_faster():
-    async def case():
-        pool, es, sts = fixtures()
-        original = await busy_original(pool, es, sts)
-        await add_samples(pool, original, first=5, duration=100)
-        await add_samples(pool, es[0], first=30)
-        t = trace("req")
-        chosen = await pool.alternative(original, es, sts, trace=t, conversation=None, prompt_tokens=40000, output_tokens=16000)
-        assert chosen.id == es[0].id
-        assert t.payload["local_pool"]["estimated_saving_s"] > 60
-        await add_samples(pool, es[0], first=90)
-        assert await pool.alternative(original, es, sts, trace=t, conversation=None, prompt_tokens=40000, output_tokens=16000) is None
-        assert "target" not in t.payload["local_pool"]
-    run(case())
 
 
-@pytest.mark.parametrize("condition", ["missing", "few", "generation", "overrunning", "external_busy", "original_idle"])
-def test_unknown_costs_and_available_original_keep_affinity(condition):
-    async def case():
-        pool, es, sts = fixtures()
-        original = await busy_original(pool, es, sts)
-        await add_samples(pool, original, first=10, duration=100)
-        await add_samples(pool, es[0], first=1)
-        if condition == "missing": await pool.store.delete(PREFIX + "samples:" + original.id)
-        if condition == "few": await add_samples(pool, original, n=4)
-        if condition == "generation": sts[original.id].cache_generation = "version-2"
-        if condition == "overrunning": await add_samples(pool, original, duration=1)
-        if condition == "external_busy": await pool.store.delete(PREFIX + "claim:other")
-        if condition == "original_idle":
-            await pool.store.delete(PREFIX + "claim:other")
-            sts[original.id].detail = {"running": 0}; sts[original.id].load_headroom = 1
-        assert await pool.alternative(original, es, sts, trace=trace("new"), conversation=None,
-                                      prompt_tokens=40000, output_tokens=16000) is None
-    run(case())
 
 
 @pytest.mark.parametrize("status,usage,ttft", [
@@ -154,9 +122,9 @@ def test_terminal_cleanup_and_strict_sample_sources(status, usage, ttft):
         await pool.finish(t)  # duplicate completion cannot double-count observations.
         assert await pool.store.list_json(PREFIX + "claim:") == []
         samples = (await pool.store.get_json(PREFIX + "samples:" + e.id) or {}).get("items", [])
-        expected = status == "succeeded" and usage["state"] == "complete" and ttft is not None
-        assert len(samples) == int(expected)
-        if expected: assert samples[0]["cache_state"] == ("hot" if usage["cached_tokens"] else "cold")
+        assert samples == []  # Forecast sampling was removed; audit usage remains separate.
+        recent = await pool.store.list_json(PREFIX + "recent:")
+        assert len(recent) == int(status == "succeeded")
     run(case())
 
 
@@ -167,17 +135,3 @@ def test_pool_settings_reject_invalid_values_without_crashing(tmp_path,change):
     value=settings(tmp_path).value
     value["routing"]["local_pool"].update(change)
     with pytest.raises(ValueError): validate_settings(value)
-
-
-def test_service_forecast_does_not_mix_cold_and_hot_samples():
-    async def case():
-        pool,es,sts=fixtures(); original=await busy_original(pool,es,sts)
-        await add_samples(pool,original,first=5,duration=100,n=3,state="cold")
-        key=PREFIX+"samples:"+original.id
-        saved=await pool.store.get_json(key)
-        saved["items"] += [{**s,"request_id":"hot"+s["request_id"],"cache_state":"hot","duration_s":20} for s in saved["items"]]
-        await pool.store.set_json(key,saved,86400)
-        await add_samples(pool,es[0],first=1)
-        # Neither cache class has five observations; six mixed records do not qualify.
-        assert await pool.alternative(original,es,sts,trace=trace("mix"),conversation=None,prompt_tokens=40000,output_tokens=16000) is None
-    run(case())

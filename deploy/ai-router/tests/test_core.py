@@ -1536,7 +1536,7 @@ def test_runtime_start_rebuilds_semantic_history_indexes(
             )
             == state.branch_id
         )
-        v4_identity = history_identities(replayed)[0]
+        v4_identity = next(i for i in history_identities(replayed) if i.startswith("v4-tooltxn-"))
         assert (
             await store.get_json(
                 f"router:history-conversation:client-1:{v4_identity}"
@@ -4724,9 +4724,9 @@ def test_history_identity_normalizes_closed_chat_tool_transactions(
         grouped[3],
         {"role": "assistant", "content": "done"},
     ]
-    assert history_identities(grouped)[0].startswith("v4-tooltxn-")
-    assert history_identities(grouped)[0] == history_identities(sequential)[0]
-    assert history_identities(grouped)[1] != history_identities(sequential)[1]
+    assert history_identities(grouped)[1].startswith("v4-tooltxn-")
+    assert history_identities(grouped)[1] == history_identities(sequential)[1]
+    assert history_identities(grouped)[2] != history_identities(sequential)[2]
 
     repository = ConversationRepository(
         InMemoryStateStore(),
@@ -4752,7 +4752,7 @@ def test_history_identity_normalizes_closed_chat_tool_transactions(
 
     changed = json.loads(json.dumps(sequential))
     changed[2]["content"] = "different result"
-    assert history_identities(grouped)[0] != history_identities(changed)[0]
+    assert history_identities(grouped)[1] != history_identities(changed)[1]
 
 
 def test_history_identity_normalizes_closed_responses_tool_transactions() -> None:
@@ -4792,7 +4792,7 @@ def test_history_identity_normalizes_closed_responses_tool_transactions() -> Non
         grouped[2],
         grouped[4],
     ]
-    assert history_identities(grouped)[0] == history_identities(sequential)[0]
+    assert history_identities(grouped)[1] == history_identities(sequential)[1]
 
 
 def test_history_identity_ignores_client_metadata_and_empty_tool_content(

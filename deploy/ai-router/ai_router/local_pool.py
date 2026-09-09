@@ -4,7 +4,6 @@ import asyncio
 from contextlib import asynccontextmanager
 import hashlib
 import math
-import statistics
 import time
 from uuid import uuid4
 
@@ -54,8 +53,8 @@ class LocalPool:
 
     def identity(self, trace, conversation=None):
         payload = trace.payload if trace else {}
-        identifier = (getattr(conversation, "branch_id", None) or getattr(conversation, "conversation_id", None)
-                      or payload.get("branch_id") or payload.get("conversation_id") or payload.get("request_id") or uuid4().hex)
+        identifier = (getattr(conversation, "conversation_id", None)
+                      or payload.get("conversation_id") or payload.get("request_id") or uuid4().hex)
         return hashlib.sha256((str(payload.get("client_id", "")) + ":" + identifier).encode()).hexdigest()
 
     async def observations(self):
@@ -92,7 +91,7 @@ class LocalPool:
                      "generation": row["generation"], "started_at": None}
             await self.store.set_json(PREFIX + "claim:" + rid, claim, ttl_seconds=30)
             trace.payload.setdefault("local_pool", {}).update(
-                group="local-peers", candidates=[v[-1] for v in values], claim=claim)
+                group="local-peers", policy="fixed_continuation_v1", candidates=[v[-1] for v in values], claim=claim)
             trace.payload["local_pool"].setdefault("selection", "spread_new_conversations")
             return e
 
@@ -107,9 +106,6 @@ class LocalPool:
                      "prompt_bucket": bucket(decision.prompt_tokens), "output_bucket": bucket(decision.output_reserve_tokens, 1024),
                      "generation": info.get("generation", "")}
         claim.update(phase="running", started_at=time.time(), generation=info.get("generation", claim.get("generation", "")))
-        recent = await self.store.get_json(PREFIX + "recent:" + claim["endpoint_id"] + ":" + claim["owner"])
-        claim["cache_assumption"] = ("hot" if recent and recent.get("cache_state") == "hot"
-                                     and recent.get("generation") == claim["generation"] else "cold")
         info["claim"] = claim
         await self.store.set_json(PREFIX + "claim:" + trace.request_id, claim, ttl_seconds=3600)
 
@@ -124,8 +120,6 @@ class LocalPool:
         claim = info.get("claim")
         if not claim or not trace.terminal:
             return
-        from .cache_audit import metrics
-        m = metrics(trace.payload, [])
         # Capacity observations must not survive completion just because the
         # best-effort history writer cannot acquire the allocation lock.
         await self.release(trace.request_id)
@@ -133,105 +127,8 @@ class LocalPool:
             if (trace.payload.get("status") != "succeeded"
                     or trace.payload.get("endpoint_id") != claim["endpoint_id"]):
                 return
-            ratio = m.get("backend_reuse_ratio")
-            state = "hot" if ratio is not None and ratio >= .8 else "cold" if ratio == 0 else None
-            generation = claim.get("generation")
             key = PREFIX + "recent:" + claim["endpoint_id"] + ":" + claim["owner"]
             previous = await self.store.get_json(key) or {}
             record = {**claim, "assigned_at": previous.get("assigned_at", claim["assigned_at"]),
-                      "cache_state": state if m["attempts"] == 1 else None, "last_used_at": time.time()}
-            await self.store.set_json(PREFIX + "recent:" + claim["endpoint_id"] + ":" + claim["owner"], record,
-                                      ttl_seconds=int(self.config.get("recent_seconds", 600)))
-            # Retried/partial/estimated/nonstreaming samples cannot label a warm execution.
-            if (not generation or state is None or m["attempts"] != 1 or not finite(m.get("ttft_ms"))
-                    or not finite(m.get("queue_ms")) or not finite(m.get("total_ms"))):
-                return
-            first = (m["ttft_ms"] - m["queue_ms"]) / 1000
-            duration = (m["total_ms"] - m["queue_ms"]) / 1000
-            if first <= 0 or duration < first:
-                return
-            key = PREFIX + "samples:" + claim["endpoint_id"]
-            samples = (await self.store.get_json(key) or {}).get("items", [])
-            samples = [x for x in samples if x["request_id"] != trace.request_id and x["at"] > time.time() - 86400]
-            samples.append({"request_id": trace.request_id, "generation": generation, "at": time.time(),
-                            "prompt_bucket": claim["prompt_bucket"], "output_bucket": claim["output_bucket"],
-                            "cache_state": state, "first_s": first, "duration_s": duration})
-            await self.store.set_json(key, {"items": samples[-256:]}, ttl_seconds=86400)
-
-    async def samples(self, endpoint_id, generation, prompt_bucket, output_bucket, cache_state=None):
-        items = (await self.store.get_json(PREFIX + "samples:" + endpoint_id) or {}).get("items", [])
-        return [s for s in items if s.get("generation") == generation and generation
-                and s.get("prompt_bucket") == prompt_bucket and s.get("output_bucket") == output_bucket
-                and s.get("at", 0) > time.time() - 86400 and (cache_state is None or s.get("cache_state") == cache_state)]
-
-    async def costs(self, endpoints, statuses, *, trace, conversation, prompt_tokens, output_tokens):
-        recent, claims = await self.observations()
-        owner = self.identity(trace, conversation)
-        result = []
-        for e in endpoints:
-            st = statuses[e.id]
-            previous = next((r for r in recent if r["endpoint_id"] == e.id and r["owner"] == owner
-                             and r.get("generation") == st.cache_generation and r.get("cache_state") == "hot"), None)
-            state = "hot" if previous else "cold"
-            samples = await self.samples(e.id, st.cache_generation, bucket(prompt_tokens), bucket(output_tokens, 1024), state)
-            row = {"endpoint_id": e.id, "cache_assumption": state, "sample_count": len(samples),
-                   "source": "historical_measured_usage", "estimated": True, "queue_s": None, "first_s": None, "total_s": None}
-            if len(samples) < max(5, int(self.config.get("min_samples", 5))):
-                row["unavailable_reason"] = "insufficient_matching_samples"
-                result.append(row)
-                continue
-            row["first_s"] = statistics.median(s["first_s"] for s in samples)
-            active = [c for c in claims if c["endpoint_id"] == e.id and c.get("phase") in {"selected", "running"}
-                      and (trace is None or c["request_id"] != trace.request_id)]
-            running = st.detail.get("running", st.detail.get("processing", 0)) or 0
-            if st.load_headroom > 0 and max(running, len(active)) < e.max_concurrency:
-                row["queue_s"] = 0.0
-            elif running <= len(active) and active:
-                remaining = []
-                for c in active:
-                    history = await self.samples(e.id, st.cache_generation, c["prompt_bucket"], c["output_bucket"], c.get("cache_assumption", "cold"))
-                    if len(history) < 5 or not c.get("started_at"):
-                        break
-                    service = sorted(s["duration_s"] for s in history)[math.ceil(len(history) * .75) - 1]
-                    elapsed = time.time() - c["started_at"]
-                    if elapsed >= service:
-                        break  # Overrunning requests have unknown remaining time, never zero.
-                    remaining.append(service - elapsed)
-                if len(remaining) == len(active):
-                    row["queue_s"] = sorted(remaining)[max(0, len(active) - e.max_concurrency)]
-            if row["queue_s"] is not None:
-                row["total_s"] = row["queue_s"] + row["first_s"]
-            else:
-                row["unavailable_reason"] = "unknown_remaining_service_time"
-            result.append(row)
-        return result
-
-    async def alternative(self, original, endpoints, statuses, *, trace, conversation, prompt_tokens, output_tokens):
-        if trace is None or not self.member(original):
-            return None
-        endpoints = [e for e in endpoints if self.member(e)]
-        rows = await self.costs(endpoints, statuses, trace=trace, conversation=conversation,
-                                prompt_tokens=prompt_tokens, output_tokens=output_tokens)
-        info = trace.payload.setdefault("local_pool", {"group": "local-peers"})
-        info.pop("target", None)
-        info.pop("selection", None)
-        info.pop("wait_reason", None)
-        info.pop("estimated_saving_s", None)
-        info.update(costs=rows, generation=statuses[original.id].cache_generation)
-        origin = next((r for r in rows if r["endpoint_id"] == original.id), None)
-        if not origin or origin["total_s"] is None:
-            info["wait_reason"] = "insufficient_cost_evidence_keep_affinity"
-            return None
-        if origin["queue_s"] == 0:
-            info["wait_reason"] = "original_device_available_keep_affinity"
-            return None
-        candidates = [r for r in rows if r["endpoint_id"] != original.id and r["total_s"] is not None]
-        if not candidates:
-            return None
-        best = min(candidates, key=lambda r: r["total_s"])
-        saved = origin["total_s"] - best["total_s"]
-        if saved >= float(self.config.get("min_saving_seconds", 5)) and saved >= origin["total_s"] * float(self.config.get("min_saving_ratio", .2)):
-            info.update(selection="estimated_faster_first_output", estimated_saving_s=saved, target=best["endpoint_id"])
-            return next(e for e in endpoints if e.id == best["endpoint_id"])
-        info["wait_reason"] = "migration_not_materially_faster"
-        return None
+                      "last_used_at": time.time()}
+            await self.store.set_json(key, record, ttl_seconds=int(self.config.get("recent_seconds", 600)))
