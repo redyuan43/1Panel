@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -17,6 +18,10 @@ from .errors import RouterError
 
 MATCH_MODE = "latest_user_contains"
 MAX_RETIRED_PHRASES = 64
+USER_QUERY_PATTERN = re.compile(
+    r"<user_query(?:\s[^>]*)?>[\s\S]*?</user_query\s*>",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -597,25 +602,28 @@ def _clean_message(
     result = copy.deepcopy(message)
     content = result.get("content")
     found: dict[str, PromptDirective] = {}
+    activation_scope = _latest_user_query_scope(content)
     if isinstance(content, str):
-        result["content"], found = _clean_text(content, cleanup, active)
+        result["content"], found = _clean_text(
+            content,
+            cleanup,
+            active,
+            active_span=(
+                activation_scope[2]
+                if activation_scope is not None
+                else None
+            ),
+        )
         return result, found
     if not isinstance(content, list):
         return result, found
     parts = []
-    for part in content:
+    for part_index, part in enumerate(content):
         if not isinstance(part, dict):
             parts.append(copy.deepcopy(part))
             continue
         part_type = str(part.get("type", ""))
-        text_key = next(
-            (
-                key
-                for key in ("text", "input_text", "content")
-                if isinstance(part.get(key), str)
-            ),
-            None,
-        )
+        text_key = _part_text_key(part)
         if text_key is None or part_type in {
             "image_url",
             "input_image",
@@ -623,10 +631,19 @@ def _clean_message(
         }:
             parts.append(copy.deepcopy(part))
             continue
+        in_activation_scope = (
+            activation_scope is None
+            or activation_scope[:2] == (part_index, text_key)
+        )
         cleaned, part_found = _clean_text(
             str(part[text_key]),
             cleanup,
-            active,
+            active if in_activation_scope else {},
+            active_span=(
+                activation_scope[2]
+                if activation_scope is not None and in_activation_scope
+                else None
+            ),
         )
         found.update(part_found)
         if cleaned.strip():
@@ -641,21 +658,66 @@ def _clean_text(
     text: str,
     cleanup: set[str],
     active: dict[str, tuple[str, PromptDirective]],
+    *,
+    active_span: tuple[int, int] | None = None,
 ) -> tuple[str, dict[str, PromptDirective]]:
     kept: list[str] = []
     found: dict[str, PromptDirective] = {}
-    for line in text.splitlines():
+    offset = 0
+    for raw_line in text.splitlines(keepends=True):
+        line = raw_line.rstrip("\r\n")
+        line_start = offset
+        line_end = offset + len(raw_line)
+        offset = line_end
         normalized_line = normalize_phrase(line)
         matched_cleanup = [
             phrase for phrase in cleanup if phrase in normalized_line
         ]
         if matched_cleanup:
             for phrase in matched_cleanup:
-                if phrase in active:
+                if phrase in active and (
+                    active_span is None
+                    or (
+                        line_end > active_span[0]
+                        and line_start < active_span[1]
+                    )
+                ):
                     found[phrase] = active[phrase][1]
             continue
         kept.append(line)
     return "\n".join(kept).strip(), found
+
+
+def _latest_user_query_scope(
+    content: Any,
+) -> tuple[int | None, str | None, tuple[int, int]] | None:
+    latest: tuple[int | None, str | None, tuple[int, int]] | None = None
+    if isinstance(content, str):
+        for match in USER_QUERY_PATTERN.finditer(content):
+            latest = (None, None, match.span())
+        return latest
+    if not isinstance(content, list):
+        return None
+    for part_index, part in enumerate(content):
+        if not isinstance(part, dict):
+            continue
+        text_key = _part_text_key(part)
+        if text_key is None:
+            continue
+        for match in USER_QUERY_PATTERN.finditer(str(part[text_key])):
+            latest = (part_index, text_key, match.span())
+    return latest
+
+
+def _part_text_key(part: dict[str, Any]) -> str | None:
+    return next(
+        (
+            key
+            for key in ("text", "input_text", "content")
+            if isinstance(part.get(key), str)
+        ),
+        None,
+    )
 
 
 def _has_meaningful_content(message: dict[str, Any]) -> bool:

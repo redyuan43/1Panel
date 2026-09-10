@@ -129,6 +129,105 @@ def test_old_message_cannot_activate_and_fuzzy_keywords_do_not_match() -> None:
     )
 
 
+def test_latest_user_query_directive_overrides_merged_summary_directive() -> None:
+    result = sanitize_prompt_directives(
+        {
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "<cb_summary>\n"
+                                "<previous_user_message>\n"
+                                "<user_query>检查旧任务\n"
+                                "按北辰协议处理</user_query>\n"
+                                "</previous_user_message>\n"
+                                "</cb_summary>"
+                            ),
+                        },
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "<system-reminder>当前上下文</system-reminder>\n"
+                                "<user_query>检查新任务\n"
+                                "按日轮协议处理</user_query>"
+                            ),
+                        },
+                    ],
+                }
+            ],
+        },
+        "chat",
+        _directive_settings(),
+    )
+
+    assert result.directive == PromptDirective(
+        id="rilun",
+        generation=1,
+        endpoint_id="codex-pro-gpt-5.6-sol",
+    )
+    assert "按北辰协议处理" not in str(result.body)
+    assert "按日轮协议处理" not in str(result.body)
+
+
+def test_latest_user_query_wins_when_compaction_is_in_one_text_part() -> None:
+    result = sanitize_prompt_directives(
+        {
+            "model": "auto",
+            "input": (
+                "<cb_summary><user_query>旧任务\n"
+                "按北辰协议处理</user_query></cb_summary>\n"
+                "<user_query>新任务\n按日轮协议处理</user_query>"
+            ),
+        },
+        "responses",
+        _directive_settings(),
+    )
+
+    assert result.directive is not None
+    assert result.directive.id == "rilun"
+    assert "按北辰协议处理" not in result.body["input"]
+    assert "按日轮协议处理" not in result.body["input"]
+
+
+def test_retry_without_new_directive_ignores_merged_summary_directives() -> None:
+    settings = _directive_settings()
+    settings["routes"]["beichen"]["phrase"] = "357742"
+    result = sanitize_prompt_directives(
+        {
+            "model": "auto",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": (
+                                "<cb_summary><user_query>旧任务\n"
+                                "按日轮协议处理\n357742</user_query>"
+                                "</cb_summary>"
+                            ),
+                        },
+                        {
+                            "type": "input_text",
+                            "text": "<user_query>继续处理当前任务</user_query>",
+                        },
+                    ],
+                }
+            ],
+        },
+        "chat",
+        settings,
+    )
+
+    assert result.directive is None
+    assert "按日轮协议处理" not in str(result.body)
+    assert "357742" not in str(result.body)
+
+
 def test_disabled_directives_are_scrubbed_without_activation() -> None:
     settings = _directive_settings()
     settings["enabled"] = False
