@@ -15,6 +15,14 @@ LMCACHE_CACHE_ROOT="${LMCACHE_CACHE_ROOT:-$HOME/.cache/1cat-vllm-1.5.0-lmcache}"
 CONTAINER_HOME="${LMCACHE_CONTAINER_HOME:-$LMCACHE_CACHE_ROOT/home}"
 NUMBA_CACHE_DIR="${LMCACHE_NUMBA_CACHE_DIR:-$LMCACHE_CACHE_ROOT/numba}"
 CUDA_CACHE_PATH="${LMCACHE_CUDA_CACHE_PATH:-$LMCACHE_CACHE_ROOT/cuda}"
+IFS=, read -r -a gpu_uuid_array <<< "$GPU_UUIDS"
+gpu_count="${#gpu_uuid_array[@]}"
+gpu_worker_count="${LMCACHE_MAX_GPU_WORKERS:-$gpu_count}"
+if [[ ! "$gpu_worker_count" =~ ^[1-9][0-9]*$ ]]; then
+    printf 'LMCACHE_MAX_GPU_WORKERS must be a positive integer\n' >&2
+    exit 1
+fi
+cuda_visible_devices="$(seq -s, 0 "$((gpu_count - 1))")"
 
 resolver_args=(
     "$RESOLVER"
@@ -119,7 +127,7 @@ exec docker run \
     -e HOME="$CONTAINER_HOME" \
     -e NVIDIA_VISIBLE_DEVICES="$GPU_UUIDS" \
     -e NVIDIA_DRIVER_CAPABILITIES=compute,utility \
-    -e CUDA_VISIBLE_DEVICES=0,1 \
+    -e CUDA_VISIBLE_DEVICES="$cuda_visible_devices" \
     -e HF_HUB_OFFLINE=1 \
     -e TRANSFORMERS_OFFLINE=1 \
     -e LMCACHE_CUDA_MAJOR=12 \
@@ -140,7 +148,7 @@ exec docker run \
     --l1-size-gb "$l1_size_gb" \
     --no-l1-use-lazy \
     --max-workers 4 \
-    --max-gpu-workers 2 \
+    --max-gpu-workers "$gpu_worker_count" \
     --max-cpu-workers 4 \
     --hash-algorithm blake3 \
     --engine-type default \

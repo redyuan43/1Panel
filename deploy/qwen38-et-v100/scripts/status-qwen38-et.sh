@@ -6,8 +6,8 @@ echo '--- units ---'
 systemctl --user is-active qwen38-v100-tp2-lmcache qwen38-v100-tp2-vllm || true
 echo '--- containers ---'
 docker ps -a --format '{{.Names}}\t{{.Status}}' | grep qwen38-v100-tp2 || echo none
-echo '--- gpu 4/5 ---'
-nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader | sed -n '5p;6p'
+echo '--- gpu 4-7 (TP4) ---'
+nvidia-smi --query-gpu=index,name,memory.used --format=csv,noheader | sed -n '5,8p'
 echo '--- endpoint ---'
 curl -fsS -H "Authorization: Bearer $(<"$KEY_FILE")" "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null && echo || echo 'endpoint DOWN'
 echo '--- spec decode (recent) ---'
