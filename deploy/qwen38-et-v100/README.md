@@ -59,7 +59,8 @@ systemd --user (Linger=yes，开机自启)
 | NCCL_P2P_DISABLE=1 + UUID 注入 + --ipc host | 沿用 | 实锤：V100+PG500-216 混插卡不开必现 NCCL 无限死锁 |
 | TENSOR_PARALLEL_SIZE | 4 | GPU4-7 同属 NUMA1；TP4 实测通过 |
 | LMCACHE max-gpu-workers | 随 GPU_UUIDS 自动计数（当前 4） | 修复 TP2 硬编码只允许 2 rank 注册的问题 |
-| 其余（seqs4/backend/KV 根目录等） | 沿用旧生产 | — |
+| MAX_NUM_SEQS | 8 | 从 4 提升；解除并发调度上限，单流性能无回归 |
+| 其余（backend/KV 根目录等） | 沿用旧生产 | — |
 
 ## 与旧部署的差异
 
@@ -72,8 +73,8 @@ systemd --user (Linger=yes，开机自启)
 ## 已知权衡
 
 - TP4 生产 KV 池实测 **2,525,320 tokens**（util 0.93），是 TP2 930,611 的
-  **2.71×**；196K 请求理论最大并发 **12.84×**。TP4 的首要收益是 KV 容量与
-  单流吞吐，不是 PCIe 无 NVLink 条件下的并发线性扩展。
+  **2.71×**；196K 请求理论最大并发 **12.84×**。TP4 的首要收益是 KV 容量、
+  单流吞吐和更高批处理上限；PCIe 无 NVLink 条件下并发扩展仍然是次线性的。
 - LMCache(MP connector) × MTP2 已上线验证：投机接受率 83.3%（mean accept 2.67），
   prefix 复用有效（warm TTFT 2.07s→0.55s，API cached_tokens=1600）。
   已知问题：fork 的 Prometheus `vllm:prefix_cache_hits_total` 只覆盖部分复用路径
@@ -115,8 +116,28 @@ systemd --user (Linger=yes，开机自启)
 - MTP2：近期大样本 mean acceptance length 2.95，逐位接受率 98.3% / 97.2%，
   average draft acceptance **97.7%**。
 - 对比 TP2 生产基线：24K 单流 58.6→70.71 tok/s（**+20.7%**）；KV
-  930,611→2,525,320（**2.71×**）。24K×3 聚合 68.2→61.52 tok/s（**-9.8%**），
-  表明 PCIe 无 NVLink 条件下 TP4 并发吞吐不线性，后续需单独调优 LMCache/通信调度。
+  930,611→2,525,320（**2.71×**）。初次 24K×3 聚合仅 61.52 tok/s，随后确认
+  主因是生产 `MAX_NUM_SEQS=4` 限制调度，不是 TP4 算力没有收益。
+
+### 并发调优（MAX_NUM_SEQS=8）
+
+将 `MAX_NUM_SEQS` 从 4 提升到 8 后，使用同一 24K prompt 和生产 validator 复测：
+
+| 并发 | 聚合 decode | 单流 decode | 相对单流吞吐 | TTFT |
+|---:|---:|---:|---:|---:|
+| 1 | 71.24 tok/s | 71.24 tok/s | 1.00× | 0.51s |
+| 3（旧 seqs=4） | 61.52 tok/s | 20.5-31.7 tok/s | 0.86× | 2.4-6.7s |
+| 4 | **141.09 tok/s** | 36.2-46.4 tok/s（均值约 43.6） | **1.98×** | 0.68-2.35s |
+| 8 | **183.49 tok/s** | 23.3-31.0 tok/s（均值约 29） | **2.58×** | 4.18s |
+
+结论：
+
+- `MAX_NUM_SEQS=8` 对单流无可测回归（70.71→71.24 tok/s），应保留为生产上限。
+- 4 路是交互与吞吐平衡点：聚合接近单流 **2×**，单请求仍约 43.6 tok/s。
+- 8 路可稳定运行，聚合提高到 **183.49 tok/s**；代价是单请求 decode 相对单流
+  下降约 **59%**（71.24→约 29 tok/s），TTFT 提高到约 4.18s，适合吞吐优先任务。
+- TP4 并发扩展未达到线性 4×/8×，限制来自无 NVLink 的 PCIe all-reduce、调度和
+  每请求 KV/计算竞争；但相较旧 seqs=4 的 61.52 tok/s，8 路总吞吐已提高 **2.98×**。
 
 ## 运维
 
