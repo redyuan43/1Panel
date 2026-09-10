@@ -66,8 +66,8 @@ systemd --user (Linger=yes，开机自启)
 1. MODEL_PATH → 新模型；2. 新增 MTP2 投机解码（旧生产无投机）；3. util 0.90→0.93；
 4. 批量 tokens 显式 4096。内层脚本的 TP2 Qwen3.8-NVFP4 对齐门禁
 （`*Qwen3.8*NVFP4*` 路径匹配）对本目录路径不触发——它守护的是 CT-NVFP4
-（sm70_turbomind）路径；新模型走 modelopt loader，已于 2026-09-09 在同机
-TP2 单独实测验证（加载、数值、接受率均正常）。
+（sm70_turbomind）路径；新模型走 modelopt loader。2026-09-09 的历史 TP2 验证已完成
+加载、数值和接受率检查；该 TP2 生产形态已于 2026-09-10 退役。
 
 ## 已知权衡
 

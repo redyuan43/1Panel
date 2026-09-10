@@ -22,6 +22,11 @@ if [[ ! "$gpu_worker_count" =~ ^[1-9][0-9]*$ ]]; then
     printf 'LMCACHE_MAX_GPU_WORKERS must be a positive integer\n' >&2
     exit 1
 fi
+if [[ -n "${TENSOR_PARALLEL_SIZE:-}" && "$TENSOR_PARALLEL_SIZE" != "$gpu_count" ]]; then
+    printf 'TENSOR_PARALLEL_SIZE (%s) must match GPU_UUIDS count (%s)\n' \
+        "$TENSOR_PARALLEL_SIZE" "$gpu_count" >&2
+    exit 1
+fi
 cuda_visible_devices="$(seq -s, 0 "$((gpu_count - 1))")"
 
 resolver_args=(
