@@ -397,7 +397,7 @@ function renderClientModels(selected = ["auto"], disclosureMode = "internal") {
     allSelected,
   ) + clientModelGroup(
     "实际端点：真实模型名，勾选即向调用方暴露",
-    endpoints.map((id) => ({id, label: shortModel(id)})),
+    endpoints.map((id) => ({id, label: id})),
     selected,
     allSelected,
   );
