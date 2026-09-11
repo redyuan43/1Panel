@@ -381,16 +381,15 @@ function renderClientModels(selected = ["auto"], disclosureMode = "internal") {
   }
   const allSelected = selected.includes("*");
   const {aliases, endpoints} = availableClientModels();
-  target.innerHTML = `
-    <div class="client-model-group">
-      <div class="permission-grid">
-        <label>
-          <input type="checkbox" data-client-model="*" ${allSelected ? "checked" : ""}>
-          <span>全部模型（*）</span>
-        </label>
-      </div>
-    </div>
-  ` + clientModelGroup(
+  target.innerHTML = clientModelGroup(
+    "通用入口",
+    [
+      {id: "*", label: "全部模型（*）"},
+      {id: "auto", label: "自动路由（auto）"},
+    ],
+    selected,
+    allSelected,
+  ) + clientModelGroup(
     "内部代号：调用方看不到真实模型，建议只勾这些",
     aliases.map((id) => ({id, label: id})),
     selected,
