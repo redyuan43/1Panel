@@ -1,5 +1,5 @@
 /* Shared audit navigation; no prompt content in polling responses or storage. */
-const cacheView = {view: "conversation", stage: null, request: null, offset: 0, next: null, sequence: 0, loading: false, rows: new Map(), contentSequence: 0};
+const cacheView = ViewPreferences.state("audit", {view: "conversation", stage: null, request: null, offset: 0, next: null, sequence: 0, loading: false, rows: new Map(), contentSequence: 0, disclosures: new Map()}, {request:"id",view:["conversation","overview"],stage:[null,"received","content","routing","queue","execution","completed"]});
 const cacheStageNames = {workbuddy_history_preserved:"历史位置保全后",tools_stabilized:"工具序列化稳定化",normalized:"协议规范化",received:"入口摘要（正文未归档）",after_directives:"指令清理后",workbuddy_reordered:"WorkBuddy 重排后",effective:"有效上下文",legacy_after_directives:"旧归档：指令清理后"};
 const cacheCheckNames = {workbuddy_history:"历史前缀保全",tool_serialization_stability:"工具集合与参数保全",workbuddy_reorder:"WorkBuddy 重排",message_order_and_tool_history:"消息顺序与工具历史",user_content_and_images:"用户内容与图片",tool_definitions_and_parameters:"工具定义与参数",dynamic_tool_content_once:"工具动态说明保全",workspace_memory_and_stable_content:"工作区记忆与稳定内容",single_dynamic_block:"动态内容未重复插入"};
 const cacheEventNames = {hot:"内存状态可用",disk:"磁盘恢复",miss_saved:"计算后保存",miss_memory_only:"计算后保留内存",bypass:"未使用快照"};
