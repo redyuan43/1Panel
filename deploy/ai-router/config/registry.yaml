@@ -573,7 +573,7 @@ endpoints:
       - long-context
     safe_context_tokens: 272000
     configured_context_tokens: 272000
-    max_concurrency: 2
+    max_concurrency: 8
     backend_type: codex_pool
     health_url: http://127.0.0.1:14010/health
     backend_api_key_env: AI_ROUTER_LITELLM_MASTER_KEY
@@ -627,7 +627,7 @@ endpoints:
       - long-context
     safe_context_tokens: 272000
     configured_context_tokens: 1050000
-    max_concurrency: 2
+    max_concurrency: 8
     backend_type: codex_pool
     health_url: http://127.0.0.1:14010/health
     backend_api_key_env: AI_ROUTER_LITELLM_MASTER_KEY
@@ -672,7 +672,7 @@ endpoints:
     tasks: [general, code, batch, long-context]
     safe_context_tokens: 32768
     configured_context_tokens: 1000000
-    max_concurrency: 1
+    max_concurrency: 8
     backend_type: openai
     health_url: https://open.bigmodel.cn/api/coding/paas/v4/models
     backend_api_key_env: AI_ROUTER_GLM_API_KEY
@@ -721,7 +721,7 @@ endpoints:
       - long-context
     safe_context_tokens: 262144
     configured_context_tokens: 1000000
-    max_concurrency: 1
+    max_concurrency: 8
     backend_type: openai
     health_url: https://open.bigmodel.cn/api/coding/paas/v4/models
     backend_api_key_env: AI_ROUTER_GLM_API_KEY

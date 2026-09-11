@@ -1259,6 +1259,17 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 ),
             },
             "endpoints": endpoints,
+            # Registry aliases are callable model IDs but are not endpoints,
+            # so the client account dialog cannot discover them from the
+            # endpoint list alone.
+            # Alias -> target endpoint IDs. Callers only ever see the alias,
+            # so the console needs the mapping to explain a granted alias.
+            "model_aliases": {
+                alias: list(values.get("endpoint_ids", []))
+                for alias, values in sorted(
+                    current.registry.model_aliases.items()
+                )
+            },
             "workers": workers,
             "router_instances": router_instances,
             "configuration": {

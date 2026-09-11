@@ -1095,6 +1095,23 @@ dialog::backdrop {
   font-size: 11px;
 }
 
+.client-models {
+  margin-top: 12px;
+}
+
+.client-model-group + .client-model-group {
+  margin-top: 14px;
+}
+
+.client-model-group > .section-meta {
+  display: block;
+  margin-bottom: 6px;
+}
+
+.client-model-group > .permission-grid {
+  margin-top: 0;
+}
+
 .permission-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

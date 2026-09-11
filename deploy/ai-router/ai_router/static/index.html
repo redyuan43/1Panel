@@ -180,6 +180,27 @@
 
         <section class="section-block">
           <div class="section-heading">
+            <h3>模型代号（别名）</h3>
+            <span id="model-alias-count" class="section-meta"></span>
+            <span class="section-meta">调用方只看到代号；右侧指向仅管理员可见</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>代号别名</th>
+                  <th>目标端点</th>
+                  <th>真实模型</th>
+                  <th>运行态</th>
+                </tr>
+              </thead>
+              <tbody id="model-alias-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="section-block">
+          <div class="section-heading">
             <h3>物理 Worker 与订阅槽位</h3>
             <span id="worker-count" class="section-meta"></span>
           </div>
@@ -1344,7 +1365,7 @@
           </div>
           <fieldset class="model-permissions">
             <legend>允许模型</legend>
-            <div id="client-models" class="permission-grid"></div>
+            <div id="client-models" class="client-models"></div>
           </fieldset>
         </div>
         <div class="dialog-actions">

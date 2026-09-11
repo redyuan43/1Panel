@@ -232,6 +232,7 @@ function renderDashboard() {
   renderActiveRequests(data.requests);
   renderRecentRequests(data.requests.slice(0, 8));
   renderEndpointTable(data.endpoints);
+  renderModelAliasTable(data.model_aliases, data.endpoints);
   renderWorkerTable(data.workers);
   renderLmcacheRuntimeStatus();
   syncRequestNodeOptions();
@@ -328,16 +329,38 @@ function bindClientActions() {
   });
 }
 
+function aliasCatalog() {
+  return state.dashboard?.model_aliases || {};
+}
+
 function availableClientModels() {
-  const values = ["auto"];
+  const aliases = Object.keys(aliasCatalog());
+  const endpoints = [];
   (state.dashboard?.endpoints || []).forEach(({endpoint}) => {
-    if (!values.includes(endpoint.public_model)) values.push(endpoint.public_model);
+    if (!endpoints.includes(endpoint.public_model)) endpoints.push(endpoint.public_model);
   });
-  return values;
+  return {aliases, endpoints};
 }
 
 function publicIdentityModelId() {
   return state.settings?.identity?.public_model_id || "siyuan/auto";
+}
+
+function clientModelGroup(title, items, selected, allSelected) {
+  if (!items.length) return "";
+  return `
+    <div class="client-model-group">
+      <span class="section-meta">${escapeHtml(title)} · ${items.length}</span>
+      <div class="permission-grid">
+        ${items.map((item) => `
+          <label>
+            <input type="checkbox" data-client-model="${escapeHtml(item.id)}" ${allSelected || selected.includes(item.id) ? "checked" : ""}>
+            <span title="${escapeHtml(item.id)}">${escapeHtml(item.label)}</span>
+          </label>
+        `).join("")}
+      </div>
+    </div>
+  `;
 }
 
 function renderClientModels(selected = ["auto"], disclosureMode = "internal") {
@@ -345,24 +368,39 @@ function renderClientModels(selected = ["auto"], disclosureMode = "internal") {
   if (disclosureMode === "public") {
     const publicModel = publicIdentityModelId();
     target.innerHTML = `
-      <label>
-        <input type="checkbox" data-client-model="${escapeHtml(publicModel)}" checked disabled>
-        <span>${escapeHtml(publicModel)}</span>
-      </label>
+      <div class="client-model-group">
+        <div class="permission-grid">
+          <label>
+            <input type="checkbox" data-client-model="${escapeHtml(publicModel)}" checked disabled>
+            <span>${escapeHtml(publicModel)}</span>
+          </label>
+        </div>
+      </div>
     `;
     return;
   }
   const allSelected = selected.includes("*");
-  const values = [
-    {id: "*", label: "全部模型"},
-    ...availableClientModels().map((id) => ({id, label: shortModel(id)})),
-  ];
-  target.innerHTML = values.map((item) => `
-    <label>
-      <input type="checkbox" data-client-model="${escapeHtml(item.id)}" ${allSelected || selected.includes(item.id) ? "checked" : ""}>
-      <span>${escapeHtml(item.label)}</span>
-    </label>
-  `).join("");
+  const {aliases, endpoints} = availableClientModels();
+  target.innerHTML = `
+    <div class="client-model-group">
+      <div class="permission-grid">
+        <label>
+          <input type="checkbox" data-client-model="*" ${allSelected ? "checked" : ""}>
+          <span>全部模型（*）</span>
+        </label>
+      </div>
+    </div>
+  ` + clientModelGroup(
+    "内部代号：调用方看不到真实模型，建议只勾这些",
+    aliases.map((id) => ({id, label: id})),
+    selected,
+    allSelected,
+  ) + clientModelGroup(
+    "实际端点：真实模型名，勾选即向调用方暴露",
+    endpoints.map((id) => ({id, label: shortModel(id)})),
+    selected,
+    allSelected,
+  );
   target.querySelector('[data-client-model="*"]').addEventListener("change", (event) => {
     target.querySelectorAll("[data-client-model]").forEach((input) => {
       input.checked = event.target.checked;
@@ -374,6 +412,37 @@ function renderClientModels(selected = ["auto"], disclosureMode = "internal") {
       input.disabled = input.dataset.clientModel !== "*";
     });
   }
+}
+
+function renderModelAliasTable(aliases, endpoints) {
+  const target = byId("model-alias-table");
+  if (!target) return;
+  const catalog = new Map(
+    (endpoints || []).map(({endpoint}) => [endpoint.id, endpoint]),
+  );
+  const rows = Object.entries(aliases || {})
+    .sort(([left], [right]) => left.localeCompare(right));
+  const count = byId("model-alias-count");
+  if (count) count.textContent = `${rows.length} 个代号`;
+  target.innerHTML = rows.length
+    ? rows.map(([alias, endpointIds]) => {
+        const targets = (endpointIds || [])
+          .map((id) => catalog.get(id))
+          .filter(Boolean);
+        const active = targets.filter((item) => item.enabled);
+        const status = active.length
+          ? `<strong class="table-primary">可用</strong><span class="table-secondary">${active.length}/${targets.length} 个端点启用</span>`
+          : `<span class="table-secondary">端点停用中</span>`;
+        return `
+          <tr>
+            <td><strong class="table-primary">${escapeHtml(alias)}</strong></td>
+            <td>${(endpointIds || []).map((id) => `<span class="table-secondary">${escapeHtml(id)}</span>`).join("<br>") || "—"}</td>
+            <td>${targets.map((item) => `<strong class="table-primary">${escapeHtml(item.public_model)}</strong>`).join("<br>") || "—"}</td>
+            <td>${status}</td>
+          </tr>
+        `;
+      }).join("")
+    : emptyRow(4, "未注册模型别名");
 }
 
 function openClientDialog(clientId = null) {
