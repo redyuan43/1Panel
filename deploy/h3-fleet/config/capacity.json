@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "short": {
+    "preview": {"max_frames": 124, "steps": 6, "max_parallel": 3, "lanes": ["fast", "main", "preview"], "memory_budget_gib": 8, "disk_budget_gib": 1, "evidence": "20260907-233628/gate3-triple-6step/report.json"},
+    "quality": {"max_frames": 124, "steps": 14, "max_parallel": 2, "lanes": ["fast", "main"], "memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "20260907-233628/gate3-dual-14step-768-124/report.json"}
+  },
+  "long": {"max_parallel": 1, "lanes": ["fast"], "memory_budget_gib": 24, "preview_memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "preview 362 frames: 20260907-233628/custom-subway-winner-15s-turbo6/report.json; quality 362 frames: unvalidated"},
+  "mixed_profiles": false,
+  "mixed_short_long": false,
+  "resources": {"min_available_ram_gib": 16, "max_cgroup_gib": 72, "max_swap_gib": 1, "swap_idle_stable_seconds": 60, "swap_hard_limit_gib": 8, "swap_recovery_mode": "stable_idle_exclusive_fast_only", "min_root_free_gib": 25, "min_offload_free_gib": 40},
+  "promotion": "Manual reviewed change only; require 1 -> 2 -> 3 staircase within authorized scope, two successful batches at every proposed maximum, full media validation and host telemetry. Long concurrency remains disabled."
+}

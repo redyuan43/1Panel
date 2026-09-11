@@ -24,6 +24,11 @@ def test_archive_contains_only_delivery_files() -> None:
             "app/__init__.py",
             "app/main.py",
             "app/workflow_builder.py",
+            "app/admission.py",
+            "config/capacity.json",
+            "scripts/validate_capacity.py",
+            "scripts/validate_dual.py",
+            "scripts/deploy.py",
             "requirements.txt",
             "systemd/h3-compute.slice",
             "systemd/comfyui-h3@.service",
@@ -80,3 +85,18 @@ def test_remote_program_compiles() -> None:
     assert '"/api/router/drain"' in deploy.REMOTE
     assert '"/api/router/resume"' in deploy.REMOTE
     assert "restored_verified" in deploy.REMOTE
+
+
+def test_scheduler_only_rollback_does_not_restart_gpu_workers(tmp_path):
+    namespace = {}
+    exec(deploy.REMOTE.split("payload = json.load(sys.stdin)")[0], namespace)
+    calls = []
+    namespace.update(ROOT=tmp_path / "installed", SYSTEMD=tmp_path / "systemd", ENV=tmp_path / "fleet.env")
+    namespace["command"] = lambda *args, **kwargs: calls.append(args) or ""
+    namespace["wait_healthy"] = lambda *args: None
+    before = {"services": {unit: {"ActiveState": "active"} for unit in namespace["UNITS"]}}
+    namespace["restore"](tmp_path / "backup", set(), before,
+                         {"scheduler_only": True, "executor_url": "http://127.0.0.1:8789", "key": "test-key"})
+    lifecycle = [args for args in calls if "systemctl" in args and any(value in args for value in ("start", "stop"))]
+    assert lifecycle == [("sudo", "-n", "systemctl", "stop", "h3-fleet.service"),
+                         ("sudo", "-n", "systemctl", "start", "h3-fleet.service")]

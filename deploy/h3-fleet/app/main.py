@@ -21,9 +21,10 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .workflow_builder import SUPPORTED_MODES, build_workflow
+from .admission import BUSY, CapacityPolicy, InstanceLock, SwapRecovery, resource_snapshot
 
 
-ACTIVE_STATUSES = {"queued", "reserved", "submitted", "running"}
+ACTIVE_STATUSES = {"queued", *BUSY}
 TERMINAL_STATUSES = {"completed", "error", "cancelled", "missing"}
 
 
@@ -105,6 +106,10 @@ class JobStore:
                 ("execution_json", "TEXT"),
                 ("cancel_operation_id", "TEXT"),
                 ("version", "INTEGER NOT NULL DEFAULT 1"),
+                ("demand_json", "TEXT"),
+                ("admission_reason", "TEXT"),
+                ("submission_started_at", "REAL"),
+                ("failure_reason", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
@@ -114,6 +119,7 @@ class JobStore:
                 ON jobs(execution_id) WHERE execution_id IS NOT NULL
                 """
             )
+            connection.execute("CREATE TABLE IF NOT EXISTS controls (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -193,12 +199,103 @@ class JobStore:
             rows = connection.execute(
                 """
                 SELECT * FROM jobs
-                WHERE lane_id = ? AND status IN ('reserved', 'submitted', 'running')
+                WHERE lane_id = ? AND status IN ('reserved', 'reconciling', 'submitted', 'running', 'cancelling')
                 ORDER BY created_at
                 """,
                 (lane_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def active(self) -> list[dict[str, Any]]:
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT * FROM jobs WHERE status IN ('queued','reserved','reconciling','submitted','running','cancelling') ORDER BY created_at, prompt_id"
+            ).fetchall()]
+
+    def reserve(self, prompt_id: str, lane_id: str, policy: CapacityPolicy,
+                snapshot: dict[str, Any]) -> bool:
+        """Compare and reserve globally in one SQLite write transaction."""
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            job = dict(connection.execute("SELECT * FROM jobs WHERE prompt_id = ?", (prompt_id,)).fetchone())
+            if job["status"] != "queued":
+                return False
+            demand = json.loads(job["demand_json"])
+            lease = self.validation_lease()
+            experiment = lease.get("experiment") if lease and (job.get("execution_id") or "").startswith(lease["owner"] + "_") else None
+            active = [dict(row) for row in connection.execute(
+                "SELECT * FROM jobs WHERE status IN ('reserved','reconciling','submitted','running','cancelling')"
+            ).fetchall()]
+            demands = []
+            for item in active:
+                # Old rows with no persisted shape keep an exclusive reservation.
+                demands.append(json.loads(item["demand_json"]) if item.get("demand_json") else {
+                    "class": "long", "profile": item["profile"],
+                    "memory_budget_bytes": policy.data["long"]["memory_budget_gib"] * 1024**3,
+                    "disk_budget_bytes": policy.data["long"]["disk_budget_gib"] * 1024**3,
+                })
+            reason = policy.blocked(demand, demands, snapshot, experiment)
+            if lease and lease["expires_at"] <= time.time():
+                reason = "validation_lease_expired"
+            if lane_id not in policy.rule(demand, experiment)["lanes"]:
+                reason = "lane_not_eligible"
+            if (snapshot.get("swap_recovery", {}).get("ready")
+                    and max(snapshot["swap_used_bytes"], snapshot["cgroup_swap_bytes"]) > policy.data["resources"]["max_swap_gib"] * 1024**3
+                    and lane_id != "fast"):
+                reason = "swap_recovery_fast_only"
+            if any(item["lane_id"] == lane_id for item in active):
+                reason = "lane_reserved"
+            # FIFO prevents a stream of short requests starving an older long job.
+            older = connection.execute(
+                "SELECT 1 FROM jobs WHERE status = 'queued' AND (created_at < ? OR (created_at = ? AND prompt_id < ?)) LIMIT 1",
+                (job["created_at"], job["created_at"], prompt_id),
+            ).fetchone()
+            if older:
+                reason = "earlier_job_queued"
+            if reason:
+                connection.execute("UPDATE jobs SET admission_reason = ? WHERE prompt_id = ?", (reason, prompt_id))
+                return False
+            connection.execute(
+                "UPDATE jobs SET lane_id = ?, status = 'reserved', admission_reason = NULL, updated_at = ?, version = version + 1 WHERE prompt_id = ? AND status = 'queued'",
+                (lane_id, time.time(), prompt_id),
+            )
+        return True
+
+    def validation_lease(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT value FROM controls WHERE name = 'validation_lease'").fetchone()
+        lease = json.loads(row[0]) if row else None
+        if lease and (lease["expires_at"] > time.time() or self.active()):
+            return lease
+        return None
+
+    def set_validation_lease(self, owner: str, ttl: int, experiment: dict[str, Any] | None = None) -> dict[str, Any]:
+        if experiment is not None:
+            CapacityPolicy.validate_experiment(experiment)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = self.validation_lease()
+            if lease and lease["owner"] != owner:
+                raise HTTPException(status_code=409, detail="another validation window is active")
+            if lease and experiment is not None and experiment != lease.get("experiment"):
+                raise HTTPException(status_code=409, detail="validation experiment is immutable within its window")
+            if any(not (job.get("execution_id") or "").startswith(owner + "_") for job in self.active()):
+                raise HTTPException(status_code=409, detail="production executions are active or queued")
+            value = {"owner": owner, "expires_at": time.time() + ttl}
+            if experiment or (lease and lease.get("experiment")):
+                value["experiment"] = experiment or lease["experiment"]
+            connection.execute("INSERT OR REPLACE INTO controls(name, value) VALUES ('validation_lease', ?)", (json.dumps(value),))
+        return value
+
+    def release_validation_lease(self, owner: str) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            lease = self.validation_lease()
+            if lease and lease["owner"] != owner:
+                raise HTTPException(status_code=409, detail="validation window has a different owner")
+            if self.active():
+                raise HTTPException(status_code=409, detail="validation executions must be reconciled before release")
+            connection.execute("DELETE FROM controls WHERE name = 'validation_lease'")
 
     def find_output(
         self,
@@ -247,6 +344,9 @@ class Fleet:
         )
         self.client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, read=300.0))
         self.assignment_lock = asyncio.Lock()
+        self.policy = CapacityPolicy()
+        self.swap_recovery = SwapRecovery(self.policy.data["resources"].get("swap_idle_stable_seconds", 60))
+        self.instance_lock = InstanceLock(self.store.path)
         self.draining = False
 
     @property
@@ -260,6 +360,16 @@ class Fleet:
 
     async def close(self) -> None:
         await self.client.aclose()
+
+    async def capacity_snapshot(self, queues: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        try:
+            queues = await self.inspect_queues() if queues is None else queues
+            idle = not any(item["queued_or_running"] for item in queues) and not any(
+                item["status"] in BUSY for item in self.store.active()
+            )
+        except (httpx.HTTPError, ValueError, TypeError):
+            idle = False
+        return self.swap_recovery.observe(resource_snapshot(), idle=idle)
 
     async def lane_health(self, lane: Lane) -> dict[str, Any]:
         try:
@@ -282,10 +392,14 @@ class Fleet:
             return job
         if job["status"] == "queued":
             return await self.dispatch_queued(job)
-        if job["status"] == "reserved":
-            if time.time() - float(job["updated_at"]) >= 60:
-                return self.store.update(job["prompt_id"], status="error")
-            return job
+        if job["status"] in {"reserved", "reconciling"}:
+            if (job["status"] == "reserved" and job.get("demand_json")
+                    and not job.get("submission_started_at") and not job["upstream_prompt_id"]):
+                # A pre-POST reservation is safe to recover after a process crash.
+                if time.time() - float(job["updated_at"]) >= 60:
+                    return self.store.update(job["prompt_id"], lane_id="", status="queued")
+                return job
+            return await self.reconcile_submission(job)
         lane = self.lanes_by_id[job["lane_id"]]
         try:
             response = await self.client.get(
@@ -326,19 +440,61 @@ class Fleet:
                     return self.store.update(job["prompt_id"], status="running")
             if time.time() - float(job["created_at"]) < 60:
                 return job
-            updated = self.store.update(job["prompt_id"], status="missing")
-            self.cleanup_job_inputs(updated)
-            return updated
+            # History can be pruned or temporarily unavailable. Absence is not
+            # proof of failure and must not free the reservation for another job.
+            return self.store.update(job["prompt_id"], status="reconciling",
+                                     failure_reason=job.get("failure_reason") or "upstream_result_missing")
         except Exception:
             return job
 
     async def refresh_active(self) -> None:
-        for job in reversed(self.store.list(limit=500)):
-            if job["status"] in ACTIVE_STATUSES:
+        jobs = self.store.active()
+        # Release completed reservations before evaluating queued work.
+        for job in jobs:
+            if job["status"] in BUSY:
+                await self.refresh_job(job)
+        for job in jobs:
+            if job["status"] == "queued":
                 await self.refresh_job(job)
 
-    async def select_lane(self, profile: str) -> Lane | None:
+    async def reconcile_submission(self, job: dict[str, Any]) -> dict[str, Any]:
+        lane = self.lanes_by_id[job["lane_id"]]
+        try:
+            response = await self.client.get(f"{lane.url}/queue", timeout=30)
+            response.raise_for_status()
+            queue = response.json()
+            candidates = [item for key in ("queue_running", "queue_pending") for item in queue.get(key, [])]
+            for item in candidates:
+                if len(item) > 3 and isinstance(item[3], dict):
+                    if item[3].get("h3", {}).get("fleet_prompt_id") == job["prompt_id"]:
+                        return self.store.update(job["prompt_id"], upstream_prompt_id=str(item[1]), status="running")
+                if len(item) > 1 and job["upstream_prompt_id"] and str(item[1]) == job["upstream_prompt_id"]:
+                    return self.store.update(job["prompt_id"], status="running")
+            response = await self.client.get(f"{lane.url}/history", params={"max_items": 1000}, timeout=30)
+            response.raise_for_status()
+            for upstream_id, record in response.json().items():
+                prompt = record.get("prompt", [])
+                metadata = prompt[3] if len(prompt) > 3 and isinstance(prompt[3], dict) else {}
+                if (str(upstream_id) == job["upstream_prompt_id"] or
+                        metadata.get("h3", {}).get("fleet_prompt_id") == job["prompt_id"]):
+                    recovered = self.store.update(job["prompt_id"], upstream_prompt_id=str(upstream_id), status="submitted")
+                    return await self.refresh_job(recovered)
+        except (httpx.HTTPError, ValueError, TypeError):
+            pass
+        return self.store.update(job["prompt_id"], status="reconciling")
+
+    async def select_lane(self, profile: str, demand: dict[str, Any] | None = None,
+                          experiment: dict[str, Any] | None = None) -> Lane | None:
+        try:
+            queues = await self.inspect_queues()
+            if any(item["untracked_count"] for item in queues):
+                return None
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
+        allowed = self.policy.rule(demand, experiment)["lanes"] if demand else [lane.id for lane in self.lanes]
         for lane in self.lanes:
+            if lane.id not in allowed:
+                continue
             if not lane.enabled:
                 continue
             if lane.preview_only and profile != "preview":
@@ -350,23 +506,43 @@ class Fleet:
                 return lane
         return None
 
+    async def inspect_queues(self) -> list[dict[str, Any]]:
+        known = {item["upstream_prompt_id"] for item in [*self.store.active(), *self.store.list(limit=500)]}
+        result = []
+        for lane in self.lanes:
+            if not lane.enabled:
+                continue
+            response = await self.client.get(f"{lane.url}/queue", timeout=10)
+            response.raise_for_status()
+            records = [item for key in ("queue_running", "queue_pending") for item in response.json().get(key, [])]
+            result.append({"lane_id": lane.id, "queued_or_running": len(records),
+                           "running_count": len(response.json().get("queue_running", [])),
+                           "pending_count": len(response.json().get("queue_pending", [])),
+                           "untracked_count": sum(len(item) > 1 and str(item[1]) not in known for item in records)})
+        return result
+
     async def dispatch_queued(self, job: dict[str, Any]) -> dict[str, Any]:
         async with self.assignment_lock:
             job = self.store.get(job["prompt_id"])
             if job["status"] != "queued":
                 return job
-            lane = await self.select_lane(job["profile"])
+            demand = json.loads(job["demand_json"]) if job.get("demand_json") else self.policy.demand(
+                json.loads(job.get("request_json") or "{}"), job["profile"]
+            )
+            if not job.get("demand_json"):
+                job = self.store.update(job["prompt_id"], demand_json=json.dumps(demand))
+            lease = self.store.validation_lease()
+            experiment = lease.get("experiment") if lease and (job.get("execution_id") or "").startswith(lease["owner"] + "_") else None
+            lane = await self.select_lane(job["profile"], demand, experiment)
             if lane is None:
-                return job
+                return self.store.update(job["prompt_id"], admission_reason="no_eligible_lane")
             try:
                 payload = json.loads(job.get("request_json") or "")
             except (TypeError, ValueError):
                 return self.store.update(job["prompt_id"], status="error")
-            job = self.store.update(
-                job["prompt_id"],
-                lane_id=lane.id,
-                status="reserved",
-            )
+            if not self.store.reserve(job["prompt_id"], lane.id, self.policy, await self.capacity_snapshot()):
+                return self.store.get(job["prompt_id"])
+            job = self.store.get(job["prompt_id"])
             return await self.submit_reserved(job, payload, lane)
 
     async def submit_reserved(
@@ -375,21 +551,25 @@ class Fleet:
         payload: dict[str, Any],
         lane: Lane,
     ) -> dict[str, Any]:
+        payload = json.loads(json.dumps(payload))
+        payload.setdefault("extra_data", {}).setdefault("h3", {})["fleet_prompt_id"] = job["prompt_id"]
+        self.store.update(job["prompt_id"], submission_started_at=time.time())
         try:
             response = await self.client.post(f"{lane.url}/prompt", json=payload)
         except httpx.HTTPError:
-            updated = self.store.update(job["prompt_id"], status="error")
-            self.cleanup_job_inputs(updated)
-            return updated
+            return self.store.update(job["prompt_id"], status="reconciling", failure_reason="submission_transport_unknown")
         if not response.is_success:
+            if response.status_code >= 500:
+                return self.store.update(job["prompt_id"], status="reconciling", failure_reason="submission_server_outcome_unknown")
             updated = self.store.update(job["prompt_id"], status="error")
             self.cleanup_job_inputs(updated)
             return updated
-        upstream_prompt_id = str(response.json().get("prompt_id", "")).strip()
+        try:
+            upstream_prompt_id = str(response.json().get("prompt_id", "")).strip()
+        except (ValueError, AttributeError):
+            upstream_prompt_id = ""
         if not upstream_prompt_id:
-            updated = self.store.update(job["prompt_id"], status="error")
-            self.cleanup_job_inputs(updated)
-            return updated
+            return self.store.update(job["prompt_id"], status="reconciling", failure_reason="submission_response_unknown")
         return self.store.update(
             job["prompt_id"],
             upstream_prompt_id=upstream_prompt_id,
@@ -483,9 +663,13 @@ def rewrite_record(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    fleet.store.initialize()
-    yield
-    await fleet.close()
+    fleet.instance_lock.acquire()
+    try:
+        fleet.store.initialize()
+        yield
+    finally:
+        await fleet.close()
+        fleet.instance_lock.release()
 
 
 fleet = Fleet()
@@ -519,6 +703,8 @@ def execution_public(job: dict[str, Any]) -> dict[str, Any]:
     status = {
         "queued": "queued",
         "reserved": "submitted",
+        "reconciling": "submitted",
+        "cancelling": "running",
         "submitted": "submitted",
         "running": "running",
         "completed": "completed",
@@ -540,6 +726,8 @@ def execution_public(job: dict[str, Any]) -> dict[str, Any]:
         "gpu_uuid": lane.gpu_uuid if lane else None,
         "created_at": job["created_at"],
         "updated_at": job["updated_at"],
+        "admission_reason": job.get("admission_reason"),
+        "reconciliation_required": job["status"] == "reconciling",
     }
     if status == "failed":
         result["error"] = "Ivan H3 execution failed."
@@ -601,9 +789,12 @@ async def router_options(request: Request) -> dict[str, Any]:
         "duration": {"min": 4, "max": 15},
         "aspect_ratio": ["16:9", "9:16"],
         "execution_profiles": {
-            "preview": {"max_parallel": 3, "steps": 6},
-            "quality": {"max_parallel": 2, "steps": 14},
+            profile: {"max_parallel": fleet.policy.data["short"][profile]["max_parallel"],
+                      "steps": fleet.policy.data["short"][profile]["steps"],
+                      "max_parallel_frame_count": 124, "long_max_parallel": 1}
+            for profile in ("preview", "quality")
         },
+        "capacity_policy": fleet.policy.data,
         "required_assets": {
             "i2v": ["first_frame"],
             "l2v": ["last_frame"],
@@ -625,6 +816,41 @@ async def router_drain(request: Request) -> dict[str, Any]:
         if job["status"] in ACTIVE_STATUSES
     ]
     return {"draining": True, "active": active}
+
+
+@app.get("/api/router/capacity")
+async def router_capacity(request: Request) -> dict[str, Any]:
+    router_protected(request)
+    queues = await fleet.inspect_queues()
+    return {"policy": fleet.policy.data, "resources": await fleet.capacity_snapshot(queues),
+            "active": [{"execution_id": job.get("execution_id"), "status": job["status"], "lane_id": job["lane_id"]}
+                       for job in fleet.store.active()],
+            "queues": queues, "validation_lease": fleet.store.validation_lease()}
+
+
+@app.post("/api/router/validation-lease")
+async def validation_lease(request: Request) -> dict[str, Any]:
+    router_protected(request)
+    body = await request.json()
+    owner, ttl = body.get("owner", ""), body.get("ttl_seconds", 120)
+    if not re.fullmatch(r"h3val_[a-f0-9]{16}", str(owner)) or type(ttl) is not int or not 30 <= ttl <= 21600:
+        raise HTTPException(status_code=400, detail="invalid validation owner or ttl")
+    async with fleet.assignment_lock:
+        if any(item["untracked_count"] for item in await fleet.inspect_queues()):
+            raise HTTPException(status_code=409, detail="untracked upstream executions are active")
+        try:
+            return fleet.store.set_validation_lease(owner, ttl, body.get("experiment"))
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.delete("/api/router/validation-lease")
+async def release_validation_lease(request: Request) -> dict[str, bool]:
+    router_protected(request)
+    body = await request.json()
+    async with fleet.assignment_lock:
+        fleet.store.release_validation_lease(str(body.get("owner", "")))
+    return {"released": True}
 
 
 @app.post("/api/router/resume")
@@ -761,28 +987,29 @@ async def router_cancel_execution(execution_id: str, request: Request) -> dict[s
         str(body.get("operation_id", "")),
     ):
         raise HTTPException(status_code=400, detail="cancel requires a valid operation_id")
-    job = fleet.store.get_by_execution(execution_id)
-    if not job:
-        raise HTTPException(status_code=404, detail="execution not found")
-    operation_id = str(body["operation_id"])
-    existing_operation = job.get("cancel_operation_id")
-    if (
-        existing_operation
-        and existing_operation != operation_id
-        and job["status"] not in TERMINAL_STATUSES
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="execution cancellation is already owned by another operation",
-        )
-    if not existing_operation:
-        job = fleet.store.update(
-            job["prompt_id"],
-            cancel_operation_id=operation_id,
-        )
-    if job["status"] not in TERMINAL_STATUSES:
-        job = await _cancel_job(job["prompt_id"], {})
-    return execution_public(job)
+    async with fleet.assignment_lock:
+        job = fleet.store.get_by_execution(execution_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="execution not found")
+        operation_id = str(body["operation_id"])
+        existing_operation = job.get("cancel_operation_id")
+        if (
+            existing_operation
+            and existing_operation != operation_id
+            and job["status"] not in TERMINAL_STATUSES
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="execution cancellation is already owned by another operation",
+            )
+        if not existing_operation:
+            job = fleet.store.update(
+                job["prompt_id"],
+                cancel_operation_id=operation_id,
+            )
+        if job["status"] not in TERMINAL_STATUSES:
+            job = await _cancel_job_locked(job["prompt_id"], {})
+        return execution_public(job)
 
 
 @app.get("/api/router/executions/{execution_id}/output")
@@ -855,6 +1082,13 @@ async def submit_prompt(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     execution_id, request_digest = execution_identity(payload)
     await fleet.refresh_active()
     async with fleet.assignment_lock:
+        lease = fleet.store.validation_lease()
+        if (execution_id or "").startswith("h3val_") and not lease:
+            raise HTTPException(status_code=409, detail="validation operation requires an active owned lease")
+        if lease and not (execution_id or "").startswith(lease["owner"] + "_"):
+            raise HTTPException(status_code=503, detail="H3 fleet is in a controlled capacity-validation window")
+        if lease and lease["expires_at"] <= time.time():
+            raise HTTPException(status_code=503, detail="H3 validation window must be renewed before submitting more work")
         if execution_id:
             existing = fleet.store.get_by_execution(execution_id)
             if existing:
@@ -870,7 +1104,14 @@ async def submit_prompt(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
                     "h3_gpu_uuid": lane.gpu_uuid if lane else None,
                     "idempotent_replay": True,
                 }
-        lane = await fleet.select_lane(profile)
+        try:
+            demand = fleet.policy.demand(payload, profile)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        experiment = lease.get("experiment") if lease else None
+        if experiment and not fleet.policy.matches_experiment(demand, experiment):
+            raise HTTPException(status_code=400, detail="execution differs from the fixed validation workload")
+        lane = await fleet.select_lane(profile, demand, experiment)
         prompt_id = uuid.uuid4().hex
         job = fleet.store.create(
             prompt_id=prompt_id,
@@ -878,13 +1119,17 @@ async def submit_prompt(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
             execution_id=execution_id,
             request_digest=request_digest,
             request_data=payload,
-            lane_id=lane.id if lane else "",
+            lane_id="",
             stage=stage,
             profile=profile,
-            status="reserved" if lane else "queued",
+            status="queued",
             execution_data=payload.get("extra_data", {}).get("h3", {}).get("contract"),
         )
-        if lane:
+        job = fleet.store.update(prompt_id, demand_json=json.dumps(demand))
+        if lane is None:
+            job = fleet.store.update(prompt_id, admission_reason="no_eligible_lane")
+        if lane and fleet.store.reserve(prompt_id, lane.id, fleet.policy, await fleet.capacity_snapshot()):
+            job = fleet.store.get(prompt_id)
             job = await fleet.submit_reserved(job, payload, lane)
             if job["status"] == "error":
                 raise HTTPException(status_code=502, detail="ComfyUI did not accept the H3 execution")
@@ -1031,13 +1276,24 @@ async def cancel_job(
 
 
 async def _cancel_job(prompt_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    async with fleet.assignment_lock:
+        return await _cancel_job_locked(prompt_id, body)
+
+
+async def _cancel_job_locked(prompt_id: str, body: dict[str, Any]) -> dict[str, Any]:
     try:
         job = fleet.store.get(prompt_id)
     except KeyError as error:
         raise HTTPException(status_code=404, detail="Unknown prompt id") from error
     if job["status"] in TERMINAL_STATUSES:
         return job
-    if job["status"] in {"queued", "reserved"} and not job["upstream_prompt_id"]:
+    if job["status"] in {"reserved", "reconciling"} and job.get("submission_started_at"):
+        job = await fleet.reconcile_submission(job)
+        if not job["upstream_prompt_id"] or job["status"] == "reconciling":
+            raise HTTPException(status_code=409, detail="H3 submission outcome must be reconciled before cancellation")
+        if job["status"] in TERMINAL_STATUSES:
+            return job
+    if job["status"] in {"queued", "reserved"} and not job.get("submission_started_at"):
         updated = fleet.store.update(prompt_id, status="cancelled")
         fleet.cleanup_job_inputs(updated)
         return updated
@@ -1062,6 +1318,9 @@ async def _cancel_job(prompt_id: str, body: dict[str, Any]) -> dict[str, Any]:
             timeout=30,
         )
     elif presence == "running":
+        running_ids = {str(item[1]) for item in queue_response.json().get("queue_running", []) if len(item) > 1}
+        if running_ids != {job["upstream_prompt_id"]}:
+            raise HTTPException(status_code=409, detail="H3 lane interrupt would affect another execution")
         response = await fleet.client.post(
             f"{lane.url}/interrupt",
             json={},

@@ -63,6 +63,12 @@ def load_module(tmp_path: Path):
     else:
         module = importlib.import_module("app.main")
     module.fleet.store.initialize()
+    module.resource_snapshot = lambda: {
+        "ok": True, "timestamp": module.time.time(),
+        "memory_available_bytes": 80 * 1024**3, "swap_used_bytes": 0,
+        "root_available_bytes": 50 * 1024**3, "offload_available_bytes": 60 * 1024**3,
+        "cgroup_current_bytes": 16 * 1024**3, "cgroup_swap_bytes": 0, "cgroup_events": {},
+    }
     return module
 
 
@@ -274,7 +280,13 @@ class FakeComfyClient:
 
 def payload(execution_id: str, profile: str = "preview") -> dict:
     return {
-        "prompt": {"1": {"class_type": "Test"}},
+        "prompt": {
+            "1": {"class_type": "MiniMaxH3AudioConditioningT8" if profile == "preview" else "MiniMaxH3ImageToVideo",
+                  "inputs": {"length": 124, "width": 864 if profile == "preview" else 1344,
+                             "height": 480 if profile == "preview" else 768}},
+            "2": {"class_type": "MiniMaxH3DualClockSamplerT8" if profile == "preview" else "BasicScheduler",
+                  "inputs": {"steps": 6 if profile == "preview" else 14}},
+        },
         "extra_data": {
             "h3": {
                 "execution_id": execution_id,

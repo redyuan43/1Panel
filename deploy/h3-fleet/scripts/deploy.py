@@ -49,6 +49,11 @@ def archive() -> str:
         "app/__init__.py",
         "app/main.py",
         "app/workflow_builder.py",
+        "app/admission.py",
+        "config/capacity.json",
+        "scripts/validate_capacity.py",
+        "scripts/validate_dual.py",
+        "scripts/deploy.py",
         "requirements.txt",
         "systemd/h3-compute.slice",
         "systemd/comfyui-h3@.service",
@@ -155,7 +160,7 @@ def active_jobs():
             {"prompt_id": row[0], "lane_id": row[1], "status": row[2]}
             for row in db.execute(
                 "SELECT prompt_id,lane_id,status FROM jobs "
-                "WHERE status IN ('queued','reserved','submitted','running') "
+                "WHERE status IN ('queued','reserved','reconciling','submitted','running','cancelling') "
                 "ORDER BY created_at"
             )
         ]
@@ -179,6 +184,7 @@ def inventory():
     ]
     return {
         "active_jobs": active_jobs(),
+        "lane_queue_counts": lane_queue_counts(),
         "root_available_bytes": root.free,
         "offload_available_bytes": offload.free,
         "memory_available_bytes": meminfo.get("MemAvailable"),
@@ -197,6 +203,17 @@ def process_env(unit):
             name, value = item.split(b"=", 1)
             values[name.decode()] = value.decode()
     return values
+
+def lane_queue_counts():
+    lanes = json.loads(process_env("h3-fleet.service").get("H3_FLEET_LANES", "[]"))
+    if not lanes:
+        raise RuntimeError("fleet lane inventory is unavailable")
+    result = {}
+    for lane in lanes:
+        with urllib.request.urlopen(lane["url"].rstrip("/") + "/queue", timeout=10) as response:
+            queue = json.load(response)
+        result[lane["id"]] = sum(len(queue.get(key, [])) for key in ("queue_running", "queue_pending"))
+    return result
 
 def lane_bindings():
     scheduler = process_env("h3-fleet.service")
@@ -315,9 +332,9 @@ def wait_healthy(base, secret, *, timeout_seconds=120):
 
 def restore(backup, existed, before, payload):
     command("sudo", "-n", "systemctl", "stop", "h3-fleet.service", check=False)
-    for unit in UNITS[:3]:
+    for unit in (() if payload.get("scheduler_only") else UNITS[:3]):
         command("sudo", "-n", "systemctl", "stop", unit, check=False)
-    for relative in ("app/__init__.py", "app/main.py", "app/workflow_builder.py", "requirements.txt"):
+    for relative in ("app/__init__.py", "app/main.py", "app/workflow_builder.py", "app/admission.py", "config/capacity.json", "scripts/validate_capacity.py", "scripts/validate_dual.py", "scripts/deploy.py", "requirements.txt"):
         target = ROOT / relative
         saved = backup / "files" / relative
         if relative in existed:
@@ -337,7 +354,7 @@ def restore(backup, existed, before, payload):
     else:
         command("sudo", "-n", "rm", "-f", str(ENV))
     command("sudo", "-n", "systemctl", "daemon-reload")
-    for unit in UNITS[:3]:
+    for unit in (() if payload.get("scheduler_only") else UNITS[:3]):
         if before["services"][unit]["ActiveState"] == "active":
             command("sudo", "-n", "systemctl", "start", unit)
     if before["services"]["h3-fleet.service"]["ActiveState"] == "active":
@@ -353,6 +370,8 @@ def run(payload):
         return report
     if before["active_jobs"]:
         raise RuntimeError("Ivan H3 jobs are active")
+    if any(before["lane_queue_counts"].values()):
+        raise RuntimeError("Ivan upstream GPU jobs are active")
     if before["root_available_bytes"] < MIN_ROOT or before["offload_available_bytes"] < MIN_OFFLOAD:
         raise RuntimeError("Ivan storage gate failed")
     if before["kernel_alerts"]:
@@ -365,7 +384,7 @@ def run(payload):
     staged.mkdir(parents=True, mode=0o700)
     safe_extract(payload["archive"], staged)
     existed = set()
-    for relative in ("app/__init__.py", "app/main.py", "app/workflow_builder.py", "requirements.txt"):
+    for relative in ("app/__init__.py", "app/main.py", "app/workflow_builder.py", "app/admission.py", "config/capacity.json", "scripts/validate_capacity.py", "scripts/validate_dual.py", "scripts/deploy.py", "requirements.txt"):
         target = ROOT / relative
         if target.is_file():
             existed.add(relative)
@@ -392,7 +411,7 @@ def run(payload):
             payload["key"],
         )
         report["drain"] = drain
-        if active_jobs():
+        if active_jobs() or any(lane_queue_counts().values()):
             if drain["supported"]:
                 post_router(
                     payload["executor_url"],
@@ -402,7 +421,7 @@ def run(payload):
             raise RuntimeError("Ivan H3 jobs became active during the drain gate")
         if not drain["supported"]:
             command("sudo", "-n", "systemctl", "stop", "h3-fleet.service")
-        for relative in ("app/__init__.py", "app/main.py", "app/workflow_builder.py", "requirements.txt"):
+        for relative in ("app/__init__.py", "app/main.py", "app/workflow_builder.py", "app/admission.py", "config/capacity.json", "scripts/validate_capacity.py", "scripts/validate_dual.py", "scripts/deploy.py", "requirements.txt"):
             install_file(staged / relative, ROOT / relative, 0o644)
         current_env = (
             (backup / "fleet.env").read_text()
@@ -418,21 +437,21 @@ def run(payload):
         private_env.write_text(updated_env)
         os.chmod(private_env, 0o600)
         command("sudo", "-n", "install", "-m", "600", str(private_env), str(ENV))
-        for name in ("h3-compute.slice", "comfyui-h3@.service", "h3-fleet.service"):
+        for name in (() if payload.get("scheduler_only") else ("h3-compute.slice", "comfyui-h3@.service", "h3-fleet.service")):
             install_file(staged / "systemd" / name, SYSTEMD / name, 0o644, sudo=True)
         command(str(ROOT / "venv/bin/python"), "-m", "py_compile",
-                str(ROOT / "app/main.py"), str(ROOT / "app/workflow_builder.py"))
+                str(ROOT / "app/main.py"), str(ROOT / "app/workflow_builder.py"), str(ROOT / "app/admission.py"))
         command("sudo", "-n", "systemd-analyze", "verify",
                 str(SYSTEMD / "h3-compute.slice"),
                 str(SYSTEMD / "comfyui-h3@.service"),
                 str(SYSTEMD / "h3-fleet.service"))
-        if active_jobs():
+        if active_jobs() or any(lane_queue_counts().values()):
             raise RuntimeError("Ivan accepted a job after the drain gate")
         command("sudo", "-n", "systemctl", "stop", "h3-fleet.service")
-        for unit in UNITS[:3]:
+        for unit in (() if payload.get("scheduler_only") else UNITS[:3]):
             command("sudo", "-n", "systemctl", "stop", unit)
         command("sudo", "-n", "systemctl", "daemon-reload")
-        for unit in UNITS[:3]:
+        for unit in (() if payload.get("scheduler_only") else UNITS[:3]):
             command("sudo", "-n", "systemctl", "start", unit, timeout=120)
         command("sudo", "-n", "systemctl", "start", "h3-fleet.service", timeout=60)
         live_health, options = wait_healthy(
@@ -476,12 +495,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="ivan")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--scheduler-only", action="store_true", help="update fleet admission code without restarting GPU workers")
     parser.add_argument("--key-file", type=Path, default=DEFAULT_KEY)
     parser.add_argument("--executor-url", default=DEFAULT_EXECUTOR_URL)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     args = parser.parse_args()
     payload = {
         "execute": args.execute,
+        "scheduler_only": args.scheduler_only,
         "executor_url": private_executor_url(args.executor_url),
     }
     if args.execute:
