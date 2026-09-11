@@ -79,3 +79,14 @@ opencode.json
 superpowers
 .worktrees/
 .codex/
+
+# Local Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local AI Router experiment workspaces and generated evidence
+/experiments/*
+
+# Local H3 fleet run state and capacity evidence snapshots
+deploy/h3-fleet/.state/
