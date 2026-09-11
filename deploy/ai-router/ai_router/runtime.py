@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .instance_status import INSTANCE_HEARTBEAT_SECONDS
+
 import asyncio
 import os
 import time
@@ -35,6 +37,7 @@ from .route_trace import RouteTraceStore, registry_fingerprint
 from .scheduler import ClientLimiter, Scheduler
 from .store import InMemoryStateStore, RedisStateStore, StateStore
 from .token_counter import HuggingFaceTokenCounter, TokenCounter
+from .endpoint_tokens import EndpointTokenCounter
 from .training_archive import TrainingArchive
 
 
@@ -69,6 +72,7 @@ class RouterRuntime:
     instance_id: str
     boot_id: str
     state_encryption_key: str = field(repr=False)
+    endpoint_token_counter: EndpointTokenCounter = field(default_factory=EndpointTokenCounter, init=False)
     privacy_reviewer: PrivacyReviewer | None = field(default=None, init=False)
     prefix_prewarmer: PrefixPrewarmer | None = field(default=None, init=False, repr=False)
     track_instance: bool = False
@@ -85,6 +89,7 @@ class RouterRuntime:
         init=False,
         repr=False,
     )
+    _instance_heartbeat: asyncio.Task | None = field(default=None, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
     _endpoint_config_revision: int = field(
         default=-1,
@@ -306,8 +311,19 @@ class RouterRuntime:
             **cleanup,
         )
         await self._publish_instance_state("running")
+        self._instance_heartbeat = asyncio.create_task(self._heartbeat_instances())
         from .history_index import rebuild_verified_history
         self._verified_history_backfill = asyncio.create_task(rebuild_verified_history(self))
+
+    async def _heartbeat_instances(self) -> None:
+        while True:
+            await asyncio.sleep(INSTANCE_HEARTBEAT_SECONDS)
+            try:
+                await self._publish_instance_state("draining" if self.draining else "running")
+            except Exception:
+                # A failed status write must neither stop request handling nor
+                # kill the heartbeat. Readers will mark old evidence as stale.
+                continue
 
     async def track_request_started(
         self,
@@ -454,6 +470,7 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        await self.endpoint_token_counter.close()
         backfill = getattr(self, "_verified_history_backfill", None)
         if backfill is not None:
             backfill.cancel()
@@ -461,6 +478,13 @@ class RouterRuntime:
                 await backfill
             except asyncio.CancelledError:
                 pass
+        if self._instance_heartbeat is not None:
+            self._instance_heartbeat.cancel()
+            try:
+                await self._instance_heartbeat
+            except asyncio.CancelledError:
+                pass
+            self._instance_heartbeat = None
         close_health = getattr(self.health, "close", None)
         if close_health is not None:
             await close_health()

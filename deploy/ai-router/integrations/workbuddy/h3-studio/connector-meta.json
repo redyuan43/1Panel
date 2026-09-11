@@ -1,0 +1,23 @@
+{
+  "name": "H3 视频工作室",
+  "name_zh": "H3 视频工作室",
+  "name_en": "H3 Video Studio",
+  "description": "使用本地创意技能整理 H3 视频提示词，保存草稿，经明确确认后生成预览，并查询、审阅或取消任务。",
+  "description_zh": "使用本地创意技能整理 H3 视频提示词，保存草稿，经明确确认后生成预览，并查询、审阅或取消任务。",
+  "description_en": "Prepare H3 video prompts with local creative skills, save drafts, explicitly approve previews, and inspect, review or cancel tasks.",
+  "source": "siyuan-h3-studio",
+  "type": "mcp",
+  "auth_mode": "token",
+  "version": "0.1.0",
+  "minWorkbuddyVersion": "4.24.0",
+  "examples_zh": [
+    "用 H3 为这段创意整理视频提示词，只保存草稿，先不要生成。",
+    "保持这段成熟提示词原文，展示 A4 配方和确认范围。",
+    "查询我指定的 H3 任务，展示当前版本与预览结果。"
+  ],
+  "examples_en": [
+    "Prepare an H3 video prompt from this idea and save a draft without generating.",
+    "Keep my finished prompt verbatim and show the A4 recipe and approval scope.",
+    "Inspect my specified H3 task and show its current revision and preview."
+  ]
+}

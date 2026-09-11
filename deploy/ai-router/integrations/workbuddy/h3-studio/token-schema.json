@@ -1,0 +1,18 @@
+{
+  "title": "连接私人 H3 工作室",
+  "title_en": "Connect your private H3 studio",
+  "description": "仅在 WorkBuddy 本机私密表单填写管理员分配给您的 H3 最小权限令牌，由客户端本地保存并在连接时注入。不要把令牌发送到聊天、写入连接器文件或提交到 Git。",
+  "description_en": "Enter your administrator-issued, least-privilege H3 token only in WorkBuddy's local private form. The client stores and injects it locally. Never put it in chat, connector files or Git.",
+  "fields": [
+    {
+      "key": "H3_ACCESS_TOKEN",
+      "label": "H3 私人访问令牌",
+      "label_en": "H3 private access token",
+      "type": "password",
+      "required": true,
+      "placeholder": "在此填写管理员单独提供的个人令牌，不包含 Bearer 前缀",
+      "description": "仅授权本人 H3 任务所需权限；令牌过期或被撤销时，在此表单重新连接。",
+      "description_en": "Use only the permissions needed for your own H3 tasks. Reconnect through this form if the token expires or is revoked."
+    }
+  ]
+}

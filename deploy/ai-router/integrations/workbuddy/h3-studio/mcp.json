@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "siyuan-h3-studio": {
+      "type": "streamableHttp",
+      "url": "https://ai-x10drg.taild500c8.ts.net:4001/mcp/h3",
+      "headers": {
+        "Authorization": "Bearer ${H3_ACCESS_TOKEN}"
+      },
+      "timeout": 30000
+    }
+  }
+}

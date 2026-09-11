@@ -1,0 +1,9 @@
+.input-material-panel { margin: 18px 0; padding: 18px; border: 1px solid #ccd5ce; background: #f6f8f5; }
+.input-material-panel h3 { margin: 0 0 10px; }
+.input-material-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 260px)); gap: 16px; }
+.input-material-card { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.input-material-card img, .input-material-card video { width: 100%; height: 220px; object-fit: contain; background: #16211d; }
+.input-material-card audio { width: 100%; }
+.input-material-card small { overflow-wrap: anywhere; color: #536960; }
+.input-material-warning { color: #8b490a; }
+@media (max-width: 600px) { .input-material-grid { grid-template-columns: 1fr; } }

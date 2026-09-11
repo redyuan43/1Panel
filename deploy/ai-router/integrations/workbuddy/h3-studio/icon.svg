@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">H3 视频工作室</title>
+  <rect x="8" y="4" width="48" height="56" rx="12" fill="#111827"/>
+  <rect x="15" y="11" width="34" height="42" rx="6" fill="none" stroke="#67E8F9" stroke-width="2"/>
+  <path d="M27 23L40 32L27 41Z" fill="#67E8F9"/>
+  <path d="M22 6V10M32 6V10M42 6V10M22 54V58M32 54V58M42 54V58" stroke="#F9FAFB" stroke-width="2"/>
+</svg>
