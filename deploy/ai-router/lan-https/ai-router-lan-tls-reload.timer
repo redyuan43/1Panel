@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the AI Router LAN TLS certificate daily
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

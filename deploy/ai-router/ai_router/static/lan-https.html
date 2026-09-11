@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>局域网 HTTPS · AI Router</title>
+<link rel="stylesheet" href="/assets/style.css">
+<link rel="stylesheet" href="/assets/lan-https.css">
+</head>
+<body>
+<header class="app-header"><div class="brand"><span class="brand-mark">1P</span><div><p>AI ROUTER / CONNECT</p><h1>局域网 HTTPS</h1></div></div><a class="tab" href="/">返回控制台</a></header>
+<main class="lan-main">
+<section class="panel"><div class="panel-heading"><div><h2>连接你的设备</h2><p>账号使用 API Key 验证；设备通过信任证书验证服务器。同一设备通常只需安装一次证书。</p></div></div>
+<form id="lan-login" class="lan-row"><label>管理密钥<input id="lan-admin" type="password" autocomplete="off"></label><button type="submit">加载连接信息</button></form>
+<p id="lan-message" role="status" aria-live="polite">正在读取配置…</p>
+</section>
+<div id="lan-details" hidden>
+<div class="lan-grid">
+<section class="panel"><p class="lan-step">01 / 连接地址</p><h2>直接走局域网</h2><label>API Base URL<input id="lan-url" readonly></label><div class="lan-row"><button id="copy-url" type="button">复制地址</button><span>模型：<code>siyuan/auto</code></span></div><p>地址已经包含 /v1。更换账号时只需替换 API Key。</p></section>
+<section class="panel"><p class="lan-step">02 / 信任证书</p><h2>安装到实际运行应用的设备</h2><a class="lan-button" href="/api/lan-https/ca.crt" download>下载 CA 公钥证书</a><p>只下载公开证书，不包含服务器或 CA 私钥。请通过可信的控制台地址下载并核对指纹。</p><label>CA SHA-256 指纹<code id="ca-fingerprint" class="lan-fingerprint"></code></label></section>
+</div>
+<section class="panel"><h2>安装指引</h2>
+<label>设备系统<select id="lan-os"><option value="windows">Windows</option><option value="linux">Linux / Ubuntu</option><option value="macos">macOS</option></select></label>
+<div id="guide-windows"><ol><li>双击下载的 <code>ai-router-lan-ca.crt</code>，选择“安装证书”。</li><li>选择“当前用户”，再选择“将所有证书放入下列存储”。</li><li>选择“受信任的根证书颁发机构”，完成安装。</li><li>完全退出并重新打开调用应用，再填写上方地址和自己的 API Key。</li></ol></div>
+<div id="guide-linux" hidden><p>Ubuntu / Debian：在证书下载目录执行：</p><pre>sudo install -m 0644 ai-router-lan-ca.crt /usr/local/share/ca-certificates/ai-router-lan-ca.crt
+sudo update-ca-certificates</pre><p>然后重新打开调用应用。</p></div>
+<div id="guide-macos" hidden><ol><li>打开“钥匙串访问”，把证书导入“系统”钥匙串。</li><li>打开证书的“信任”，将 SSL 设为“始终信任”，按系统提示确认。</li><li>重新打开调用应用。</li></ol></div>
+<p>浏览器、容器、虚拟环境或部分应用可能使用独立证书库。网页不能自动向系统安装证书；在 nano3 安装也不会使另一台 Windows 自动信任。</p>
+</section>
+<section class="panel"><h2>证书状态</h2><div class="lan-grid"><div><h3>服务器证书</h3><p id="server-valid"></p><p id="server-expiry"></p></div><div><h3>CA 与自动续签</h3><p id="ca-expiry"></p><p id="renewal"></p></div></div></section>
+<section class="panel"><h2>分层检查连接</h2><div class="lan-grid">
+<div><h3>在当前设备检查 HTTPS</h3><p>在新窗口打开健康检查。若出现证书警告，请完成当前设备的证书安装；不要跳过验证。页面显示 ok:true 只证明浏览器访问正常。</p><a id="device-check" class="lan-button" target="_blank" rel="noopener">打开本机 HTTPS 检查</a></div>
+<form id="lan-check"><h3>从 AI 服务器检查接口</h3><p>这项检查不能证明你当前设备或应用已信任证书。</p><label>待验证的 API Key（可选，不保存）<input id="check-key" type="password" autocomplete="off"></label><label>模型<input id="check-model" value="siyuan/auto"></label><label class="lan-checkline"><input id="check-inference" type="checkbox">同时验证模型回复（会产生一次推理调用）</label><button type="submit">开始服务器检查</button><p id="check-result" role="status" aria-live="polite"></p></form>
+</div></section>
+</div>
+</main><script src="/assets/lan-https.js"></script>
+</body></html>

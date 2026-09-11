@@ -1,0 +1,11 @@
+[Unit]
+Description=Reload renewed TLS certificates for AI Router LAN HTTPS
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecCondition=/usr/bin/docker exec ai-router-lan-https /bin/true
+ExecStart=/opt/1panel/ai-router-lan-https/renew-ip-cert.sh
+ExecStart=/usr/bin/docker exec ai-router-lan-https nginx -t
+ExecStart=/usr/bin/docker exec ai-router-lan-https nginx -s reload
+ExecStart=/opt/1panel/ai-router-lan-https/publish-public-certificates.sh
