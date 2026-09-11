@@ -18,6 +18,7 @@ from .errors import (
 )
 from .health import HealthMonitor
 from .local_pool import LocalPool, LocalPoolLockBusy
+from .routing_modes import PerformanceRouter, resolve as resolve_objectives, advisory as objective_advisory
 from .prefix_affinity import (
     PrefixAffinityLocation,
     PrefixAffinityRecord,
@@ -42,6 +43,7 @@ INCOMPATIBLE_REJECTION_REASONS = frozenset(
         "context",
         "deepseek_multimodal_unsupported",
         "deployment_profile",
+        "image_count",
         "modality",
         "output_context",
         "task",
@@ -321,6 +323,7 @@ class RoutingPolicy:
         self.health = health
         self.store = store
         self.local_pool = LocalPool(store, settings)
+        self.performance = PerformanceRouter(store)
 
     async def choose(
         self,
@@ -344,6 +347,8 @@ class RoutingPolicy:
         conversation_control: dict[str, Any] | None = None,
         trace: DecisionTrace | None = None,
         trace_attempt: int = 1,
+        routing_options: dict[str, Any] | None = None,
+        candidate_prompt_tokens: dict[str, int] | None = None,
     ) -> RouteDecision:
         strategy = str(
             self.settings.section("routing").get(
@@ -362,7 +367,16 @@ class RoutingPolicy:
             if requested_context_tokens is not None
             else prompt_tokens + output_reserve_tokens
         )
+        options = routing_options or resolve_objectives(self.settings.section("routing"))
+        counts = candidate_prompt_tokens or {}
         directed = bool(evaluation.required_endpoint_id)
+        objective_preview = bool(options["enabled"] and requested_model == "auto" and not directed
+                                and not (conversation_control or {}).get("pin"))
+        objective_active = objective_preview and not options.get("observe_only")
+        objective_pool = {e for rows in (options["flash_order"], options["quality_order"] if options["mode"] == "quality" else {})
+                          for values in rows.values() for e in values}
+        advisory_ids = set()
+
         if directed:
             directed_endpoint_id = str(evaluation.required_endpoint_id)
             requested_endpoints = (
@@ -477,25 +491,32 @@ class RoutingPolicy:
         rejection_by_endpoint: dict[str, str] = {}
         trace_candidates: list[dict[str, Any]] = []
         for endpoint in endpoints:
+            candidate_required = required
+            if objective_active and objective_advisory(endpoint, options) and required.output_token_limit:
+                candidate_required = replace(required, output_token_limit=False)
+                advisory_ids.add(endpoint.id)
             reason = (
+                "local_only" if options["local_only"] and endpoint.cloud else
+                "objective_pool" if objective_active and endpoint.cloud and endpoint.id not in objective_pool else
                 "excluded"
                 if endpoint.id in excluded
                 else await self._ineligible_reason(
                     endpoint,
                     statuses[endpoint.id],
                     evaluation=evaluation,
-                    prompt_tokens=prompt_tokens,
+                    prompt_tokens=counts.get(endpoint.id, prompt_tokens),
                     output_reserve_tokens=output_reserve_tokens,
                     modalities=modalities,
-                    required_capabilities=required,
+                    required_capabilities=candidate_required,
                     conversation=conversation,
                     auto=requested_model == "auto" and not directed,
+                    allow_objective_candidate=objective_active and endpoint.id in objective_pool,
                     excluded_deployment_ids=excluded_deployments,
                     image_count=image_count,
                     allow_tier_downgrade=bool(
-                        control_pin
+                        objective_active or (control_pin
                         and endpoint.id
-                        == str(control_pin.get("endpoint_id") or "")
+                        == str(control_pin.get("endpoint_id") or ""))
                     ),
                 )
             )
@@ -511,9 +532,9 @@ class RoutingPolicy:
                         endpoint,
                         statuses[endpoint.id],
                         evaluation=evaluation,
-                        prompt_tokens=prompt_tokens,
+                        prompt_tokens=counts.get(endpoint.id, prompt_tokens),
                         output_reserve_tokens=output_reserve_tokens,
-                        required_capabilities=required,
+                        required_capabilities=candidate_required,
                         rejection_reason=reason,
                     )
                 )
@@ -553,7 +574,7 @@ class RoutingPolicy:
                         ),
                     },
                 )
-        if requested_model == "auto" and conversation:
+        if requested_model == "auto" and conversation and not objective_active:
             previous_endpoint = self.registry.by_id(
                 conversation.endpoint_id
             )
@@ -735,6 +756,38 @@ class RoutingPolicy:
                 trace_attempt,
             )
             return decision
+
+        if objective_preview:
+            selected, reason, evidence = await self.performance.select(
+                candidates, statuses, evaluation, conversation, options,
+                {e.id: counts.get(e.id, prompt_tokens) for e in candidates}, output_reserve_tokens,
+                client_id, (trace.payload.get("routing_objective", {}).get("reasoning", "unknown") if trace else "unknown"))
+            if trace:
+                trace.payload.setdefault("routing_objective", {}).update(evidence, reason=reason,
+                    observed_endpoint_id=selected.id if selected else None, observe_only=options.get("observe_only", False))
+                trace.record(trace_attempt, "routing_objective", "evaluated" if options.get("observe_only") else "selected",
+                             reason=reason, evidence=evidence, path=True)
+            if not options.get("observe_only"):
+                if selected is None:
+                    raise NoEligibleModelError("no eligible model in the configured routing objective")
+                selected_tokens = counts.get(selected.id, prompt_tokens)
+                migration = bool(conversation and selected.id != conversation.endpoint_id)
+                decision = RouteDecision(
+                    endpoint=selected, requested_model=requested_model, task=evaluation.task,
+                    prompt_tokens=selected_tokens, output_reserve_tokens=output_reserve_tokens,
+                    reason=reason, affinity="migrated" if migration else "hit" if conversation else "new",
+                    score=1.0, migration=migration,
+                    previous_endpoint_id=conversation.endpoint_id if migration else None,
+                    protocol=required.protocol, native_or_adapter=selected.capabilities.protocol_mode(required.protocol),
+                    required_capabilities=(replace(required, output_token_limit=False) if selected.id in advisory_ids else required).labels(),
+                    candidate_rejections=tuple(rejections), strategy_version=strategy,
+                    route_profile=evaluation.route_profile, complexity=evaluation.complexity,
+                    context_required=selected_tokens + output_reserve_tokens, trace=trace,
+                    output_token_limit_advisory=selected.id in advisory_ids)
+                await self._bind_traced_deployment(
+                    decision, statuses[selected.id], conversation, selected_tokens + output_reserve_tokens,
+                    excluded_deployments, modalities, image_count, routing_key, prefix_affinity_key, trace, trace_attempt)
+                return decision
 
         if conversation:
             stability = self._conversation_stability()
@@ -1592,6 +1645,7 @@ class RoutingPolicy:
         excluded_deployment_ids: set[str],
         image_count: int,
         allow_tier_downgrade: bool = False,
+        allow_objective_candidate: bool = False,
     ) -> str | None:
         if not endpoint.enabled:
             return "disabled"
@@ -1611,8 +1665,10 @@ class RoutingPolicy:
             and output_reserve_tokens > int(alias_max_output)
         ):
             return "output_context"
-        if auto and not endpoint.auto_candidate:
+        if auto and not endpoint.auto_candidate and not allow_objective_candidate:
             return "auto_disabled"
+        if auto and allow_objective_candidate and not endpoint.auto_candidate and not endpoint.metadata.get("routing_quality_validated"):
+            return "quality_capability_unvalidated"
         if await self.health.in_cooldown(endpoint.id):
             return "cooldown"
         stale_after = float(self.settings.section("health").get("stale_after_seconds", 15))
@@ -1651,6 +1707,11 @@ class RoutingPolicy:
             and not modalities.issubset(set(endpoint.modalities))
         ):
             return "modality"
+        if (
+            endpoint.backend_type != "ai_pool"
+            and not endpoint.supports_image_count(image_count)
+        ):
+            return "image_count"
         if not endpoint.capabilities.supports(required_capabilities):
             return "capability"
         if endpoint.tasks and "*" not in endpoint.tasks and evaluation.task not in endpoint.tasks:

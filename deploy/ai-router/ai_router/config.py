@@ -507,6 +507,8 @@ def client_policies(settings: Settings) -> tuple[ClientPolicy, ...]:
                 disclosure_mode=str(
                     value.get("disclosure_mode", "internal")
                 ),
+                routing_mode=str(value.get("routing_mode", "inherit")),
+                local_only=bool(value.get("local_only", False)),
             )
         )
     return tuple(result)
@@ -764,6 +766,8 @@ def validate_settings(value: dict[str, Any]) -> None:
             raise ValueError(
                 "routing.client_deployment_pins wait must be between 0 and 3600 seconds"
             )
+    from .routing_modes import validate as validate_objectives
+    validate_objectives(routing.get("objectives", {}))
     strategy = str(routing.get("strategy", "legacy_v1"))
     if strategy not in {"legacy_v1", "intelligent_v2"}:
         raise ValueError(
@@ -919,6 +923,10 @@ def validate_settings(value: dict[str, Any]) -> None:
     if not ids or any(not item for item in ids) or len(ids) != len(set(ids)):
         raise ValueError("client policy IDs must be present and unique")
     for client in clients:
+        if client.get("routing_mode", "inherit") not in {"inherit", "cost", "efficiency", "quality"}:
+            raise ValueError("invalid client routing_mode")
+        if not isinstance(client.get("local_only", False), bool):
+            raise ValueError("client local_only must be boolean")
         if client.get("disclosure_mode", "internal") not in {
             "public",
             "internal",

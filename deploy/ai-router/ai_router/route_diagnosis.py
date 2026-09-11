@@ -90,6 +90,29 @@ def diagnose_route(
     else:
         verdict = f"本轮按候选资格与评分选择了 {selected_label}。"
 
+    objective = trace.get("routing_objective", {})
+    objective_labels = {
+        "cost_affinity": "成本优先，继续复用原会话模型",
+        "cost_local": "成本优先，选择合格本地模型",
+        "cost_flash_fallback": "本地无法处理，使用 Flash 兜底",
+        "efficiency_affinity": "原会话模型尚未触发迁移门槛",
+        "efficiency_initial": "效率优先，选择当前可用模型",
+        "efficiency_cooldown": "迁移冷却期内，继续保持当前模型",
+        "efficiency_measured_gain": "性能样本显示迁移收益达到门槛",
+        "efficiency_severe_wait": "上一轮首个有效输出等待超过门槛，下一轮重选",
+        "efficiency_sustained_slowdown": "近期持续降速，下一轮重选",
+        "quality_preferred": "质量优先，按任务首选与备选顺序选择",
+        "quality_flash_fallback": "高质量模型不可用，已降到 Flash",
+        "quality_wait": "质量候选繁忙，等待配置的高质量模型",
+    }
+    if reason in objective_labels and not objective.get("observe_only"):
+        verdict = objective_labels[reason] + "；本轮使用 " + selected_label + "。"
+    elif previous_rejection == "context":
+        counts = trace.get("token_counting", {}).get("candidates", {})
+        verdict = f"原会话端点 {previous_endpoint_id} 的上下文容量不足，本轮迁移到 {selected_label}。"
+        if counts.get(previous_endpoint_id, {}).get("exact") is False:
+            verdict += " 原端点计数为估算。"
+
     causal_chain = _causal_chain(
         trace,
         candidates,
@@ -105,6 +128,9 @@ def diagnose_route(
         affinity=affinity,
     )
     return {
+        "routing_objective": objective,
+        "token_counting": trace.get("token_counting", {}),
+        "performance_observation": trace.get("performance_observation", {}),
         "diagnosis_version": DIAGNOSIS_VERSION,
         "verdict": verdict,
         "causal_chain": causal_chain,
@@ -212,6 +238,7 @@ def preview_policy_impact(
         "affected_clients": clients,
         "examples": affected[:20],
         "offline_only": True,
+        "objective_evaluation": "requires_live_performance_observation" if proposed.get("routing", {}).get("objectives", {}).get("enabled") else "legacy",
     }
 
 

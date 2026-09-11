@@ -8481,10 +8481,20 @@ def test_control_dashboard_aggregates_runtime_state(
                 "active_request_count": 1,
                 "active_requests": [{"request_id": "running-request"}],
                 "startup_cleanup": {"deployment_members": 2},
+                "registry_fingerprint": "stale-registry",
+                "endpoint_config_revision": 7,
             },
         )
     )
 
+    for instance_id, status, updated_at in [
+        ("retired-api", "stopped", time.time()),
+        ("expired-api", "running", time.time() - 120),
+    ]:
+        run(store.set_json("router:instance-state:" + instance_id, {
+            "instance_id": instance_id, "status": status, "updated_at": updated_at,
+            "registry_fingerprint": "old-retired-registry",
+        }))
     app = create_control_app(runtime)
     with TestClient(app) as client:
         unauthorized = client.get("/api/dashboard")
@@ -8496,15 +8506,28 @@ def test_control_dashboard_aggregates_runtime_state(
 
     assert response.status_code == 200
     payload = response.json()
+    instances = {item["instance_id"]: item for item in payload["router_instances"]}
+    assert instances["retired-api"]["liveness"] == "stopped"
+    assert instances["expired-api"]["liveness"] == "stale"
+    assert instances["expired-api"]["registry_comparison"] == "not_compared"
     assert payload["summary"]["healthy_endpoints"] == len(registry.endpoints)
     assert payload["summary"]["ready_workers"] == 2
     assert payload["summary"]["active_requests"] == 1
     assert payload["summary"]["success_rate"] == 1
     assert payload["cloud_budget"]["spent_usd"] == 1.25
-    assert payload["router_instances"][0]["boot_id"] == "boot-local"
-    assert payload["router_instances"][0]["startup_cleanup"][
+    assert instances["router-api-local"]["boot_id"] == "boot-local"
+    assert instances["router-api-local"]["startup_cleanup"][
         "deployment_members"
     ] == 2
+    assert payload["configuration"]["registry_consistent"] is False
+    assert payload["configuration"]["mismatched_registry_instances"] == [
+        "router-api-local"
+    ]
+    assert instances["router-api-local"]["endpoint_config_revision"] == 7
+    assert any(
+        item["title"] == "管理面与数据面注册表不一致"
+        for item in payload["alerts"]
+    )
     assert payload["requests"][0]["request_id"] == "completed-request"
     assert payload["requests"][0]["capacity_attempts"] == 2
     assert payload["requests"][0]["queue_wait_ms"] == 12.5

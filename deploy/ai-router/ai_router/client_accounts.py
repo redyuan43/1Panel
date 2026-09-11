@@ -76,6 +76,8 @@ class ClientAccountManager:
                         ),
                         "allow_compaction": policy.allow_compaction,
                         "disclosure_mode": policy.disclosure_mode,
+                        "routing_mode": policy.routing_mode,
+                        "local_only": policy.local_only,
                         "source": "legacy_env",
                         "created_at": now,
                         "updated_at": now,
@@ -540,8 +542,14 @@ def _validated_account(
             status_code=400,
             code="invalid_client_limits",
         )
+    mode = value.get("routing_mode", (existing or {}).get("routing_mode", "inherit"))
+    local_only = value.get("local_only", (existing or {}).get("local_only", False))
+    if mode not in {"inherit", "cost", "efficiency", "quality"} or not isinstance(local_only, bool):
+        raise RouterError("invalid client routing mode", status_code=400, code="invalid_client_routing_mode")
     now = time.time()
     return {
+        "routing_mode": mode,
+        "local_only": local_only,
         "id": client_id,
         "name": name,
         "enabled": bool(
@@ -580,6 +588,8 @@ def _validated_account(
 
 def _policy_from_account(value: dict[str, Any]) -> ClientPolicy:
     return ClientPolicy(
+        routing_mode=str(value.get("routing_mode", "inherit")),
+        local_only=bool(value.get("local_only", False)),
         id=str(value["id"]),
         key_env="",
         models=tuple(str(item) for item in value.get("models", [])),
@@ -602,6 +612,8 @@ def _public_account(
     usage: dict[str, int],
 ) -> dict[str, Any]:
     return {
+        "routing_mode": str(account.get("routing_mode", "inherit")),
+        "local_only": bool(account.get("local_only", False)),
         "id": str(account["id"]),
         "name": str(account.get("name", account["id"])),
         "enabled": bool(account.get("enabled", False)),

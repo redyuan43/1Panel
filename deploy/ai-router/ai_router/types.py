@@ -209,6 +209,14 @@ class Endpoint:
     def tools(self) -> bool:
         return self.capabilities.tools != "none"
 
+    def supports_image_count(self, image_count: int) -> bool:
+        max_images = self.metadata.get("max_images")
+        return (
+            image_count <= 0
+            or max_images is None
+            or image_count <= int(max_images)
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -380,6 +388,7 @@ class RouteDecision:
     predicted_cached_tokens: int = 0
     actual_cached_tokens: int | None = None
     matched_checkpoint_tokens: int = 0
+    output_token_limit_advisory: bool = False
     trace: Any | None = field(default=None, repr=False, compare=False)
 
     def response_headers(self, request_id: str) -> dict[str, str]:
@@ -430,6 +439,8 @@ class RouteDecision:
             values["X-1Panel-Tool-History-Repaired"] = str(
                 self.tool_history_repairs
             )
+        if self.output_token_limit_advisory:
+            values["X-1Panel-Output-Limit-Mode"] = "advisory"
         return values
 
 
@@ -444,6 +455,8 @@ class ClientPolicy:
     allow_compaction: bool = False
     disclosure_mode: str = "internal"
     media_models: tuple[str, ...] = ()
+    routing_mode: str = "inherit"
+    local_only: bool = False
 
 
 @dataclass

@@ -305,6 +305,119 @@ def test_v2_remote_order_is_profile_driven(
     assert decision.remote_fallback_position == 1
 
 
+def test_non_pool_image_limit_rejects_only_excess_images(
+    tmp_path: Path,
+) -> None:
+    policy, registry = policy_for(
+        tmp_path,
+        local_healthy=True,
+    )
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+
+    text = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation(
+                "general",
+                None,
+                1.0,
+                "test",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            image_count=0,
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert text.endpoint.id == endpoint.id
+
+    with pytest.raises(NoEligibleModelError) as error:
+        run(
+            policy.choose(
+                requested_model=endpoint.public_model,
+                evaluation=Evaluation(
+                    "general",
+                    None,
+                    1.0,
+                    "test",
+                ),
+                prompt_tokens=100,
+                output_reserve_tokens=100,
+                modalities={"text", "image"},
+                image_count=2,
+                has_tools=False,
+                conversation=None,
+            )
+        )
+    assert f"{endpoint.id}:image_count" in str(error.value)
+
+
+def test_affinity_cannot_bypass_non_pool_image_limit(
+    tmp_path: Path,
+) -> None:
+    policy, registry = policy_for(
+        tmp_path,
+        local_healthy=True,
+    )
+    endpoint = registry.by_id("ai-qwen38-27b")
+    assert endpoint is not None
+    conversation = ConversationState(
+        conversation_id="single-image-affinity",
+        public_model=endpoint.public_model,
+        endpoint_id=endpoint.id,
+        tier_rank=endpoint.tier_rank,
+        task="long-context",
+        last_seen=time.time(),
+        route_profile="multimodal",
+        complexity="standard",
+    )
+
+    text = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "long-context",
+                None,
+                1.0,
+                "test",
+                route_profile="multimodal",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text"},
+            image_count=0,
+            has_tools=False,
+            conversation=conversation,
+        )
+    )
+    assert text.endpoint.id == endpoint.id
+    assert text.affinity == "hit"
+
+    images = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "long-context",
+                None,
+                1.0,
+                "test",
+                route_profile="multimodal",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text", "image"},
+            image_count=2,
+            has_tools=False,
+            conversation=conversation,
+        )
+    )
+    assert images.endpoint.id != endpoint.id
+    assert f"{endpoint.id}:image_count" in images.candidate_rejections
+
+
 def test_v2_cloud_conversation_keeps_original_expert(
     tmp_path: Path,
 ) -> None:
@@ -537,7 +650,7 @@ def test_v2_output_limit_skips_codex_subscription(
     )
 
 
-def test_v2_image_150k_plus_65536_routes_to_glm(
+def test_v2_image_150k_plus_65536_fits_local_256k(
     tmp_path: Path,
 ) -> None:
     policy, _registry = policy_for(
@@ -562,7 +675,8 @@ def test_v2_image_150k_plus_65536_routes_to_glm(
             conversation=None,
         )
     )
-    assert decision.endpoint.id == "zhipu-glm-5.3-flash"
+    assert decision.endpoint.id == "ai-qwen38-27b"
+    assert decision.output_reserve_tokens == 65536
     assert decision.context_required == 215536
     assert (
         "cloud-deepseek-v4-flash:"
