@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from ai_router.api import (
     _ensure_prompt_directive_access,
+    _prompt_directive_capabilities,
     create_app as create_router_app,
 )
 from ai_router.auth import AuthenticatedClient
@@ -315,6 +316,46 @@ def test_auto_directive_is_global_but_explicit_model_scope_is_preserved(
         directive,
         requested_model="codex-pro/gpt-6-astra",
     )
+
+
+def test_workbuddy_directive_output_limit_advisory_is_narrow() -> None:
+    runtime = SimpleNamespace(
+        registry=Registry(ROOT / "config/registry.yaml")
+    )
+    required = RequestCapabilities(
+        protocol="chat",
+        tools=True,
+        streaming=True,
+        output_token_limit=True,
+    )
+    directive = PromptDirective(
+        id="rilun",
+        generation=1,
+        endpoint_id="codex-pro-gpt-5.6-sol",
+    )
+
+    text, advisory = _prompt_directive_capabilities(
+        runtime,
+        required,
+        directive,
+        requested_model="auto",
+        client_id="workbuddy-public",
+    )
+    assert advisory is True
+    assert text.output_token_limit is False
+    assert text.tools is True
+    assert text.streaming is True
+
+    for client_id in ("internal-client", "workbuddy-other"):
+        unchanged, advisory = _prompt_directive_capabilities(
+            runtime,
+            required,
+            directive,
+            requested_model="auto",
+            client_id=client_id,
+        )
+        assert advisory is False
+        assert unchanged == required
 
 
 def test_directive_requires_task_on_another_line() -> None:
@@ -717,7 +758,7 @@ def test_public_auto_directive_routes_without_target_model_acl(
         enabled=True,
         auto_candidate=False,
         cloud=False,
-        metadata={"provider": "test"},
+        metadata=copy.deepcopy(source_endpoint.metadata),
     )
     registry = source_registry.with_endpoints([endpoint])
     runtime = build_runtime(
@@ -832,6 +873,8 @@ def test_public_auto_directive_routes_without_target_model_acl(
             }
         ],
     }
+    if endpoint_id == "codex-pro-gpt-5.6-sol":
+        request_body["max_completion_tokens"] = 16384
     with TestClient(app) as client:
         response = client.post(
             "/v1/chat/completions",
@@ -864,6 +907,12 @@ def test_public_auto_directive_routes_without_target_model_acl(
     assert unauthorized.status_code == 401
     assert len(captured) == 1
     assert captured[0]["model"] == endpoint.provider_model
+    if endpoint_id == "codex-pro-gpt-5.6-sol":
+        assert "max_completion_tokens" not in captured[0]
+        assert (
+            response.headers["x-1panel-output-limit-mode"]
+            == "advisory"
+        )
     user_messages = [
         item
         for item in captured[0]["messages"]
@@ -880,6 +929,26 @@ def test_public_auto_directive_routes_without_target_model_acl(
     assert trace["disclosure_mode"] == "public"
     assert trace["evaluation"]["directive_id"] == directive_id
     assert trace["endpoint_id"] == endpoint.id
+    if endpoint_id == "codex-pro-gpt-5.6-sol":
+        assert (
+            trace["request"]["output_token_limit_mode"]
+            == "advisory"
+        )
+        assert "output_token_limit" not in trace["request"][
+            "required_capabilities"
+        ]
+        audit_events = [
+            json.loads(line)
+            for line in (
+                tmp_path / f"{directive_id}-audit.jsonl"
+            ).read_text(encoding="utf-8").splitlines()
+        ]
+        completed = next(
+            item
+            for item in audit_events
+            if item.get("event") == "request_completed"
+        )
+        assert completed["output_token_limit_mode"] == "advisory"
     assert phrase not in str(trace)
     accounts = asyncio.run(runtime.clients.list_accounts())
     workbuddy = next(

@@ -109,7 +109,7 @@ def test_endpoint_configuration_cannot_exceed_baseline() -> None:
         run(
             manager.save_draft(
                 endpoint_id,
-                {"modalities": ["text", "image"]},
+                {"modalities": ["text", "audio"]},
                 expected_revision=0,
                 source="test",
             )
@@ -423,3 +423,30 @@ def test_control_draft_validate_and_activate(
             == "endpoint_revision_conflict"
         )
     run(runtime.close())
+
+@pytest.mark.parametrize("modalities", [[], ["video"], ["text", "unknown"]])
+def test_input_modality_invalid_values_rejected(modalities):
+    manager = EndpointConfigManager(InMemoryStateStore(), Registry(ROOT / "config" / "registry.yaml"))
+    with pytest.raises(RouterError):
+        run(manager.save_draft("edge-qwen38-flash", {"modalities": modalities}, expected_revision=0, source="test"))
+
+
+def test_image_configuration_persists_and_syncs_runtimes():
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    store = InMemoryStateStore()
+    manager = EndpointConfigManager(store, registry)
+    endpoint_id = "edge-qwen38-flash"
+    record = run(manager.records())[endpoint_id]
+    assert record["configurable_modalities"] == ["image", "text"]
+    assert record["baseline"]["modalities"] == ["text"]
+    draft = run(manager.save_draft(endpoint_id, {"modalities": ["text", "image"]}, expected_revision=0, source="test"))
+    validated = run(manager.validate_draft(endpoint_id, expected_revision=draft["revision"], status=healthy(endpoint_id), source="test"))
+    active = run(manager.activate(endpoint_id, expected_revision=validated["revision"], source="test"))
+    reloaded = EndpointConfigManager(store, registry)
+    effective = run(reloaded.effective_registry()).by_id(endpoint_id)
+    assert effective.modalities == ("text", "image")
+    assert effective.enabled == registry.by_id(endpoint_id).enabled
+    draft = run(reloaded.save_draft(endpoint_id, {"modalities": ["text"]}, expected_revision=active["revision"], source="test"))
+    validated = run(reloaded.validate_draft(endpoint_id, expected_revision=draft["revision"], status=healthy(endpoint_id), source="test"))
+    run(reloaded.activate(endpoint_id, expected_revision=validated["revision"], source="test"))
+    assert run(manager.effective_registry()).by_id(endpoint_id).modalities == ("text",)

@@ -190,6 +190,22 @@ def prepare_prompt_directive_update(
             )
         result["routes"][directive_id] = updated
 
+    for directive_id, incoming in proposed_routes.items():
+        if directive_id in current["routes"]:
+            continue
+        if directive_id == "reset" or not isinstance(incoming, dict):
+            raise RouterError(
+                "invalid new route directive",
+                status_code=400,
+                code="invalid_route_directive",
+            )
+        result["routes"][directive_id] = {
+            "phrase": str(incoming.get("phrase", "")).strip(),
+            "endpoint_id": str(incoming.get("endpoint_id", "")).strip(),
+            "generation": 1,
+        }
+        changes.append({"directive_id": str(directive_id), "fields": "added"})
+
     proposed_reset = proposed.get("reset")
     if not isinstance(proposed_reset, dict):
         proposed_reset = current["reset"]
@@ -378,9 +394,9 @@ class PromptDirectiveStore:
         excluded: set[str] | None = None,
     ) -> dict[str, str]:
         ids = [str(item) for item in directive_ids]
-        if not ids or len(ids) != len(set(ids)) or len(ids) > 5:
+        if not ids or len(ids) != len(set(ids)) or len(ids) > 64:
             raise RouterError(
-                "directive_ids must contain one to five unique IDs",
+                "directive_ids must contain one to 64 unique IDs",
                 status_code=400,
                 code="invalid_route_directive",
             )

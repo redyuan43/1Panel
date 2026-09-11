@@ -69,6 +69,7 @@ class EndpointConfigManager:
                 "effective": _editable_values(effective),
                 "draft": draft,
                 "baseline": _editable_values(base),
+                "configurable_modalities": sorted(set(base.modalities) | {"text", "image"}),
             }
         return result
 
@@ -455,9 +456,11 @@ def _validated_config(
         )
     if not set(candidate.tasks).issubset(set(base.tasks)):
         raise _invalid("tasks cannot exceed the registered capability ceiling")
-    if not set(candidate.modalities).issubset(set(base.modalities)):
+    if not candidate.modalities or not set(candidate.modalities).issubset(
+        set(base.modalities) | {"text", "image"}
+    ):
         raise _invalid(
-            "modalities cannot exceed the registered capability ceiling"
+            "modalities must be nonempty and use supported input types"
         )
     _validate_capability_ceiling(base, candidate)
     return _config_values(candidate)

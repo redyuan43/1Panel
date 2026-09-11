@@ -276,16 +276,23 @@ class OutputClock:
             try:
                 value = json.loads(raw)
                 if not isinstance(value, dict): continue
+                timings = value.get("timings") or {}
+                if number(timings.get("prompt_ms")) is not None:
+                    self.values["prefill_seconds"] = timings["prompt_ms"] / 1000
                 if self.protocol == "chat":
                     deltas = [(c.get("delta") or {}) for c in value.get("choices", [])]
                     text = any(d.get("content") for d in deltas)
-                    output = text or any(d.get(k) for d in deltas for k in ("reasoning", "reasoning_content", "tool_calls"))
+                    output = text or any(d.get(k) for d in deltas for k in ("reasoning", "reasoning_content")) or any(
+                        (call.get("function") or {}).get("name") or (call.get("function") or {}).get("arguments")
+                        for d in deltas for call in d.get("tool_calls", []))
                 else:
                     event = value.get("type", "")
                     text = event == "response.output_text.delta" and bool(value.get("delta"))
                     output = text or (event in {"response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta"} and bool(value.get("delta"))) or (event == "response.output_item.added" and (value.get("item") or {}).get("type") == "function_call")
                 elapsed = (time.monotonic() - self.started_at) * 1000
-                if output: self.values.setdefault("ttft_ms", elapsed)
+                if output:
+                    self.values.setdefault("ttft_ms", elapsed)
+                    self.values["last_output_ms"] = elapsed
                 if text: self.values.setdefault("first_text_ms", elapsed)
             except (ValueError, AttributeError, TypeError):
                 pass
