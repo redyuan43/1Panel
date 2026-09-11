@@ -33,6 +33,50 @@ model_aliases:
     deployment_profile_ids: []
     max_input_tokens: 250000
     max_output_tokens: 4096
+  # 对外统一使用的代号别名：只表示入口，不体现厂商、模型或能力。
+  # 管理员在控制台按别名授权，调用方只看到别名与 siyuan/auto。
+  siyuan/xingcha:
+    endpoint_ids:
+      - cloud-deepseek-v4-flash
+  siyuan/wangshu:
+    endpoint_ids:
+      - cloud-deepseek-v4-pro
+  siyuan/zhuyin:
+    endpoint_ids:
+      - zhipu-glm-5.3-flash
+  siyuan/cangwu:
+    endpoint_ids:
+      - zhipu-glm-5.3
+  siyuan/changgeng:
+    endpoint_ids:
+      - codex-pro-gpt-5.6-sol
+  siyuan/sushang:
+    endpoint_ids:
+      - codex-pro-gpt-6-astra
+  siyuan/shuying:
+    endpoint_ids:
+      - ai-qwen38-27b
+  siyuan/yunxiu:
+    endpoint_ids:
+      - ivan-qwen38-flash-128k
+  siyuan/songxue:
+    endpoint_ids:
+      - amd-qwen38-rocmfpx-128k
+  siyuan/danyue:
+    endpoint_ids:
+      - edge-qwen38-flash
+  siyuan/kongqing:
+    endpoint_ids:
+      - qwen36-shared-fleet
+  siyuan/lengxiang:
+    endpoint_ids:
+      - agx-qwen36-cerebellum-256k
+  siyuan/yanzhu:
+    endpoint_ids:
+      - nx3-qwen36-prefix-lab
+  siyuan/xiyun:
+    endpoint_ids:
+      - nx3-qwen36-shared-64k
 
 endpoints:
   - id: qwen36-shared-fleet
