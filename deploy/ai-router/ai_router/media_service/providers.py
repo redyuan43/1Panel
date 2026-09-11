@@ -16,7 +16,13 @@ from uuid import uuid4
 
 import httpx
 
-from .contracts import MediaError, QuotaExceeded, UnknownOutcome, decode_asset
+from .contracts import (
+    MediaError,
+    QuotaExceeded,
+    UnknownOutcome,
+    decode_asset,
+    legacy_video_enabled,
+)
 
 
 def image_prompt(body: dict) -> str:
@@ -555,13 +561,24 @@ class H3Provider:
             raise MediaError("h3_contract_mismatch", "H3 versioned media contract is required.", 503)
         return result
 
+    @staticmethod
+    def require_legacy() -> None:
+        if not legacy_video_enabled():
+            raise MediaError(
+                "workflow_unavailable",
+                "The Edge H3 pipeline is retired; use direct Ivan execution.",
+                409,
+            )
+
     async def legacy_options(self) -> dict:
+        self.require_legacy()
         result = await self.call("GET", "/options")
         if result.get("contract_version") != 1:
             raise MediaError("h3_contract_mismatch", "H3 versioned media contract is required.", 503)
         return result
 
     async def create(self, job: dict) -> dict:
+        self.require_legacy()
         await self.legacy_options()
         body = job["request"]
         legacy_fields = {
@@ -579,12 +596,15 @@ class H3Provider:
         return await self.call("POST", "/projects", data=data, files=files or None)
 
     async def get(self, project_id: str) -> dict:
+        self.require_legacy()
         return await self.call("GET", f"/projects/{project_id}")
 
     async def action(self, project_id: str, stage: str, action: str, operation: dict) -> dict:
+        self.require_legacy()
         return await self.call("POST", f"/projects/{project_id}/stages/{stage}/{action}", json=operation)
 
     async def download(self, project_id: str, output_id: str):
+        self.require_legacy()
         key = os.environ.get("AI_ROUTER_H3_KEY", "")
         return self.client.stream(
             "GET", self.base + f"/api/router/projects/{project_id}/outputs/{output_id}",

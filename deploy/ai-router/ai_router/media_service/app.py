@@ -131,6 +131,9 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
     @app.post("/jobs/{job_id}/stages/{stage}/{action}")
     async def action(job_id: str, stage: str, action: str, request: Request):
         owner, admin = principal(request)
+        existing = current(request).store.get(job_id, None if admin else owner)
+        if existing.get("creative_workflow_id"):
+            raise MediaError("managed_by_workflow", "请通过所属创作工作流操作此任务。", 409)
         if action in {"start", "regenerate"} and not admin and (
             "siyuan-video" not in request.headers.get("x-media-models", "").split(",")
         ):
@@ -168,6 +171,8 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
                             filename=output_id + extension,
                             headers={"Cache-Control": "private, no-store"})
 
+    from .creative_api import install_internal
+    install_internal(app, current, principal)
     return app
 
 

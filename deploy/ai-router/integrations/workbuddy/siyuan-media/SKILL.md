@@ -5,6 +5,41 @@ description: Generate images, edit supplied reference images, and create staged 
 
 # SIYUAN Media
 
+For H3 Studio recipes A4, A4_C0, A4_C1 and B8, use the dedicated H3 Studio
+MCP connector and its Skill. Do not submit those requests through the legacy
+video CLI or creative workflow as a fallback. If the connector is unavailable,
+report that boundary and retain the draft. Image and other media flows below
+remain unchanged.
+
+## Creative workflows (preferred)
+
+When `options` publishes `creative_workflows.version=1`, use the server-owned
+creative workflow. `siyuan/auto` itself handles natural-language planning,
+selection and progress; do not reconstruct its stage machine in the client.
+
+- Upload only user-selected photos with `upload --image PATH --role ROLE`.
+  Preserve the returned asset IDs and the user's reference roles/order.
+- If a local helper is needed to start a task, use `workflow-create
+  --operation-id OP --kind video --prompt TEXT --asset-id ID --candidates 1`.
+  It creates a proposal; it does not authorize all generation stages.
+- Query with `status --job-id wf_...`. A chat reply ending does not mean the
+  generation finished. Explain pending work and return the workflow ID.
+- Natural-language confirmation/selection through `siyuan/auto` is preferred.
+  The helper also supports `workflow-action --operation-id OP --workflow-id ID
+  --request-file JSON`. Bind the current revision and exact output/review IDs.
+  Submit only the operation the user actually authorized.
+- Confirming a proposal authorizes its candidate samples. Choosing a sample
+  and continuing authorizes one complete low-resolution preview and one local
+  final, with zero automatic regenerations. This recorded scope allows the
+  server to advance; do not ask again for each internal approved stage.
+- Download a child image/video job using its existing job and artifact IDs.
+  Keep this credential-protected helper for local upload/download; ordinary
+  text requests do not require the helper.
+
+The remaining commands describe low-level image and legacy-compatible manual
+operations. Their per-stage confirmation instructions do not replace a newer
+creative workflow's explicitly recorded execution scope.
+
 Use the bundled local CLI. It holds the Router credential outside the skill and
 returns sanitized JSON. Do not replace it with generated curl code or generic
 HTTP tools: that would expose credentials or bypass its retry and origin checks.
@@ -38,10 +73,10 @@ Read [video workflow and commands](references/usage.md#video-workflow) when
 creating or advancing a video.
 
 1. Run `options`, then confirm the workflow, strategy, duration and creation
-   cost boundary. The current Router publishes `quality_gate` (default) and
-   `legacy_pipeline`. Only use `duration_ladder` when a future Router explicitly
-   publishes it; old Routers without workflow options are treated as legacy and
-   receive no unsupported fields.
+   cost boundary. The current Router publishes `quality_gate`, which executes
+   directly on Ivan. Do not use `legacy_pipeline`: the Edge H3 route is retired.
+   Only use `duration_ladder` when a future Router explicitly publishes it.
+   A Router without workflow options is incompatible and must fail closed.
 2. Only after confirmation use `video` with `--confirm-context-cost`. Supply
    `--workflow-mode`, `--creative-profile`, and `--aspect-ratio` only from the
    values published by `options`.
@@ -64,6 +99,10 @@ creating or advancing a video.
    `--prompt-file`.
 7. Stop after returning each stage's result. Do not interpret "make a video" as
    permission to approve unseen outputs or start every stage automatically.
+
+Historical `legacy_pipeline` tasks are read-only. They may be inspected and
+their archived outputs downloaded, but must never be approved, restarted,
+regenerated or advanced. Do not try to skip a failed legacy stage.
 
 `--confirmed` records the caller's assertion; it is not proof of a human click.
 Never add it without actual user authorization. Router version checks do not

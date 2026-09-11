@@ -7,6 +7,36 @@ own skill folder; do not copy Ivan's credentials.
 
 ## Read-Only Commands
 
+New creative tasks use the server workflow. `workflow-create` only proposes a
+plan; it does not render a video. Uploads return immutable asset IDs with their
+intended role. Keep the workflow ID and exact revision from every response.
+
+```text
+python <cli> upload --image "product.png" --role product
+python <cli> workflow-create --operation-id OP --kind video --prompt "A cup on a beach, slow push in" --duration 15 --candidates 1
+python <cli> status --job-id wf_...
+python <cli> workflow-action --operation-id NEXT_OP --workflow-id wf_... --request-file "action.json"
+python <cli> resume --operation-id NEXT_OP
+python <cli> outputs --job-id wf_...
+python <cli> download --job-id wf_... --output "final.mp4"
+```
+
+Use `--asset-id asset_...` on creation for each uploaded reference. An action
+file contains the server action and revision, for example
+`{"action":"confirm","revision":1}`. After viewing the samples, selection is
+`{"action":"select","revision":1,"direction_id":"dir_...","output_id":"out_..."}`;
+copy the exact direction and sample output IDs from current task status. This
+authorizes one full preview and one local final, without automatic regeneration.
+Reference conversion and uncertain quality reviews require the explicit actions
+offered by the server. Never invent approval or silently omit reference images.
+
+If a request disconnects, resume the same operation ID. Do not create a new
+operation to retry an unknown result. The client persists the request and replay
+key outside the Skill folder. `download` accepts workflow IDs, or a selected
+`--artifact-id` from that workflow, and verifies the published content hash.
+The older image/video commands below remain for existing tasks and explicit
+direct-service use. Do not use them to advance children managed by a workflow.
+
 ```text
 python <cli> doctor
 python <cli> options
@@ -56,13 +86,12 @@ python <cli> video --operation-id OP --prompt "A red cube rotates on a white tab
 python <cli> wait --job-id vid_... --seconds 30
 ```
 
-`quality_gate` is the default on a Router that publishes modern workflow
-options and generates each customer video as one continuous H3 execution.
+`quality_gate` is the required workflow and generates each customer video
+directly on the Ivan H3 fleet as one continuous H3 execution.
 `duration_ladder` is currently shelved and must only be used if a future Router
-explicitly publishes it. `legacy_pipeline` preserves the original Context IR and H3 stage sequence.
-If an old Router omits `workflow_mode`, the CLI omits all three new fields and
-uses the legacy behavior. An explicitly requested modern mode is rejected
-instead of silently changing it.
+explicitly publishes it. `legacy_pipeline` and the Edge H3 route are retired.
+If a Router omits `workflow_mode`, the CLI fails closed instead of silently
+using the old Edge behavior.
 
 The returned stages define the actual pipeline; do not hard-code stage names.
 Display the current stage's `output.text` or download its video using
@@ -123,6 +152,10 @@ python <cli> resume --operation-id ORIGINAL_OP
 A 409 conflict means the reviewed output, review, or request changed. Fetch
 current state and ask the user; never silently approve or regenerate a
 replacement version.
+
+For a historical `legacy_pipeline` task, `status`, `outputs` and `download`
+remain available. Do not call `start`, `approve`, `regenerate` or `cancel` on
+that task, and never skip a failed legacy stage to reach `regenerate_2k`.
 
 Only cancel when requested:
 

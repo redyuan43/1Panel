@@ -392,4 +392,6 @@ def router(*, admin: bool = False) -> APIRouter:
                 return JSONResponse(await rpc(client, request.method, "/settings",
                                               **({"json": await request.json()} if request.method == "PUT" else {})))
         result.add_api_route("/settings", endpoint(settings), methods=["GET", "PUT"])
+    from .creative_api import install_gateway
+    install_gateway(result, endpoint, authenticate, decorate, admin=admin)
     return result

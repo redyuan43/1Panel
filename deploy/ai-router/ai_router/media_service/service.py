@@ -22,7 +22,8 @@ except ImportError:
 
 from .contracts import (
     BACKGROUNDS, ID_PATTERN, RATIOS, TERMINAL, USE_CASES, MediaError, QuotaExceeded,
-    UnknownOutcome, decode_asset, image_info, image_request, video_request,
+    UnknownOutcome, decode_asset, image_info, image_request, legacy_video_enabled,
+    video_request,
 )
 from .providers import CodexProvider, H3Provider, QwenProvider
 from .storage import MediaStore
@@ -80,6 +81,8 @@ class MediaService:
         self.locks: dict[str, asyncio.Lock] = {}
         self.lock_file = None
         self.reviewer = VideoReviewer(self.client)
+        from .creative import CreativeService
+        self.creative = CreativeService(self)
 
     def lock(self, job_id: str):
         return self.locks.setdefault(job_id, asyncio.Lock())
@@ -99,7 +102,7 @@ class MediaService:
         self.runner = asyncio.create_task(self._run())
 
     async def close(self):
-        tasks = [self.runner, self.image_task, *self.video_tasks.values()]
+        tasks = [self.runner, self.image_task, *self.video_tasks.values(), *self.creative.tasks.values()]
         for task in tasks:
             if task:
                 task.cancel()
@@ -121,6 +124,7 @@ class MediaService:
             await asyncio.sleep(self.store.settings()["poll_interval"])
 
     async def tick(self):
+        await self.creative.tick()
         for job in self.store.active():
             if job["kind"] == "image":
                 if self.image_task and not self.image_task.done():
@@ -151,6 +155,8 @@ class MediaService:
                             name=f"media-video-{job['id']}",
                         )
                     continue
+                if not legacy_video_enabled():
+                    continue
                 async with self.lock(job["id"]):
                     try:
                         for output_id in job.get("recovery_outputs", []):
@@ -177,6 +183,9 @@ class MediaService:
         settings = self.store.settings()
         result = {
             "enabled": settings["enabled"], "models": models,
+            "creative_workflows": {"version": 1, "candidate_counts": [1, 2, 3], "default_duration": 15,
+                                   "default_aspect_ratio": "9:16", "automatic_regenerations": 0,
+                                   "asset_roles": ["subject", "product", "style", "first_frame", "last_frame", "reference"]},
             "images": {"use_case": USE_CASES, "aspect_ratio": RATIOS, "background": BACKGROUNDS,
                        "n": [1], "max_edit_images": 5, "fallback_max_edit_images": 3,
                        "response_format": ["b64_json", "url"], "mask": False},
@@ -1351,6 +1360,12 @@ class MediaService:
         if workflow_mode(job["request"]) != "legacy_pipeline":
             await self._managed_video(job)
             return
+        if not legacy_video_enabled():
+            raise MediaError(
+                "workflow_unavailable",
+                "The Edge H3 pipeline is retired; this historical task is read-only.",
+                409,
+            )
         state = job["provider_state"]
         if not state.get("project_id"):
             project = await self.h3.create(job)
@@ -1402,6 +1417,12 @@ class MediaService:
         job = self.store.get(job_id, owner)
         if workflow_mode(job["request"]) != "legacy_pipeline":
             return await self._managed_action(job, stage_id, action, body, idem, request_id)
+        if not legacy_video_enabled():
+            raise MediaError(
+                "workflow_unavailable",
+                "The Edge H3 pipeline is retired; this historical task cannot be advanced.",
+                409,
+            )
         allowed = {"output_id", "new_seed"} if action == "start" else (
             {"output_id", "prompt"} if action == "approve" and stage_id == "context_ir" else
             {"output_id"} if action == "approve" else set()

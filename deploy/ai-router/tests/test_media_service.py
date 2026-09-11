@@ -23,6 +23,11 @@ from ai_router.store import InMemoryStateStore
 from ai_router.types import ClientPolicy
 
 
+@pytest.fixture(autouse=True)
+def enable_legacy_pipeline_for_legacy_contract_tests(monkeypatch):
+    monkeypatch.setenv("AI_ROUTER_LEGACY_H3_ENABLED", "true")
+
+
 def png():
     data = io.BytesIO()
     Image.new("RGB", (32, 24), "green").save(data, format="PNG")

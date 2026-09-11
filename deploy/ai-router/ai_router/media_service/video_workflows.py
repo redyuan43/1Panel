@@ -9,7 +9,12 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .contracts import VIDEO_ASPECT_RATIOS, VIDEO_CREATIVE_PROFILES, VIDEO_WORKFLOW_MODES
+from .contracts import (
+    VIDEO_ASPECT_RATIOS,
+    VIDEO_CREATIVE_PROFILES,
+    VIDEO_WORKFLOW_MODES,
+    legacy_video_enabled,
+)
 
 
 WORKFLOW_DESCRIPTORS = (
@@ -275,7 +280,8 @@ def build_prompt_package(request: dict) -> dict:
             "native_ambience_crossfade_seconds": 0.08,
             "force_single_segment": request["audio_policy"] == "lock_source",
         },
-        "anchor_seconds": [0, 5, 10, 15] if decision.eligible else [0, duration],
+        "anchor_seconds": ([] if request.get("anchor_policy") == "provided" else
+                           [0, 5, 10, 15] if decision.eligible else [0, duration]),
     }
     return refresh_prompt_hash(package)
 
@@ -285,7 +291,11 @@ def options() -> dict[str, Any]:
     descriptors = [
         item
         for item in WORKFLOW_DESCRIPTORS
-        if item["id"] != "duration_ladder" or split_enabled
+        if (
+            item["id"] == "quality_gate"
+            or (item["id"] == "duration_ladder" and split_enabled)
+            or (item["id"] == "legacy_pipeline" and legacy_video_enabled())
+        )
     ]
     return {
         "workflow_mode": [item["id"] for item in descriptors],

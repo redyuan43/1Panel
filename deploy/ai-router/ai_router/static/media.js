@@ -1,8 +1,8 @@
 "use strict";
 const $ = id => document.getElementById(id);
-const state = {key: sessionStorage.getItem("ai-router-admin-key") || "", view: "images",
+const state = ViewPreferences.state("media", {key: sessionStorage.getItem("ai-router-admin-key") || "", view: "images",
   selected: null, sequence: 0, settings: null, mediaOptions: null, videoCapabilities: {},
-  pages: {images: [], videos: []}, cursors: {}, drafts: new Map()};
+  pages: {images: [], videos: []}, cursors: {}, drafts: new Map()}, {view:["images","videos","settings"]});
 const labels = {queued:"排队中",running:"执行中",in_progress:"执行中",archiving:"归档中",awaiting_approval:"待批准",
   approved:"已批准",completed:"已完成",failed:"失败",cancelled:"已取消",cancelling:"取消中",reconciling:"核对原任务",pending:"待启动"};
 const stageLabels = {context_ir:"Context IR",preview:"预览",proof:"质量验证",local_768:"本地 768P",cloud_768:"云端 768P",regenerate_2k:"2K"};
@@ -48,12 +48,13 @@ function configureVideoOptions(options){
   }
   const modern=state.videoCapabilities.workflow_mode;
   if(!modern){
-    fillSelect(form.elements.workflow_mode,["legacy_pipeline"],"legacy_pipeline",value=>workflowLabels[value]);
+    fillSelect(form.elements.workflow_mode,[],"");
     form.elements.workflow_mode.disabled=true;
   }
+  form.querySelector('button[type="submit"]').disabled=!modern;
   const compatibility=$("video-compat");
   compatibility.hidden=modern;
-  compatibility.textContent=modern?"":"当前服务器未发布新工作流选项，将按旧版阶段流程创建，且不发送新字段。";
+  compatibility.textContent=modern?"":"当前服务器未发布可用的工作流能力，暂不能创建视频；请检查媒体服务。";
 }
 async function api(path, options={}){
   const headers = {Authorization:`Bearer ${state.key}`, ...options.headers};
@@ -70,6 +71,7 @@ async function connect(){
       const allowed=options.videos?.[field];
       if(Array.isArray(allowed))for(const option of [...$("video-form").elements[field].options])if(!allowed.includes(option.value))option.remove();
     }
+    $("image-form").elements.operation.onchange?.();
     updateAssets();
     await loadPage("images");await loadPage("videos");await loadSettings();
   }catch(error){notice(error.message,true);}
@@ -323,5 +325,9 @@ $("settings-form").onsubmit=async event=>{
   for(const [name,old] of Object.entries(state.settings))value[name]=typeof old==="boolean"?event.currentTarget.elements[name].checked:Number(event.currentTarget.elements[name].value);
   try{state.settings=await api("/api/media/settings",{method:"PUT",body:JSON.stringify(value)});notice("媒体设置已保存");}catch(error){notice(error.message,true);}
 };
+ViewPreferences.fields(["#image-form select", "#video-form select"].flatMap(selector=>[...document.querySelectorAll(selector)].map(el=>`#${el.form.id} select[name="${el.name}"]`)));
+$("image-form").elements.operation.onchange?.();
+ViewPreferences.details();
+document.querySelector(`[data-view="${state.view}"]`)?.click();
 $("key").value=state.key;if(state.key)void connect();
 setInterval(()=>{if(state.selected&&state.view!=="settings")void select(state.selected.collection,state.selected.id,true);},5000);

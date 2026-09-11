@@ -465,6 +465,21 @@ def test_multipart_edit_preserves_original_upload_on_retry(configured, tmp_path)
 @pytest.mark.parametrize("with_assets", [False, True])
 def test_video_always_uses_multipart_without_printing_assets(configured, tmp_path, with_assets):
     env = configured
+    default = env.peer.reply
+
+    def reply(request):
+        if request.path == "/v1/media/options":
+            return 200, {
+                "enabled": True,
+                "videos": {
+                    "workflow_mode": ["quality_gate"],
+                    "creative_profile": {"values": ["general"], "default": "general"},
+                    "aspect_ratio": {"values": ["16:9"], "default": "16:9"},
+                },
+            }, {"X-Request-ID": "options-request"}
+        return default(request)
+
+    env.peer.reply = reply
     image, audio = tmp_path / "reference.png", tmp_path / "reference.wav"
     image.write_bytes(ARTIFACT)
     audio.write_bytes(b"test-audio")
@@ -482,7 +497,9 @@ def test_video_always_uses_multipart_without_printing_assets(configured, tmp_pat
     fields = {name: data.decode() for name, filename, _, data in parts if not filename}
     assert fields["duration"] == "4" and fields["strategy"] == "safe"
     assert fields["watermark"] == "true" and fields["use_embedded_video_audio"] == "false"
-    assert not {"workflow_mode", "creative_profile", "aspect_ratio"} & fields.keys()
+    assert fields["workflow_mode"] == "quality_gate"
+    assert fields["creative_profile"] == "general"
+    assert fields["aspect_ratio"] == "16:9"
     files = {name: data for name, filename, _, data in parts if filename}
     assert files == ({"reference_image": ARTIFACT, "reference_audio": b"test-audio"} if with_assets else {})
     assert_no_secrets(stdout)
@@ -499,7 +516,7 @@ def test_video_negotiates_modern_workflow_options(configured, explicit):
             return 200, {
                 "enabled": True,
                 "videos": {
-                    "workflow_mode": ["quality_gate", "duration_ladder", "legacy_pipeline"],
+                    "workflow_mode": ["quality_gate"],
                     "creative_profile": {"values": ["general", "product"], "default": "general"},
                     "aspect_ratio": ["9:16", "16:9"],
                     "defaults": {"aspect_ratio": "9:16"},
@@ -511,24 +528,62 @@ def test_video_negotiates_modern_workflow_options(configured, explicit):
     args = ["video", "--operation-id", "modern", "--prompt", "A product rotates",
             "--confirm-context-cost"]
     if explicit:
-        args.extend(["--workflow-mode", "duration_ladder", "--creative-profile", "product",
+        args.extend(["--workflow-mode", "quality_gate", "--creative-profile", "product",
                      "--aspect-ratio", "16:9"])
     code, result, _ = invoke(env, *args)
     assert code == 0 and result["id"].startswith("vid_")
     request = env.peer.effects[0]
     fields = {name: data.decode() for name, filename, _, data in parse_multipart(request) if not filename}
-    assert fields["workflow_mode"] == ("duration_ladder" if explicit else "quality_gate")
+    assert fields["workflow_mode"] == "quality_gate"
     assert fields["creative_profile"] == ("product" if explicit else "general")
     assert fields["aspect_ratio"] == ("16:9" if explicit else "9:16")
 
 
-def test_explicit_modern_workflow_is_not_silently_downgraded(configured):
-    code, result, _ = invoke(
-        configured, "video", "--operation-id", "modern-on-legacy", "--prompt", "A scene",
-        "--workflow-mode", "quality_gate", "--confirm-context-cost",
-    )
+@pytest.mark.parametrize("explicit", [False, True])
+def test_router_without_direct_ivan_workflow_fails_closed(configured, explicit):
+    args = [
+        "video", "--operation-id", "modern-on-legacy", "--prompt", "A scene",
+        "--confirm-context-cost",
+    ]
+    if explicit:
+        args.extend(["--workflow-mode", "quality_gate"])
+    code, result, _ = invoke(configured, *args)
     assert code == 2 and result["error"]["code"] == "unsupported_media_option"
     assert [request.path for request in configured.peer.requests] == ["/v1/media/options"]
+    assert configured.peer.effects == []
+
+
+def test_historical_edge_video_cannot_be_advanced(configured):
+    configured.peer.jobs["vid_legacy"] = {
+        "id": "vid_legacy",
+        "status": "failed",
+        "workflow_mode": "legacy_pipeline",
+        "stages": [
+            {
+                "id": "preview",
+                "status": "approved",
+                "output_id": "out_preview",
+                "output": published_output(output_id="out_preview"),
+            },
+            {"id": "local_768", "status": "failed", "output_id": None},
+        ],
+    }
+    code, result, _ = invoke(
+        configured,
+        "start",
+        "--operation-id",
+        "retired",
+        "--job-id",
+        "vid_legacy",
+        "--stage",
+        "local_768",
+        "--output-id",
+        "out_preview",
+        "--confirmed",
+    )
+    assert code == 2
+    assert result["error"]["code"] == "workflow_unavailable"
+    assert [request.method for request in configured.peer.requests] == ["GET"]
     assert configured.peer.effects == []
 
 
@@ -1093,4 +1148,79 @@ def test_windows_guard_rejects_plaintext_credential_mode(configured, monkeypatch
     with pytest.raises(configured.media.ClientError) as error:
         configured.media.Client(configured.config)
     assert error.value.code == "invalid_configuration"
+    assert configured.peer.requests == []
+
+
+def test_workflow_http_create_resume_action_and_status(configured, tmp_path):
+    env = configured
+    workflow_id = "wf_" + "a" * 32
+    workflow = {"id": workflow_id, "status": "draft", "revision": 1, "spec": {"kind": "video"}, "jobs": {}}
+    effects = {}
+    def reply(request):
+        if request.method == "GET":
+            assert request.path == "/v1/media/workflows/" + workflow_id
+            return 200, workflow, {}
+        key = request.headers["Idempotency-Key"]
+        if key not in effects:
+            effects[key] = (request.path, request.body)
+            if request.path.endswith("/actions"):
+                assert json.loads(request.body) == {"action": "cancel", "revision": 1}
+                workflow["status"] = "cancelled"
+            else:
+                assert request.path == "/v1/media/workflows"
+        else:
+            assert effects[key] == (request.path, request.body)
+        if env.peer.drop_next:
+            env.peer.drop_next = False
+            return None
+        return 202, workflow, {}
+    env.peer.reply = reply
+    env.peer.drop_next = True
+    code, result, _ = invoke(env, "workflow-create", "--operation-id", "wf-create", "--prompt", "Create a beach video")
+    assert code == 2 and result["error"]["retry"].startswith("resume")
+    code, result, _ = invoke(env, "resume", "--operation-id", "wf-create")
+    assert code == 0 and result["id"] == workflow_id and len(effects) == 1
+    code, result, _ = invoke(env, "resume", "--operation-id", "wf-create")
+    assert code == 0 and result["revision"] == 1 and len(effects) == 1
+    body = tmp_path / "cancel.json"
+    body.write_text(json.dumps({"action": "cancel", "revision": 1}))
+    code, result, _ = invoke(env, "workflow-action", "--operation-id", "wf-cancel", "--workflow-id", workflow_id, "--request-file", body)
+    assert code == 0 and result["status"] == "cancelled" and len(effects) == 2
+    code, result, _ = invoke(env, "status", "--job-id", workflow_id)
+    assert code == 0 and result["status"] == "cancelled"
+    assert_no_secrets(result)
+
+
+def test_workflow_http_asset_upload_and_download(configured, tmp_path):
+    env = configured
+    workflow_id = "wf_" + "b" * 32
+    image = tmp_path / "input.png"
+    image.write_bytes(ARTIFACT)
+    workflow = {"id": workflow_id, "status": "completed", "image_job_id": "img_child", "jobs": {
+        "img_child": {"id": "img_child", "output": published_output()},
+    }}
+    def reply(request):
+        if request.path == "/v1/media/assets":
+            body = json.loads(request.body)
+            assert body["role"] == "product" and base64.b64decode(body["data"]) == ARTIFACT
+            return 200, {"id": "asset_test", "role": "product"}, {}
+        if request.path == "/v1/media/workflows/" + workflow_id:
+            return 200, workflow, {}
+        assert request.path == "/v1/media/outputs/out_delivery/content"
+        return 200, ARTIFACT, {}
+    env.peer.reply = reply
+    code, result, _ = invoke(env, "upload", "--image", image, "--role", "product")
+    assert code == 0 and result["id"] == "asset_test"
+    for selection in ([], ["--artifact-id", "out_delivery"]):
+        target = tmp_path / ("selected.png" if selection else "final.png")
+        code, result, _ = invoke(env, "download", "--job-id", workflow_id, "--output", target, *selection)
+        assert code == 0 and target.read_bytes() == ARTIFACT
+        assert result["id"] == workflow_id
+        assert_no_secrets(result)
+
+
+@pytest.mark.parametrize("path", ["/v1/media/workflows/wf_invalid/actions", "/v1/media/workflows/wf_" + "a" * 32 + "/admin", "/v1/media/assets/../options"])
+def test_workflow_paths_keep_narrow_allowlist(configured, path):
+    with pytest.raises(configured.media.ClientError, match="media API paths"):
+        configured.client.request("GET", path)
     assert configured.peer.requests == []

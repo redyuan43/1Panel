@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 from typing import Any
 
@@ -34,6 +35,14 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 MAX_PIXELS = 40_000_000
 ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+
+def legacy_video_enabled() -> bool:
+    return os.environ.get("AI_ROUTER_LEGACY_H3_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }
 
 
 class MediaError(Exception):
@@ -126,7 +135,7 @@ def video_request(value: dict) -> dict:
     allowed = {
         "model", "name", "prompt", "mode", "strategy", "duration", "seed", "audio_policy",
         "watermark", "use_embedded_video_audio", "assets", "workflow_mode",
-        "creative_profile", "aspect_ratio",
+        "creative_profile", "aspect_ratio", "anchor_policy",
     }
     if not isinstance(value, dict) or set(value) - allowed:
         raise MediaError("invalid_media_parameters", "Unsupported video parameters.")
@@ -134,11 +143,12 @@ def video_request(value: dict) -> dict:
         "model": "siyuan-video", "name": "Video", "mode": "t2v", "strategy": "fast",
         "duration": 4, "seed": -1, "audio_policy": "native", "watermark": False,
         "use_embedded_video_audio": False, "assets": {},
-        # An omitted value means an older client. New clients explicitly send
-        # quality_gate so legacy callers keep their existing pipeline.
-        "workflow_mode": "legacy_pipeline", "creative_profile": "auto",
+        "workflow_mode": "legacy_pipeline" if legacy_video_enabled() else "quality_gate",
+        "creative_profile": "auto",
         "aspect_ratio": "16:9", **value,
     }
+    if result.get("anchor_policy", "auto") not in {"auto", "provided"}:
+        raise MediaError("invalid_media_parameters", "Invalid anchor policy.")
     if result["model"] != "siyuan-video":
         raise MediaError("model_not_found", "Video model is not available.", 404)
     if not isinstance(result.get("prompt"), str) or not 1 <= len(result["prompt"].strip()) <= 16000:
@@ -154,6 +164,12 @@ def video_request(value: dict) -> dict:
     ):
         if result[field] not in options:
             raise MediaError("invalid_media_parameters", f"Invalid {field}.")
+    if result["workflow_mode"] == "legacy_pipeline" and not legacy_video_enabled():
+        raise MediaError(
+            "workflow_unavailable",
+            "The Edge H3 pipeline is retired; use quality_gate for direct Ivan execution.",
+            409,
+        )
     if type(result["duration"]) is not int or not 4 <= result["duration"] <= 15:
         raise MediaError("invalid_media_parameters", "Duration must be 4-15 seconds.")
     if type(result["seed"]) is not int or not -1 <= result["seed"] < 2**63:
@@ -203,8 +219,7 @@ def video_request(value: dict) -> dict:
     ):
         raise MediaError(
             "invalid_media_parameters",
-            "Managed Ivan workflows currently support t2v/i2v/l2v/fl2v with native audio; "
-            "use legacy_pipeline for reference, hybrid, or source-locked audio.",
+            "Ivan execution currently supports t2v/i2v/l2v/fl2v with native audio.",
         )
     if result["workflow_mode"] == "duration_ladder" and result["duration"] != 15:
         raise MediaError(

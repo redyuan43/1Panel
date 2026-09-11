@@ -29,6 +29,65 @@ SCORE_FIELDS = (
 )
 
 
+def _assistant_text(value: dict) -> str:
+    choices = value.get("choices", [])
+    content = (
+        choices[0].get("message", {}).get("content", "")
+        if choices
+        else ""
+    )
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            item.get("text", "")
+            for item in content
+            if isinstance(item, dict) and isinstance(item.get("text"), str)
+        )
+    return ""
+
+
+def _json_objects(text: str) -> list[dict]:
+    candidates = []
+    stripped = text.strip()
+    if stripped:
+        candidates.append(stripped)
+    candidates.extend(
+        match.group(1).strip()
+        for match in re.finditer(
+            r"```(?:json)?\s*(\{.*?\})\s*```",
+            text,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+    )
+    decoder = json.JSONDecoder()
+    results = []
+    seen = set()
+    for candidate in candidates:
+        try:
+            value = json.loads(candidate)
+        except (TypeError, ValueError):
+            for index, character in enumerate(candidate):
+                if character != "{":
+                    continue
+                try:
+                    value, _ = decoder.raw_decode(candidate[index:])
+                except ValueError:
+                    continue
+                if isinstance(value, dict):
+                    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+                    if encoded not in seen:
+                        seen.add(encoded)
+                        results.append(value)
+            continue
+        if isinstance(value, dict):
+            encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+            if encoded not in seen:
+                seen.add(encoded)
+                results.append(value)
+    return results
+
+
 async def command(*args: str, seconds: int = 120, stderr: bool = False) -> bytes:
     process = await asyncio.create_subprocess_exec(
         *args,
@@ -419,65 +478,110 @@ class SiyuanReviewer:
             f"Prompt package: {json.dumps(prompt_package, ensure_ascii=False)}\n"
             f"Technical evidence: {json.dumps(evidence, ensure_ascii=False)}"
         )
-        response = await self.client.post(
-            endpoint,
-            headers={"Authorization": "Bearer " + key},
-            json={
-                "model": "siyuan/auto",
-                "messages": [{
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": instruction},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": "data:image/png;base64,"
-                                + base64.b64encode(evidence_image).decode(),
-                            },
+        base_payload = {
+            "model": "siyuan/auto",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": instruction},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,"
+                            + base64.b64encode(evidence_image).decode(),
                         },
+                    },
+                ],
+            }],
+            "response_format": {"type": "json_object"},
+            "stream": False,
+        }
+        attempts = []
+        for attempt in range(2):
+            payload = {
+                **base_payload,
+                "reasoning_effort": "medium" if attempt == 0 else "low",
+                "max_tokens": 3000 if attempt == 0 else 4000,
+            }
+            if attempt:
+                payload["messages"] = [{
+                    **base_payload["messages"][0],
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                instruction
+                                + "\nThis is a format-repair retry. Return compact JSON only, "
+                                "without Markdown fences or explanatory text."
+                            ),
+                        },
+                        base_payload["messages"][0]["content"][1],
                     ],
-                }],
-                "reasoning_effort": "xhigh",
-                "response_format": {"type": "json_object"},
-                "max_tokens": 3000,
-                "stream": False,
-            },
-            timeout=180,
-        )
-        if response.status_code >= 400:
+                }]
+            from .creative import readonly_signature
+            # A real long-video review took 248s. A shorter caller timeout lost
+            # its successful response and incorrectly reconciled GPU execution.
+            try:
+                response = await self.client.post(
+                    endpoint,
+                    headers={"Authorization": "Bearer " + key,
+                             "X-Siyuan-Media-Read-Only": readonly_signature(payload, os.environ.get("AI_ROUTER_MEDIA_INTERNAL_KEY", ""))},
+                    json=payload,
+                    timeout=360,
+                )
+            except httpx.HTTPError as exc:
+                raise MediaError("video_review_failed", "SIYUAN评审连接中断或超时；原视频已保留，可重新检查，无需重新生成。", 502) from exc
+            route = {
+                name: value
+                for name in (
+                    "x-request-id",
+                    "x-1panel-route-request-id",
+                    "x-1panel-route-node",
+                    "x-1panel-route-model",
+                    "x-1panel-route-deployment",
+                    "x-1panel-route-reason",
+                )
+                if (value := response.headers.get(name))
+            }
+            attempt_record = {
+                "attempt": attempt + 1,
+                "status": response.status_code,
+                "route": route,
+            }
+            attempts.append(attempt_record)
+            if response.status_code >= 400:
+                continue
+            try:
+                value = response.json()
+            except ValueError:
+                continue
+            for report in _json_objects(_assistant_text(value)):
+                try:
+                    validated = self.validate(report)
+                except MediaError:
+                    continue
+                validated["review_model"] = "siyuan/auto"
+                validated["internal_route"] = route
+                validated["internal_attempts"] = attempts
+                return validated
+
+        last = attempts[-1]
+        if last["status"] >= 400:
             raise MediaError(
                 "video_review_failed",
                 "SIYUAN video review request failed.",
                 502,
-                upstream_status=response.status_code,
-                request_id=response.headers.get("x-request-id"),
+                upstream_status=last["status"],
+                request_id=last["route"].get("x-request-id"),
+                review_attempts=attempts,
             )
-        value = response.json()
-        choices = value.get("choices", [])
-        text = (
-            choices[0].get("message", {}).get("content", "")
-            if choices
-            else ""
+        raise MediaError(
+            "invalid_video_review",
+            "SIYUAN returned an invalid review.",
+            502,
+            request_id=last["route"].get("x-request-id"),
+            review_attempts=attempts,
         )
-        try:
-            report = json.loads(text)
-        except (TypeError, ValueError) as exc:
-            raise MediaError("invalid_video_review", "SIYUAN returned an invalid review.", 502) from exc
-        validated = self.validate(report)
-        validated["review_model"] = "siyuan/auto"
-        validated["internal_route"] = {
-            name: value
-            for name in (
-                "x-request-id",
-                "x-1panel-route-request-id",
-                "x-1panel-route-node",
-                "x-1panel-route-model",
-                "x-1panel-route-deployment",
-                "x-1panel-route-reason",
-            )
-            if (value := response.headers.get(name))
-        }
-        return validated
 
     @staticmethod
     def validate(report: dict) -> dict:

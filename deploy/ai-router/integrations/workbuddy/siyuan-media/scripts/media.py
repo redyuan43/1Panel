@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import contextlib
 import ctypes
 import hashlib
@@ -215,6 +216,10 @@ class Client:
         return value
 
     def summary(self, value):
+        if isinstance(value, dict) and str(value.get("id", "")).startswith("wf_"):
+            result = {name: value[name] for name in ("id", "revision", "status", "spec", "directions", "questions", "planning_notice", "next_actions", "authorization", "error", "assets") if name in value}
+            result["jobs"] = {identifier: self.summary(job) for identifier, job in value.get("jobs", {}).items()}
+            return self.redact(result)
         allowed = {"id", "object", "kind", "model", "status", "created_at", "updated_at",
                    "error", "actual_duration", "fallback_applied", "operation_id",
                    "progress", "output_id", "run_id", "content_type", "bytes", "sha256",
@@ -248,7 +253,9 @@ class Client:
         return self.redact(select(value))
 
     def open(self, method, path, body=None, headers=None, timeout=30):
-        if not re.fullmatch(r"/v1/(?:media/options|media/outputs/[A-Za-z0-9_-]+/content|"
+        if not re.fullmatch(r"/v1/(?:media/options|media/assets|"
+                            r"media/workflows(?:/wf_[a-f0-9]{32}(?:/(?:actions|messages|events))?)?|"
+                            r"media/outputs/[A-Za-z0-9_-]+/content|"
                             r"images(?:/[A-Za-z0-9_-]+){0,3}|videos(?:/[A-Za-z0-9_-]+){0,5})", path):
             raise ClientError("invalid_api_path", "Only media API paths are allowed.")
         request = Request(self.base + path, data=body, method=method, headers={
@@ -286,6 +293,9 @@ class Client:
 
     def get(self, job_id):
         validate_id(job_id)
+        if job_id.startswith("wf_"):
+            value, request_id, _ = self.request("GET", f"/v1/media/workflows/{job_id}")
+            return value, request_id
         if not job_id.startswith(("img_", "vid_")):
             raise ClientError("invalid_job", "Expected an img_ or vid_ task ID.")
         kind = "images" if job_id.startswith("img_") else "videos"
@@ -331,7 +341,7 @@ class Client:
                 exc.details["retry"] = "resume the same operation; do not create another"
                 raise
             if (not isinstance(value.get("id"), str) or not ID.fullmatch(value["id"])
-                    or not value["id"].startswith(("img_", "vid_")) or self.key in value["id"]):
+                    or not value["id"].startswith(("img_", "vid_", "wf_")) or self.key in value["id"]):
                 raise ClientError("invalid_response", "The Router did not return a task ID.", operation_id=operation_id)
             old.update(status="accepted", job_id=value["id"], request_id=request_id)
             atomic_write(receipt_path, encode(old))
@@ -340,6 +350,18 @@ class Client:
 
     def download(self, job_id, target, *, stage=None, artifact_id=None):
         job, _ = self.get(job_id)
+        if job_id.startswith("wf_"):
+            children = job.get("jobs", {})
+            if artifact_id:
+                candidates = [output for child in children.values() for output in
+                              ([child.get("output")] + [s.get("output") for s in child.get("stages", [])])]
+                selected = next((output for output in candidates if output and output.get("id") == artifact_id), None)
+                if not selected:
+                    raise ClientError("output_not_ready", "No workflow artifact matches that ID.")
+                job = {"output": selected}
+                artifact_id = None
+            else:
+                job = children.get(job.get("final_job_id") or job.get("image_job_id"), {})
         if stage:
             match = next((item for item in job.get("stages", []) if item["id"] == stage), None)
             output = (match or {}).get("output")
@@ -480,14 +502,10 @@ def negotiated_video_fields(args, options):
     explicit_workflow = args.workflow_mode
     requested_workflow = explicit_workflow or "quality_gate"
     if "workflow_mode" not in videos:
-        if explicit_workflow not in {None, "legacy_pipeline"}:
-            raise ClientError("unsupported_media_option",
-                              "This Router only supports the legacy video pipeline.")
-        for name in ("creative_profile", "aspect_ratio"):
-            if getattr(args, name) is not None:
-                raise ClientError("unsupported_media_option",
-                                  f"This Router does not publish the {name} option.")
-        return fields
+        raise ClientError(
+            "unsupported_media_option",
+            "This Router does not publish the direct Ivan video workflow.",
+        )
     workflows = option_values(videos["workflow_mode"])
     if workflows and requested_workflow not in workflows:
         raise ClientError("unsupported_media_option",
@@ -541,6 +559,20 @@ def arguments(argv=None):
     sub.add_parser("doctor")
     sub.add_parser("options")
     sub.add_parser("new-operation")
+    workflow = sub.add_parser("workflow-create")
+    workflow.add_argument("--operation-id", required=True)
+    workflow.add_argument("--kind", choices=("image", "video"), default="video")
+    workflow.add_argument("--prompt", required=True)
+    workflow.add_argument("--asset-id", action="append", default=[])
+    workflow.add_argument("--candidates", type=int, choices=(1, 2, 3), default=1)
+    workflow.add_argument("--duration", type=int, choices=range(4, 16), default=15)
+    operation = sub.add_parser("workflow-action")
+    operation.add_argument("--operation-id", required=True)
+    operation.add_argument("--workflow-id", required=True)
+    operation.add_argument("--request-file", required=True)
+    asset = sub.add_parser("upload")
+    asset.add_argument("--image", required=True)
+    asset.add_argument("--role", choices=("reference", "subject", "product", "style", "first_frame", "last_frame"), required=True)
     listing = sub.add_parser("list")
     listing.add_argument("--kind", choices=("image", "video"), required=True)
     for name in ("status", "outputs", "wait", "download"):
@@ -600,6 +632,24 @@ def arguments(argv=None):
 
 def run(args, client):
     cmd = args.command
+    if cmd == "upload":
+        path = Path(args.image).expanduser().resolve()
+        if not path.is_file() or path.stat().st_size > 10 * 1024 * 1024:
+            raise ClientError("invalid_asset", "Select one image of at most 10MiB.")
+        data = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        value, request_id, _ = client.request("POST", "/v1/media/assets", encode({"data": base64.b64encode(data).decode(), "content_type": mime, "role": args.role, "name": path.name}), {"Content-Type": "application/json"})
+        return client.redact({**value, "request_id": request_id})
+    if cmd == "workflow-create":
+        return client.operate(args.operation_id, "/v1/media/workflows", {"kind": args.kind, "prompt": args.prompt, "candidate_count": args.candidates, "duration": args.duration, "asset_ids": args.asset_id})
+    if cmd == "workflow-action":
+        identifier = validate_id(args.workflow_id)
+        if not identifier.startswith("wf_"):
+            raise ClientError("invalid_job", "Expected a workflow ID.")
+        body = json.loads(Path(args.request_file).read_text("utf-8-sig"))
+        if not isinstance(body, dict):
+            raise ClientError("invalid_action", "Expected an action object.")
+        return client.operate(args.operation_id, f"/v1/media/workflows/{identifier}/actions", body)
     if cmd in {"doctor", "options"}:
         value, request_id, _ = client.request("GET", "/v1/media/options")
         return client.redact({"reachable": True, "client_id": client.owner,
@@ -616,11 +666,20 @@ def run(args, client):
             value, request_id = client.get(args.job_id)
             running = any(stage["status"] in {"queued", "running", "archiving"} for stage in value.get("stages", []))
             if (cmd == "status" or time.monotonic() >= deadline or value.get("status") in {"completed", "failed", "cancelled"}
+                    or args.job_id.startswith("wf_") and value.get("status") in {"draft", "awaiting_frames", "awaiting_selection", "needs_attention"}
                     or value.get("stages") and not running):
                 return {**client.summary(value), "request_id": request_id}
             time.sleep(min(5, max(0, deadline - time.monotonic())))
     if cmd == "outputs":
         validate_id(args.job_id)
+        if args.job_id.startswith("wf_"):
+            workflow, request_id = client.get(args.job_id)
+            outputs = {}
+            for child in workflow.get("jobs", {}).values():
+                for output in [child.get("output"), *(s.get("output") for s in child.get("stages", []))]:
+                    if output:
+                        outputs[output["id"]] = output
+            return {**client.summary({"data": list(outputs.values())}), "request_id": request_id}
         kind = "images" if args.job_id.startswith("img_") else "videos"
         value, request_id, _ = client.request("GET", f"/v1/{kind}/{args.job_id}/outputs")
         return {**client.summary(value), "request_id": request_id}
@@ -685,6 +744,15 @@ def run(args, client):
             raise ClientError("invalid_action", "Video actions require a stage.")
         validate_id(args.stage)
         job, _ = client.get(args.job_id)
+        if job.get("workflow_mode") == "legacy_pipeline" or any(
+            item.get("id") in {"context_ir", "proof", "local_768", "cloud_768", "regenerate_2k"}
+            for item in job.get("stages", [])
+            if isinstance(item, dict)
+        ):
+            raise ClientError(
+                "workflow_unavailable",
+                "This task belongs to the retired Edge pipeline. It may be inspected or downloaded, but not advanced.",
+            )
         stages, index, stage = find_stage(job, args.stage)
         path = f"/v1/videos/{args.job_id}/stages/{args.stage}/{cmd}"
         fields = {} if cmd == "cancel" else {"output_id": validate_id(args.output_id)}

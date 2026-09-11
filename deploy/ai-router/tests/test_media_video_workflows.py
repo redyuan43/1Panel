@@ -18,6 +18,8 @@ from ai_router.media_service.storage import MediaStore
 from ai_router.media_service.video_review import (
     SiyuanReviewer,
     SCORE_FIELDS,
+    _assistant_text,
+    _json_objects,
     contact_sheet,
     review_evidence_image,
     seam_contact_sheet,
@@ -160,18 +162,23 @@ def service(tmp_path: Path, video: bytes):
     return result
 
 
-def test_video_request_preserves_legacy_default_and_validates_new_modes():
-    legacy = video_request({"prompt": "x"})
-    assert legacy["workflow_mode"] == "legacy_pipeline"
-    assert legacy["aspect_ratio"] == "16:9"
+def test_video_request_defaults_to_direct_ivan_and_rejects_retired_legacy(monkeypatch):
+    monkeypatch.delenv("AI_ROUTER_LEGACY_H3_ENABLED", raising=False)
     quality = video_request({
         "prompt": "x",
-        "workflow_mode": "quality_gate",
         "creative_profile": "tvc",
         "aspect_ratio": "9:16",
     })
     assert quality["workflow_mode"] == "quality_gate"
     assert quality["creative_profile"] == "tvc"
+    with pytest.raises(MediaError) as retired:
+        video_request({"prompt": "x", "workflow_mode": "legacy_pipeline"})
+    assert retired.value.code == "workflow_unavailable"
+    assert retired.value.status == 409
+    monkeypatch.setenv("AI_ROUTER_LEGACY_H3_ENABLED", "true")
+    legacy = video_request({"prompt": "x", "workflow_mode": "legacy_pipeline"})
+    assert legacy["workflow_mode"] == "legacy_pipeline"
+    assert legacy["aspect_ratio"] == "16:9"
     try:
         video_request({"prompt": "x", "workflow_mode": "duration_ladder", "duration": 10})
     except MediaError as error:
@@ -198,6 +205,7 @@ def test_video_request_preserves_legacy_default_and_validates_new_modes():
 
 def test_workflow_shapes_default_to_single_continuous_generation(monkeypatch):
     monkeypatch.delenv("AI_ROUTER_VIDEO_SEGMENTATION_ENABLED", raising=False)
+    monkeypatch.delenv("AI_ROUTER_LEGACY_H3_ENABLED", raising=False)
     quality = video_request({"prompt": "three calm product poses", "duration": 15,
                              "workflow_mode": "quality_gate"})
     assert [stage["id"] for stage in managed_stages(quality)] == ["plan", "preview", "final"]
@@ -209,6 +217,7 @@ def test_workflow_shapes_default_to_single_continuous_generation(monkeypatch):
     assert published["segmentation_policy"] == "disabled"
     assert published["duration_ladder_available"] is False
     assert "duration_ladder" not in published["workflow_mode"]
+    assert published["workflow_mode"] == ["quality_gate"]
 
 
 def test_segmentation_rules_remain_behind_explicit_feature_flag(monkeypatch):
@@ -662,7 +671,7 @@ def test_siyuan_review_uses_router_auto_model_and_records_route(tmp_path, monkey
             assert request.headers["authorization"] == "Bearer reviewer-test-key"
             body = json.loads(request.content)
             assert body["model"] == "siyuan/auto"
-            assert body["reasoning_effort"] == "xhigh"
+            assert body["reasoning_effort"] == "medium"
             assert body["response_format"] == {"type": "json_object"}
             assert body["max_tokens"] == 3000
             images = [
@@ -707,6 +716,77 @@ def test_siyuan_review_uses_router_auto_model_and_records_route(tmp_path, monkey
         }
 
     asyncio.run(scenario())
+
+
+def test_siyuan_review_accepts_segmented_fenced_json_and_retries(tmp_path, monkeypatch):
+    async def scenario():
+        sheet = tmp_path / "sheet.png"
+        sheet.write_bytes(png())
+        expected = {
+            "verdict": "CONDITIONAL_PASS",
+            "confidence": 0.7,
+            "scores": {name: 80 for name in SCORE_FIELDS},
+            "issues": [],
+            "revised_prompt": "Keep the cup geometry stable.",
+            "recommended_action": "manual_review",
+        }
+        requests = []
+
+        async def handler(request):
+            body = json.loads(request.content)
+            requests.append(body)
+            if len(requests) == 1:
+                return httpx.Response(
+                    200,
+                    headers={"X-Request-ID": "review-invalid-1"},
+                    json={"choices": [{"message": {"content": "not json"}}]},
+                )
+            return httpx.Response(
+                200,
+                headers={"X-Request-ID": "review-repair-2"},
+                json={
+                    "choices": [{
+                        "message": {
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": "```json\n" + json.dumps(expected) + "\n```",
+                                },
+                            ],
+                        },
+                    }],
+                },
+            )
+
+        monkeypatch.setenv("AI_ROUTER_VIDEO_REVIEW_KEY", "reviewer-test-key")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            report = await SiyuanReviewer(client).review(
+                {"passed": True},
+                sheet,
+                {"prompt_hash": "prompt-1"},
+            )
+        assert len(requests) == 2
+        assert requests[0]["reasoning_effort"] == "medium"
+        assert requests[1]["reasoning_effort"] == "low"
+        assert requests[1]["max_tokens"] == 4000
+        assert "format-repair retry" in requests[1]["messages"][0]["content"][0]["text"]
+        assert report["verdict"] == "CONDITIONAL_PASS"
+        assert report["internal_route"]["x-request-id"] == "review-repair-2"
+        assert [item["status"] for item in report["internal_attempts"]] == [200, 200]
+
+    asyncio.run(scenario())
+
+
+def test_review_json_helpers_ignore_non_json_text():
+    expected = {"verdict": "PASS"}
+    value = {
+        "choices": [{
+            "message": {
+                "content": [{"type": "text", "text": "Result:\n" + json.dumps(expected)}],
+            },
+        }],
+    }
+    assert _json_objects(_assistant_text(value)) == [expected]
 
 
 def test_review_evidence_combines_all_panels_into_one_image(tmp_path):
