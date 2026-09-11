@@ -388,7 +388,7 @@ class Contract:
                 outputs = project.setdefault("router_outputs", {})
                 for stage_id, stage in project["stages"].items():
                     old = before["stages"][stage_id]
-                    if stage["status"] == "queued" and old["status"] != "queued":
+                    if stage["status"] == "queued" and old["status"] not in {"queued", "running"} and not (old.get("fleet_pending") and old.get("execution_id") and stage.get("execution_id") == old["execution_id"]):
                         stage["run_id"] = "run_" + uuid4().hex
                         stage.pop("output_id", None)
                     elif not stage.get("run_id") and stage["status"] not in {"pending", "queued"}:
