@@ -19,7 +19,17 @@ class EndpointTokenCounter:
         self.client = httpx.AsyncClient(trust_env=False, timeout=10, follow_redirects=False)
 
     async def close(self):
-        await self.client.aclose()
+        try:
+            await self.client.aclose()
+        except RuntimeError as error:
+            # The client may have been created and used inside an event loop that
+            # has already stopped: the runtime is built, exercised and closed from
+            # separate asyncio.run scopes in reload paths and tests, so its pooled
+            # sockets are torn down together with the loop that owned them. Only
+            # that specific failure is tolerated; AsyncClient.aclose() is
+            # idempotent, so closing again from a live loop still releases it.
+            if "Event loop is closed" not in str(error):
+                raise
 
     async def count(self, endpoint, body, api_kind, fallback):
         config = endpoint.metadata.get("token_counting", {})
