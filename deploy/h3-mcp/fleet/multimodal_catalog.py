@@ -45,9 +45,12 @@ class MultimodalCatalog:
         self.unavailable = document.get("unavailable_profiles", [])
         for entry in document["profiles"]:
             identifier = entry["profile_id"]
-            if not re.fullmatch(r"H3_(?:I2V|L2V|FL2V|REFERENCE|HYBRID)(?:_[A-Z]+)*_QUALITY14", identifier) or identifier in self.entries:
+            accelerated = re.fullmatch(r"H3_I2V_(?:A4(?:_C[01])?_TURBO4|B8_VDN8)", identifier) is not None
+            if accelerated:
+                from .accelerated_i2v import PROFILE_RECIPES, RECIPES
+            if (not accelerated and not re.fullmatch(r"H3_(?:I2V|L2V|FL2V|REFERENCE|HYBRID)(?:_[A-Z]+)*_QUALITY14", identifier)) or identifier in self.entries:
                 raise ValueError("invalid or duplicate multimodal profile")
-            if entry["mode"] not in MODES or entry["sampling"]["steps"] != 14 or not entry["weights"]:
+            if entry["mode"] not in MODES or entry["sampling"]["steps"] != (RECIPES[PROFILE_RECIPES[identifier]][2] if accelerated else 14) or not entry["weights"]:
                 raise ValueError("multimodal profiles require a full model and 14 steps")
             template = (path.parent / entry["template"]).resolve()
             if not template.is_relative_to(path.parent.resolve()) or template.is_symlink():
@@ -56,6 +59,16 @@ class MultimodalCatalog:
             if hashlib.sha256(raw).hexdigest() != entry["template_sha256"] or structure(json.loads(raw)) != entry["structure_sha256"]:
                 raise ValueError("multimodal template pin mismatch")
             graph = json.loads(raw)
+            if accelerated:
+                from .accelerated_i2v import validate
+                source = validate(graph, self.base, PROFILE_RECIPES[identifier])
+                if (entry["mode"] != "i2v" or entry.get("base_recipe_digest") != source["recipe_digest"]
+                        or entry.get("asset_roles") != {"first_frame": "20"}
+                        or entry.get("audio_policy") != "native"):
+                    raise ValueError("accelerated first-frame source binding mismatch")
+                self.entries[identifier] = {**entry, "recipe_id": identifier, "recipe_digest": digest(entry)}
+                self.validate(identifier, graph, entry["version"])
+                continue
             schedules = [node["inputs"].get("steps") for node in graph.values() if node.get("class_type") == "BasicScheduler"]
             expected_weight = "minimax_h3_" + ("ref2va" if entry["mode"] in {"reference", "hybrid"} else "fl2va") + "_int8_convrot.safetensors"
             models = [node["inputs"].get("unet_name") for node in graph.values() if node.get("class_type") == "UNETLoader"]
@@ -86,6 +99,9 @@ class MultimodalCatalog:
         if identifier not in self.entries:
             return self.base.validate(identifier, graph, version)
         entry = self.entries[identifier]
+        if entry.get("preview_recipe_id"):
+            from .accelerated_i2v import PROFILE_RECIPES, validate
+            validate(graph, self.base, PROFILE_RECIPES[identifier])
         if version != entry["version"] or structure(graph) != entry["structure_sha256"]:
             raise ValueError("multimodal profile or graph version mismatch")
         conditioners = [node["inputs"] for node in graph.values() if node["class_type"] in CONDITIONERS]
@@ -137,7 +153,7 @@ class MultimodalCatalog:
                 "graph_sha256": digest(graph), "structure_sha256": entry["structure_sha256"],
                 "template_sha256": entry["template_sha256"], "input_filenames": assets, "input_roles": roles,
                 "width": condition["width"], "height": condition["height"], "fps": 24, "frame_count": frames,
-                "actual_duration": frames / 24, "steps": 14, "hardware_qualification": "not_evaluated"}
+                "actual_duration": frames / 24, "steps": entry["sampling"]["steps"], "hardware_qualification": "not_evaluated"}
 
     def freeze(self, identifier, graph):
         return copy.deepcopy(graph), self.validate(identifier, graph, self.get(identifier)["version"])

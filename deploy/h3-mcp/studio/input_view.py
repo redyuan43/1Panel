@@ -13,6 +13,9 @@ def install(module, contract):
 
     def build(project, stage, workflow_root):
         if stage == "preview" and project.get("execution_profile"):
+            if project.get("preview_recipe_id"):
+                from .input_contract import quality_graph
+                return quality_graph(module, project)
             from .input_contract import bind_graph_assets, check_quality_controls, profile
             if project["execution_profile"] != profile(module, project):
                 raise ValueError("multimodal execution profile changed")
@@ -36,7 +39,8 @@ def install(module, contract):
                 for stage in value["pipeline"]:
                     if stage["id"] == "preview":
                         stage["runtime"] = {**stage["runtime"], "low_seconds": None, "high_seconds": None,
-                            "runner": "Ivan Fleet · 单路", "label": "专用完整模型，耗时尚未实测", "basis": "多模态完整工作流；不使用旧 Turbo 耗时估计"}
+                            "runner": "Ivan Fleet · 单路", "label": (project["execution_profile"]["label"] + "，首帧耗时以实测为准") if project.get("preview_recipe_id") else "专用完整模型，耗时尚未实测",
+                            "basis": "以本次实际配置为准，不沿用其他模式耗时"}
         return value
 
     module._public_project = public

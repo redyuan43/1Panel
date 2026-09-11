@@ -59,7 +59,8 @@ def validate_execution_media(project):
 
 
 def snapshot(project):
-    return {**{key: project.get(key) for key in ("mode", "duration", "orientation", "audio_policy", "use_embedded_video_audio",
+    return {**({"preview_recipe_id": project["preview_recipe_id"]} if project.get("preview_recipe_id") else {}),
+            **{key: project.get(key) for key in ("mode", "duration", "orientation", "audio_policy", "use_embedded_video_audio",
             "prompt_original", "prompt_ir", "seed", "recipe_id", "connector_recipe_version", "execution_profile")},
             "assets": {kind: {key: asset.get(key) for key in ("asset_id", "sha256", "size", "comfy_name")}
                        for kind, asset in sorted(project.get("assets", {}).items())}}
@@ -73,6 +74,15 @@ def public_assets(project):
 
 def profile(module, project):
     validate(project)
+    if project.get("preview_recipe_id"):
+        accelerated = __import__(module.__package__ + ".accelerated_i2v", fromlist=["profile"])
+        if (project["preview_recipe_id"] not in accelerated.RECIPES or project["mode"] != "i2v" or project["audio_policy"] != "native"
+                or project["duration"] != 15 or project["orientation"] != "portrait" or project.get("render_plan")):
+            raise HTTPException(409, "配方首帧测试仅接受15秒480×864原生音轨，不更改其他规格")
+        template = Path(module.__file__).parent / accelerated.RECIPES[project["preview_recipe_id"]][1]
+        if not template.is_file():
+            raise HTTPException(409, "首帧加速模板尚未发布；未提交生成")
+        return accelerated.profile(template.read_bytes(), project["preview_recipe_id"])
     workflow_module = __import__(module.__package__ + ".workflows", fromlist=["quality_profile"])
     template = workflow_module.quality_profile(project)
     path = module.SETTINGS.workflow_root / template
@@ -85,9 +95,10 @@ def profile(module, project):
         variant = "_VIDEO" if "reference_video" in project["assets"] else "_IMAGE"
         if project.get("use_embedded_video_audio") or "reference_audio" in project["assets"]:
             variant += "_AUDIO"
-    return {"profile_id": "H3_" + project["mode"].upper() + variant + "_QUALITY14", "version": hashlib.sha256(path.read_bytes()).hexdigest(),
+    result = {"profile_id": "H3_" + project["mode"].upper() + variant + "_QUALITY14", "version": hashlib.sha256(path.read_bytes()).hexdigest(),
             "template": template, "steps": 14, "family": "REF2VA" if project["mode"] in {"reference", "hybrid"} else "FL2VA",
             "mode": project["mode"], "audio_policy": project["audio_policy"]}
+    return result
 
 
 def check_graph_assets(graph, project):
@@ -175,6 +186,14 @@ def quality_graph(module, project):
     current = profile(module, project)
     if project.get("execution_profile") != current:
         raise HTTPException(409, "execution profile changed; save and approve inputs again")
+    if project.get("preview_recipe_id"):
+        accelerated = __import__(module.__package__ + ".accelerated_i2v", fromlist=["execution_prompt"])
+        graph = json.loads((Path(module.__file__).parent / current["template"]).read_bytes())
+        graph["6"]["inputs"]["prompt"] = accelerated.execution_prompt(project["prompt_approved"], project["preview_recipe_id"])
+        graph["8"]["inputs"]["noise_seed"] = project["seed"]
+        graph["13"]["inputs"]["filename_prefix"] = "video/h3-video-studio/" + project["id"] + "/preview"
+        bind_graph_assets(graph, project)
+        return graph, current["template"]
     graph, template = module.build_workflow(project, "proof", module.SETTINGS.workflow_root)
     bind_graph_assets(graph, project)
     check_quality_controls(graph, project)

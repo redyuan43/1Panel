@@ -24,9 +24,10 @@ from starlette.requests import Request
 
 
 CONNECTOR_PATH = Path(__file__).resolve().parents[1] / "studio" / "connector_api.py"
+DEFAULT_STUDIO_ROOT = Path(__file__).resolve().parents[2] / "h3-video-studio"
 STUDIO_ROOT = Path(os.environ.get(
     "H3_CONNECTOR_TEST_STUDIO_ROOT",
-    "/home/ai/github/1Panel-worktrees/h3-studio-ivan/deploy/h3-video-studio"))
+    str(DEFAULT_STUDIO_ROOT)))
 SPEC = importlib.util.spec_from_file_location("h3_connector_under_test", CONNECTOR_PATH)
 connector_api = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(connector_api)

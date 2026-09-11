@@ -71,6 +71,7 @@ TOOL_DEFINITIONS = [
           "expected_revision; edits require both. Original prompt is immutable. Omitted edit options are preserved.",
           {**WRITE_FIELDS, "original_prompt": PROMPT, "prompt": PROMPT,
            "recipe_id": {"type": "string", "enum": list(RECIPE_IDS), "default": "A4"},
+           "preview_recipe_id": {"type": "string", "enum": ["A4", "A4_C0", "A4_C1", "B8"], "description": "Explicit first-frame comparison recipe; requires separate runtime qualification."},
            "name": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": r"\S"},
            "seed": {"type": "integer", "minimum": -1, "maximum": 2**63 - 2},
            "verbatim": {"type": "boolean", "description": "Require prompt to equal original_prompt exactly."},
@@ -519,6 +520,12 @@ class ConnectorAPI:
             raise ConnectorError(400, "dimensions do not match orientation")
         assets = self.assets.bind(owner, arguments["assets"]) if "assets" in arguments else copy.deepcopy(project.get("assets", {}) if project else {})
         inputs["assets"] = assets
+        if "preview_recipe_id" in arguments:
+            inputs["preview_recipe_id"] = arguments["preview_recipe_id"]
+        elif project and project.get("preview_recipe_id"):
+            inputs["preview_recipe_id"] = project["preview_recipe_id"]
+        if inputs.get("preview_recipe_id") and inputs["mode"] != "i2v":
+            raise ConnectorError(400, "accelerated first-frame recipe requires i2v")
         input_contract.validate_media(inputs)
         previous_recipe = project.get("recipe_id") if project and project["mode"] == inputs["mode"] else None
         recipe_id = arguments.get("recipe_id", previous_recipe)
@@ -565,6 +572,8 @@ class ConnectorAPI:
             item.update({key: inputs[key] for key in ("mode", "duration", "orientation", "audio_policy", "use_embedded_video_audio", "assets")})
             item["actual_duration"] = self.module.actual_duration(inputs["duration"])
             item["execution_profile"] = recipe if inputs["mode"] != "t2v" else None
+            if inputs.get("preview_recipe_id"):
+                item["preview_recipe_id"] = inputs["preview_recipe_id"]
             self.module.validate_project_config(item)
             if "name" in arguments:
                 item["name"] = arguments["name"]
