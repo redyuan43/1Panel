@@ -7,6 +7,7 @@ import asyncio
 import os
 import sqlite3
 from urllib.parse import quote
+from .instance_status import classify_instances
 from .cache_audit import CacheAudit
 from .content_audit import ArchiveReader
 import time
@@ -23,14 +24,22 @@ from .cache_deployments import (
 from .errors import RouterError
 from .identity import IdentityProfile
 from .media_service.gateway import router as media_router
+from .h3_mcp import install_h3_mcp
 from .prompt_directives import (
     configured_phrases,
     prepare_prompt_directive_update,
 )
 from .policy_config import PolicyConflictError
 from .route_diagnosis import diagnose_route
-from .route_trace import graph_document, validate_review
+from .route_trace import (
+    graph_document,
+    registry_fingerprint,
+    validate_review,
+)
 from .runtime import RouterRuntime, build_runtime
+
+
+from .lan_https import router as lan_https_router
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -70,9 +79,15 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     )
     app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
     app.include_router(media_router(admin=True))
+    app.include_router(lan_https_router)
+    install_h3_mcp(app)
 
     @app.get("/media")
     async def media_console() -> FileResponse:
+        return FileResponse(STATIC_DIR / "studio.html")
+
+    @app.get("/media/legacy")
+    async def legacy_media_console() -> FileResponse:
         return FileResponse(STATIC_DIR / "media.html")
 
     @app.exception_handler(RouterError)
@@ -212,6 +227,14 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 status_code=400,
                 code="invalid_policy_draft",
             )
+        objectives = changes.get("routing", {}).get("objectives", {}) if isinstance(changes.get("routing"), dict) else {}
+        if isinstance(objectives, dict):
+            for key in ("flash_order", "quality_order"):
+                order = objectives.get(key)
+                if isinstance(order, dict):
+                    for values in order.values():
+                        if isinstance(values, list) and any(not isinstance(eid, str) or current.registry.by_id(eid) is None for eid in values):
+                            raise RouterError("模型顺序中包含未注册的端点", status_code=400, code="invalid_policy_draft")
         snapshot = await current.policy_config.snapshot()
         draft_record = snapshot.get("draft")
         base_settings = (
@@ -462,6 +485,11 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             *prompt_settings.get("routes", {}),
             "reset",
         }
+        policy_snapshot = await current.policy_config.snapshot()
+        draft_settings = (policy_snapshot.get("draft") or {}).get("settings", {})
+        valid_ids.update(
+            draft_settings.get("routing", {}).get("prompt_directives", {}).get("routes", {})
+        )
         ids = [str(item) for item in directive_ids]
         if any(item not in valid_ids for item in ids):
             raise RouterError(
@@ -1169,13 +1197,23 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         current = _authorized_runtime(request)
         current.reload_settings()
-        await current.reload_endpoint_config()
+        endpoint_config_revision = await current.reload_endpoint_config()
         endpoints = await _endpoint_values(current, cache_catalog)
         events = current.audit.recent(max(1000, limit * 8))
         requests = _request_rows(events, limit, current.settings.value)
         cloud = await _cloud_budget(current)
         workers = _worker_rows(endpoints)
         router_instances = await current.instance_states()
+        control_registry_fingerprint = registry_fingerprint(current.registry)
+        router_instances = classify_instances(router_instances, control_registry_fingerprint, now=time.time())
+        compared_instances = [item for item in router_instances
+                              if item["registry_comparison"] in {"match", "mismatch"}]
+        unknown_instances = [item for item in router_instances if item["registry_comparison"] == "unknown"]
+        mismatched_registry_instances = [
+            str(item.get("instance_id", "unknown"))
+            for item in router_instances
+            if item["registry_comparison"] == "mismatch"
+        ]
         completed = [
             item for item in requests
             if item["status"] in {"succeeded", "failed"}
@@ -1223,6 +1261,16 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             "endpoints": endpoints,
             "workers": workers,
             "router_instances": router_instances,
+            "configuration": {
+                "registry_fingerprint": control_registry_fingerprint,
+                "endpoint_config_revision": endpoint_config_revision,
+                "registry_consistent": (False if mismatched_registry_instances else
+                                        True if compared_instances and not unknown_instances else None),
+                "registry_compared_instances": len(compared_instances),
+                "mismatched_registry_instances": (
+                    mismatched_registry_instances
+                ),
+            },
             "requests": requests,
             "node_distribution": _node_distribution(completed),
             "cloud_budget": cloud,
@@ -1232,7 +1280,14 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                     "local_first",
                 )
             ),
-            "alerts": _alerts(endpoints, workers, cloud),
+            "alerts": _alerts(
+                endpoints,
+                workers,
+                cloud,
+                mismatched_registry_instances=(
+                    mismatched_registry_instances
+                ),
+            ),
         }
 
     return app
@@ -1563,8 +1618,21 @@ def _alerts(
     endpoints: list[dict[str, Any]],
     workers: list[dict[str, Any]],
     cloud: dict[str, Any],
+    *,
+    mismatched_registry_instances: list[str] | None = None,
 ) -> list[dict[str, str]]:
     alerts: list[dict[str, str]] = []
+    if mismatched_registry_instances:
+        alerts.append(
+            {
+                "level": "critical",
+                "title": "管理面与数据面注册表不一致",
+                "detail": (
+                    "以下 Router API 实例使用了不同的注册表："
+                    + "、".join(mismatched_registry_instances)
+                ),
+            }
+        )
     for item in endpoints:
         if item["status"]["healthy"]:
             continue

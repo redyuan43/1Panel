@@ -1,4 +1,4 @@
-const state = {
+const state = ViewPreferences.state("console", {
   key: sessionStorage.getItem("ai-router-admin-key") || "",
   settings: null,
   policy: null,
@@ -35,7 +35,7 @@ const state = {
   selectedClientId: null,
   view: "dashboard",
   timer: null,
-};
+}, {view:["dashboard","nodes","requests","audit","clients","cache-deployments","settings"], routeGraphMode:["simple","detailed"], selectedTraceId:"id", selectedTraceNodeId:"id", selectedCacheDeploymentId:"id", selectedCacheLayerId:"id", selectedCacheDeploymentTab:"string", cacheDeploymentAnomaliesOnly:"boolean", selectedClientId:"id"});
 
 const viewTitles = {
   dashboard: "运行总览",
@@ -60,9 +60,16 @@ const PROMPT_DIRECTIVES = [
   ["rilun", "Sol"],
   ["beichen", "Astra"],
   ["qinglan", "DeepSeek V4 Pro"],
-  ["yuheng", "GLM 5.3"],
+  ["yuheng", "GLM 5.3 Flash"],
+  ["tianshu", "GLM 5.3"],
+  ["liuguang", "DeepSeek V4 Flash"],
   ["reset", "恢复常规模式"],
 ];
+
+const NEW_PROMPT_DIRECTIVES = {
+  tianshu: {phrase: "按天枢协议处理", endpoint_id: "zhipu-glm-5.3", generation: 1},
+  liuguang: {phrase: "按流光协议处理", endpoint_id: "cloud-deepseek-v4-flash", generation: 1},
+};
 
 const weightLabels = {
   quality: "质量",
@@ -187,6 +194,7 @@ async function connect() {
     renderRemoteFallbackOrder();
     setConnected(true);
     notice("");
+    switchView(state.view);
     startPolling();
   } catch (error) {
     setConnected(false);
@@ -262,7 +270,7 @@ function renderClients() {
             <strong class="table-primary">${escapeHtml(item.name)}</strong>
             <span class="table-secondary">${escapeHtml(item.id)} · ${escapeHtml(item.source)} · ${item.disclosure_mode === "public" ? "客户脱敏" : "内部详细"}</span>
           </td>
-          <td>${clientModelSummary(item.models)}</td>
+          <td>${clientModelSummary(item.models)}<span class="table-secondary">${escapeHtml(RoutingModeUI.accountLabel(item))}</span></td>
           <td>
             <strong class="table-primary">${formatTokens(item.tpm_limit)} TPM</strong>
             <span class="table-secondary">${item.rpm_limit} RPM · ${item.max_parallel_requests} 并发 · ${item.allow_compaction ? "可压缩" : "不压缩"}</span>
@@ -289,6 +297,7 @@ function renderClients() {
     }).join("")
     : emptyRow(8, "没有符合筛选条件的客户端账号");
   bindClientActions();
+  RoutingModeUI.summary();
 }
 
 function clientModelSummary(models = []) {
@@ -377,6 +386,8 @@ function openClientDialog(clientId = null) {
   byId("client-rpm").value = client?.rpm_limit || 120;
   byId("client-tpm").value = client?.tpm_limit || 1000000;
   byId("client-parallel").value = client?.max_parallel_requests || 4;
+  byId("client-routing-mode").value = client?.routing_mode || "inherit";
+  byId("client-local-only").checked = Boolean(client?.local_only);
   byId("client-disclosure-mode").value = (
     client?.disclosure_mode || (client ? "internal" : "public")
   );
@@ -395,6 +406,8 @@ function collectClient() {
   const selected = [...document.querySelectorAll("[data-client-model]:checked")]
     .map((input) => input.dataset.clientModel);
   return {
+    routing_mode: byId("client-routing-mode").value,
+    local_only: byId("client-local-only").checked,
     id: byId("client-id").value.trim(),
     name: byId("client-name").value.trim(),
     enabled: byId("client-enabled").checked,
@@ -527,24 +540,34 @@ function renderRouterInstances(instances) {
         cleanup.queue_members,
         cleanup.conversation_locks,
       ].reduce((total, value) => total + Number(value || 0), 0);
-      const running = item.status === "running" && !item.draining;
-      const status = item.draining
-        ? "排空中"
-        : item.status === "stopped"
-          ? "已停止"
-          : "运行中";
+      const liveness = item.liveness || "unknown";
+      const running = liveness === "running";
+      const status = ({running: "运行中", draining: "排空中", stopped: "已停止", stale: "状态过期", unknown: "状态未知"})[liveness] || "状态未知";
+      const registryFingerprint = item.registry_fingerprint || "";
+      const comparison = item.registry_comparison || "unknown";
+      const registryLabel = ({match: "一致", mismatch: "漂移", not_compared: "不参与比较", unknown: "证据不足"})[comparison] || "证据不足";
+      const registryTone = comparison === "match" ? "success" : comparison === "mismatch" ? "danger" : "";
       return `
         <tr>
           <td>${healthBadge(running)} ${escapeHtml(status)}</td>
           <td><code>${escapeHtml(item.instance_id || "—")}</code></td>
           <td><code title="${escapeHtml(item.boot_id || "")}">${escapeHtml(shortId(item.boot_id || "—", 16))}</code></td>
           <td>${Number(item.active_request_count || 0)}</td>
+          <td>
+            <span class="badge ${registryTone}">
+              <i></i>${registryLabel}
+            </span>
+            <span class="table-secondary" title="${escapeHtml(registryFingerprint)}">
+              ${escapeHtml(shortId(registryFingerprint || "未上报", 12))}
+              · rev ${Number(item.endpoint_config_revision ?? 0)}
+            </span>
+          </td>
           <td>${cleanupCount}</td>
           <td>${formatTime(item.updated_at)}</td>
         </tr>
       `;
     }).join("")
-    : emptyRow(6, "Router API 实例尚未上报状态");
+    : emptyRow(7, "Router API 实例尚未上报状态");
 }
 
 function renderSummary(data) {
@@ -718,6 +741,7 @@ function renderRecentRequests(requests) {
 }
 
 function renderEndpointTable(endpoints) {
+  endpoints = ViewPreferences.sortEndpoints(endpoints, byId("endpoint-sort").value, byId("endpoint-sort-direction").value);
   const enabled = endpoints.filter(({endpoint}) => endpoint.enabled).length;
   byId("endpoint-count").textContent =
     `${endpoints.filter((item) => item.status.healthy).length}/${endpoints.length} 健康 · ${enabled} 启用`;
@@ -1435,7 +1459,7 @@ function openEndpointDialog(endpointId) {
   );
   renderEndpointOptions(
     "endpoint-modalities",
-    baseline.modalities,
+    management.configurable_modalities || baseline.modalities,
     values.modalities,
     endpointModalityLabel,
   );
@@ -2663,6 +2687,7 @@ function renderRouteDiagnosis() {
     : "诊断不可用";
   byId("trace-diagnosis-verdict").textContent = diagnosis?.verdict
     || "当前轨迹没有足够证据生成诊断。";
+  RoutingModeUI.audit(diagnosis);
   byId("trace-diagnosis-chain").innerHTML = (diagnosis?.causal_chain || [])
     .map((item) => `
       <li>
@@ -3567,9 +3592,11 @@ async function loadSettings() {
   state.settings = mergeObjects(payload.effective_settings, selected);
   state.directivePool = poolPayload.pool;
   renderSettings();
+  renderClients();
 }
 
 function renderSettings() {
+  RoutingModeUI.render(state.settings);
   if (!state.settings) return;
   byId("identity-enabled").checked = Boolean(value("identity.enabled", false));
   byId("identity-model-id").value = value(
@@ -3829,7 +3856,7 @@ function promptDirectiveSettings() {
 
 function promptDirectiveEntry(id) {
   const settings = promptDirectiveSettings();
-  return id === "reset" ? settings.reset : settings.routes?.[id];
+  return id === "reset" ? settings.reset : settings.routes?.[id] || NEW_PROMPT_DIRECTIVES[id];
 }
 
 function renderPromptDirectives() {
@@ -3855,7 +3882,8 @@ function renderPromptDirectives() {
         <button type="button" class="secondary compact"
           data-directive-copy="${escapeHtml(id)}">复制</button>
         <button type="button" class="secondary compact"
-          data-directive-random="${escapeHtml(id)}">随机</button>
+          data-directive-random="${escapeHtml(id)}"
+          ${id !== "reset" && !promptDirectiveSettings().routes?.[id] ? 'disabled title="新增条目激活后可随机"' : ""}>随机</button>
       </div>`;
     container.append(row);
   });
@@ -3906,6 +3934,7 @@ function bindPromptDirectiveControls() {
 }
 
 async function randomizePromptDirectives(ids) {
+  ids = ids.filter((id) => id === "reset" || promptDirectiveSettings().routes?.[id]);
   const buttons = document.querySelectorAll(
     "#directive-random-all, [data-directive-random]",
   );
@@ -3923,11 +3952,14 @@ async function randomizePromptDirectives(ids) {
     });
     state.directivePool = payload.pool;
     renderPromptDirectivePool();
-    notice("新暗语已生成，保存后生效。");
+    notice("新暗语已生成，保存草稿、验证并激活后生效。");
   } catch (error) {
     notice(error.message, true);
   } finally {
-    buttons.forEach((button) => { button.disabled = false; });
+    buttons.forEach((button) => {
+      const id = button.dataset.directiveRandom;
+      button.disabled = Boolean(id && id !== "reset" && !promptDirectiveSettings().routes?.[id]);
+    });
   }
 }
 
@@ -4261,12 +4293,12 @@ function collectSettings() {
   });
   const currentDirectives = promptDirectiveSettings();
   const directiveRoutes = {};
-  Object.entries(currentDirectives.routes || {}).forEach(([id, route]) => {
+  Object.entries({...NEW_PROMPT_DIRECTIVES, ...currentDirectives.routes}).forEach(([id, route]) => {
     directiveRoutes[id] = {
       ...route,
       phrase: document.querySelector(
         `[data-directive-phrase="${cssEscape(id)}"]`,
-      )?.value.trim() || "",
+      )?.value.trim() ?? route.phrase,
     };
   });
   const promptDirectives = {
@@ -4346,6 +4378,7 @@ function collectSettings() {
       timeout_seconds: Number(byId("queue-timeout").value),
     },
     routing: {
+      objectives: RoutingModeUI.collect(),
       ...state.settings.routing,
       prompt_directives: promptDirectives,
       local_pool: {
@@ -4978,5 +5011,11 @@ byId("admin-key").addEventListener("keydown", (event) => {
   if (event.key === "Enter") connect();
 });
 
+ViewPreferences.fields(["endpoint-sort","endpoint-sort-direction","auto-refresh","node-filter","status-filter","request-search","trace-search","trace-mode-filter","trace-review-filter","trace-privacy-filter","trace-client-filter","trace-task-filter","trace-model-filter","trace-status-filter","trace-group-conversation","client-status-filter","cache-hours","cache-client-group","cache-client","cache-device","cache-model","cache-conversation","cache-status","cache-event"].map(id=>"#"+id));
+ViewPreferences.details();
+byId("trace-filter-reset").addEventListener("click",()=>ViewPreferences.capture(["trace-mode-filter","trace-review-filter","trace-privacy-filter","trace-client-filter","trace-task-filter","trace-model-filter","trace-status-filter","trace-search","trace-group-conversation"].map(id=>"#"+id)));
+byId("cache-deployment-anomalies").checked=state.cacheDeploymentAnomaliesOnly;
+for(const id of ["endpoint-sort","endpoint-sort-direction"])byId(id).addEventListener("change",()=>{if(state.dashboard)renderEndpointTable(state.dashboard.endpoints);});
 initializeCacheAudit();
+setAuditSubview(cacheView.view);
 if (state.key) connect();

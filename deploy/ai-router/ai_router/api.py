@@ -7,6 +7,7 @@ from .content_audit import ContentObservation, ArchiveReader
 from .protocol import stabilize_workbuddy_tools
 from .prefix_break import PrefixBreakCollector
 from .cache_audit import TelemetryCollector, OutputClock
+from .routing_modes import resolve as resolve_objectives, settings_value as objective_settings, finite as finite_metric
 from .usage_evidence import UsageOnlyFilter, token_count, usage_dict, usage_measurement
 
 import asyncio
@@ -566,6 +567,32 @@ def _ensure_prompt_directive_access(
     )
 
 
+def _prompt_directive_capabilities(
+    current: RouterRuntime,
+    required: RequestCapabilities,
+    directive: Any,
+    *,
+    requested_model: str,
+    client_id: str,
+) -> tuple[RequestCapabilities, bool]:
+    if (
+        directive is None
+        or requested_model != "auto"
+        or client_id != "workbuddy-public"
+        or not required.output_token_limit
+    ):
+        return required, False
+    endpoint = current.registry.by_id(str(directive.endpoint_id or ""))
+    if (
+        endpoint is None
+        or endpoint.capabilities.output_token_limit
+        or endpoint.metadata.get("output_limit_status")
+        != "unsupported-chatgpt-subscription"
+    ):
+        return required, False
+    return replace(required, output_token_limit=False), True
+
+
 def _ensure_public_identity(profile: IdentityProfile) -> None:
     if not profile.enabled or not profile.complete:
         raise PublicIdentityUnavailableError()
@@ -705,6 +732,25 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             details={"instance_id": current.instance_id},
         )
     lineage_body = copy.deepcopy(body)
+    if client_requested_model in {"auto", configured_identity.public_model_id}:
+        from .media_service.creative_chat import maybe_creative_chat
+        from .media_service.contracts import MediaError
+        try:
+            creative_response = await maybe_creative_chat(request, body, authenticated, api_kind)
+        except MediaError as exc:
+            creative_response = JSONResponse(exc.payload(), status_code=exc.status)
+        if creative_response is not None:
+            trace.payload.update(task="media_workflow", route_selected=False,
+                                 status="succeeded" if creative_response.status_code < 400 else "failed",
+                                 status_code=creative_response.status_code, completed_at=time.time())
+            trace.record(0, "completed" if creative_response.status_code < 400 else "failed",
+                         "selected" if creative_response.status_code < 400 else "error",
+                         reason="media_workflow_response", evidence={"status_code": creative_response.status_code})
+            await _save_request_trace(current, trace)
+            current.audit.write("media_workflow_chat", request_id=request_id, client_id=authenticated.policy.id,
+                                protocol=api_kind, status_code=creative_response.status_code)
+            creative_response.headers["X-Request-ID"] = request_id
+            return creative_response
     dynamic_context_move = move_workbuddy_dynamic_context(
         body,
         api_kind,
@@ -1029,6 +1075,23 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             }
         modalities = request_modalities(effective_body, api_kind)
         image_inputs = inspect_image_inputs(effective_body)
+        (
+            required_capabilities,
+            output_token_limit_advisory,
+        ) = _prompt_directive_capabilities(
+            current,
+            required_capabilities,
+            resolved_directive,
+            requested_model=requested_model,
+            client_id=authenticated.policy.id,
+        )
+        if output_token_limit_advisory:
+            for key in (
+                "max_output_tokens",
+                "max_completion_tokens",
+                "max_tokens",
+            ):
+                effective_body.pop(key, None)
         has_tools = required_capabilities.tools
         allow_compaction = _compaction_allowed(
             current,
@@ -1073,6 +1136,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             modalities=modalities,
             required_capabilities=list(required_capabilities.labels()),
         )
+        if output_token_limit_advisory:
+            trace.payload.setdefault("request", {})[
+                "output_token_limit_mode"
+            ] = "advisory"
         trace.set_evaluation(evaluation)
         if pre_route_capsule is not None:
             routing_conversation = None
@@ -1215,6 +1282,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     request_id=request_id,
                     requested_model=requested_model,
                     client_id=authenticated.policy.id,
+                    routing_options=resolve_objectives(current.settings.section("routing"),
+                        authenticated.policy.routing_mode, authenticated.policy.local_only),
                     conversation_control=conversation_control,
                     evaluation=evaluation,
                     prompt_tokens=prompt_tokens,
@@ -1257,6 +1326,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 )
                 decision.context_compacted = bool(compaction_source)
                 decision.context_compaction_source = compaction_source
+                decision.output_token_limit_advisory = (
+                    output_token_limit_advisory or decision.output_token_limit_advisory
+                )
                 decision.prefix_affinity_signature = prefix_signature
                 decision.prefix_affinity_prefix_tokens = (
                     reusable_prefix_tokens
@@ -2201,6 +2273,7 @@ async def _acquire_route_capacity(
     history_precompacted: bool = False,
     client_id: str = "",
     conversation_control: dict[str, Any] | None = None,
+    routing_options: dict[str, Any] | None = None,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -2212,6 +2285,27 @@ async def _acquire_route_capacity(
     history_incompatible_seen = False
     carried_capsule = None
     routing = current.settings.section("routing")
+    routing_options = routing_options or resolve_objectives(routing)
+    reasoning = json.dumps({key: body[key] for key in ("thinking", "enable_thinking", "reasoning_effort", "reasoning", "chat_template_kwargs")
+                            if key in body}, sort_keys=True, separators=(",", ":"))
+    if trace:
+        trace.payload["routing_objective"] = {"mode": routing_options["mode"],
+            "enabled": routing_options["enabled"], "source": routing_options["source"], "reasoning": reasoning,
+            "single_output": body.get("n", 1) == 1}
+    count_evidence = {}
+    counter = getattr(current, "endpoint_token_counter", None)
+    if counter:
+        async def count_candidate(endpoint):
+            source = provider_family(current.registry.by_id(history_conversation.endpoint_id)) if history_conversation else None
+            normalized = normalize_history_for_provider(body, api_kind) if source and source != provider_family(endpoint) else body
+            result = await counter.count(endpoint, identity.inject(normalized, api_kind), api_kind, prompt_tokens)
+            return endpoint.id, result
+        counted = await asyncio.gather(*(count_candidate(e) for e in current.registry.responders()
+                      if e.enabled and e.metadata.get("token_counting", {}).get("enabled")
+                      and (requested_model == "auto" or e in current.registry.by_public_model(requested_model))))
+        count_evidence = dict(counted)
+    if trace:
+        trace.payload["token_counting"] = {"shared_estimate": prompt_tokens, "candidates": count_evidence}
     pool_wait_deadlines = {}
     pool = getattr(getattr(current, "policy", None), "local_pool", None)
 
@@ -2236,6 +2330,8 @@ async def _acquire_route_capacity(
                 prefix_affinity_key=prefix_affinity_key,
                 routing_key=prefix_affinity_key or request_id,
                 client_id=client_id,
+                routing_options=routing_options,
+                candidate_prompt_tokens={key: value["tokens"] for key, value in count_evidence.items()},
                 conversation_control=conversation_control,
                 trace=trace,
                 trace_attempt=route_attempt,
@@ -2259,6 +2355,9 @@ async def _acquire_route_capacity(
         ):
             decision.prefix_affinity_key = prefix_affinity_key
 
+        if decision.endpoint.id in count_evidence:
+            decision.prompt_tokens = count_evidence[decision.endpoint.id]["tokens"]
+            decision.context_required = decision.prompt_tokens + decision.output_reserve_tokens
         _apply_protocol_constraints(decision, api_kind)
         capacity_attempts += 1
         if trace:
@@ -2969,9 +3068,14 @@ async def _send_upstream(
     if responses_adapter:
         payload = responses_request_to_chat(payload)
     direct = bool(decision.upstream_api_base)
+    extra_body_fields = []
     if decision.endpoint.metadata.get("thinking_via_extra_body"):
-        thinking = payload.pop("thinking", None)
-        if thinking is not None:
+        extra_body_fields.append("thinking")
+    if decision.endpoint.metadata.get("reasoning_effort_via_extra_body"):
+        extra_body_fields.append("reasoning_effort")
+    for field in extra_body_fields:
+        value = payload.pop(field, None)
+        if value is not None:
             extra_body = payload.setdefault("extra_body", {})
             if not isinstance(extra_body, dict):
                 raise RouterError(
@@ -2979,7 +3083,7 @@ async def _send_upstream(
                     status_code=400,
                     code="invalid_request",
                 )
-            extra_body.setdefault("thinking", thinking)
+            extra_body.setdefault(field, value)
     if (
         api_kind == "responses"
         and not responses_adapter
@@ -3372,6 +3476,12 @@ async def _prepare_routed_body(
         identity.inject(routed, api_kind),
         api_kind,
     )
+    counter = getattr(current, "endpoint_token_counter", None)
+    if counter:
+        counted = await counter.count(decision.endpoint, identity.inject(routed, api_kind), api_kind, routed_prompt_tokens)
+        routed_prompt_tokens = counted["tokens"]
+        if decision.trace:
+            decision.trace.payload.setdefault("token_counting", {})["selected"] = counted
     needs_context_compaction = (
         routed_prompt_tokens + decision.output_reserve_tokens
         > target_context
@@ -3453,6 +3563,9 @@ async def _prepare_routed_body(
         routed.pop("previous_response_id", None)
     if history_precompacted:
         decision.history_mode = "capsule"
+    if decision.output_token_limit_advisory:
+        for field in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            routed.pop(field, None)
     return routed, capsule
 
 
@@ -3904,6 +4017,12 @@ async def _stream_response(
     accumulator = SSEAccumulator(api_kind)
     private_accumulator = SSEAccumulator(api_kind)
     output_clock = OutputClock(api_kind, started_at)
+    if decision.trace:
+        steps = [s for a in decision.trace.payload.get("attempts", []) for s in a.get("steps", [])
+                 if s.get("reason") == "upstream_request_started"]
+        if steps:
+            decision.trace.payload.setdefault("observation", {})["upstream_dispatch_ms"] = max(0,
+                (steps[-1]["timestamp"] - decision.trace.payload["started_at"]) * 1000)
     usage_filter = UsageOnlyFilter() if upstream.extensions.get("internal_cache_usage") and api_kind == "chat" else None
     adapter_usage = {}
     def capture_adapter_usage(value):
@@ -4099,6 +4218,8 @@ def _response_headers(
                 "X-1Panel-Conversation-ID": conversation_id,
             }
         )
+        if decision.output_token_limit_advisory:
+            headers["X-1Panel-Output-Limit-Mode"] = "advisory"
         return headers
     headers = {
         key: value
@@ -4111,6 +4232,14 @@ def _response_headers(
     headers["X-1Panel-Conversation-ID"] = conversation_id
     headers["X-1Panel-Conversation-Mode"] = conversation_mode
     return headers
+
+
+def _output_token_limit_mode(decision: RouteDecision) -> str:
+    if decision.output_token_limit_advisory:
+        return "advisory"
+    if "output_token_limit" in decision.required_capabilities:
+        return "enforced"
+    return "not_requested"
 
 
 async def _audit(
@@ -4168,6 +4297,33 @@ async def _audit(
         prompt_tokens_fallback=decision.prompt_tokens,
     )
     if decision.trace and not decision.trace.terminal:
+        options = objective_settings(current.settings.section("routing"))
+        obs = decision.trace.payload.get("observation", {})
+        first, last = obs.get("ttft_ms"), obs.get("last_output_ms")
+        duration = (last - first) / 1000 if finite_metric(first) and finite_metric(last) and last >= first else None
+        try:
+            actual_usage = json.loads(response_payload) if response_payload else {"usage": usage or {}}
+        except (ValueError, TypeError):
+            actual_usage = {}
+        actual_usage = actual_usage if isinstance(actual_usage, dict) else {}
+        actual_usage = actual_usage.get("usage", {}) or {}
+        measured_output = actual_usage.get("completion_tokens", actual_usage.get("output_tokens"))
+        decode_tps = ((measured_output - 1) / duration
+            if usage_complete and decision.trace.payload.get("routing_objective", {}).get("single_output", True) and finite_metric(measured_output)
+            and measured_output >= options["performance"]["min_output_tokens"]
+            and duration and duration >= options["performance"]["min_decode_seconds"] else None)
+        cache = ("warm" if explicit_cached else "cold") if explicit_cached is not None else "unknown"
+        if finite_metric(first):
+            decision.trace.payload["performance_observation"] = {
+                "endpoint_id": decision.endpoint.id, "input_tokens": decision.prompt_tokens,
+                "output_tokens": measured_output if finite_metric(measured_output) else output_tokens,
+                "first_output_seconds": max(0, (first - obs.get("upstream_dispatch_ms", 0)) / 1000),
+                "first_output_source": "upstream_first_effective_output",
+                "prefill_seconds": obs.get("prefill_seconds"),
+                "first_text_seconds": max(0, (obs["first_text_ms"] - obs.get("upstream_dispatch_ms", 0)) / 1000) if finite_metric(obs.get("first_text_ms")) else None,
+                "queue_seconds": decision.queue_wait_ms / 1000, "decode_tps": decode_tps,
+                "reasoning": decision.trace.payload.get("routing_objective", {}).get("reasoning", "unknown"),
+                "cache": cache}
         decision.trace.payload["response_redactions"] = int(
             decision.response_redactions
         )
@@ -4191,6 +4347,11 @@ async def _audit(
             },
         )
         await _save_request_trace(current, decision.trace)
+        try:
+            await current.policy.performance.observe(decision.trace.payload,
+                objective_settings(current.settings.section("routing"))["performance"])
+        except Exception as error:
+            current.audit.write("routing_performance_unavailable", request_id=request_id, error_type=type(error).__name__)
     if client_id in {"workbuddy-public", "workbuddy-qwen36-shared"} and decision.trace and decision.trace.terminal:
         if decision.trace.payload.get("status") == "succeeded":
             try:
@@ -4234,6 +4395,7 @@ async def _audit(
         output_tokens=output_tokens,
         output_reserve_tokens=decision.output_reserve_tokens,
         requested_output_tokens=decision.output_reserve_tokens,
+        output_token_limit_mode=_output_token_limit_mode(decision),
         context_required=decision.context_required,
         strategy_version=decision.strategy_version,
         route_profile=decision.route_profile,
@@ -4480,6 +4642,7 @@ def _audit_started(
         prompt_tokens=decision.prompt_tokens,
         output_reserve_tokens=decision.output_reserve_tokens,
         requested_output_tokens=decision.output_reserve_tokens,
+        output_token_limit_mode=_output_token_limit_mode(decision),
         context_required=decision.context_required,
         strategy_version=decision.strategy_version,
         route_profile=decision.route_profile,

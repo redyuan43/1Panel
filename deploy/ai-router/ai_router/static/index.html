@@ -6,6 +6,7 @@
     <title>1Panel AI Router</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/assets/style.css">
+    <link rel="stylesheet" href="/assets/routing-modes.css">
   </head>
   <body>
     <header class="app-header">
@@ -34,6 +35,7 @@
       <button class="tab" type="button" data-view="requests">请求记录</button>
       <button class="tab" type="button" data-view="audit">路由审计</button>
       <button class="tab" type="button" data-view="clients">客户端账号</button>
+      <a class="tab" href="/lan-https">局域网 HTTPS</a>
       <a class="tab" href="/media">媒体任务</a>
       <button class="tab" type="button" data-view="cache-deployments">缓存部署</button>
       <button class="tab" type="button" data-view="settings">策略设置</button>
@@ -72,6 +74,7 @@
                   <th>实例</th>
                   <th>Boot ID</th>
                   <th>活动请求</th>
+                  <th>注册表</th>
                   <th>启动清理</th>
                   <th>更新时间</th>
                 </tr>
@@ -148,6 +151,9 @@
           <div class="section-heading">
             <h3>注册端点</h3>
             <span id="endpoint-count" class="section-meta"></span>
+            <label>排序 <select id="endpoint-sort"><option value="default">注册顺序</option><option value="node">节点</option><option value="model">模型</option><option value="status">状态</option><option value="context">上下文容量</option><option value="load">负载余量</option></select></label>
+            <label>方向 <select id="endpoint-sort-direction"><option value="asc">升序</option><option value="desc">降序</option></select></label>
+            <span class="section-meta">页面选择自动记住 · 当前浏览器</span>
           </div>
           <div class="table-wrap">
             <table>
@@ -631,7 +637,7 @@
                   </div>
                 </section>
 
-                <details class="audit-fold"><summary>隐私旁路审核</summary>
+                <details id="privacy-audit-fold" class="audit-fold"><summary>隐私旁路审核</summary>
                 <section class="privacy-assessment-section">
                   <h4>隐私旁路审核 <span class="badge neutral">仅观察</span></h4>
                   <div id="trace-privacy-result" class="trace-detail-meta"></div>
@@ -696,7 +702,7 @@
                 </section>
 
                 </div>
-                <details class="audit-fold"><summary>人工审核与备注</summary>
+                <details id="human-audit-fold" class="audit-fold"><summary>人工审核与备注</summary>
                 <form id="trace-review-form" class="trace-review-form">
                   <div class="trace-review-heading">
                     <div>
@@ -785,7 +791,7 @@
         </section>
       </section>
 
-      <section id="settings-view" class="view">
+      <section id="settings-view" class="view" data-policy-view="simple">
         <form id="settings-form">
           <div class="policy-workflow-bar">
             <div>
@@ -799,6 +805,55 @@
               <button type="button" data-policy-section="capacity-fallback">容量兜底</button>
             </div>
           </div>
+          <section class="routing-mode-panel" aria-label="路由策略">
+            <div class="routing-mode-toolbar">
+              <h2>路由策略</h2>
+              <label>页面模式 <select id="routing-mode-view"><option value="simple">简单</option><option value="advanced">高级</option></select></label>
+              <label class="toggle-row"><span>启用三种策略</span><input id="routing-objectives-enabled" type="checkbox"></label>
+            </div>
+            <div class="routing-mode-summary" aria-live="polite">
+              <span>当前生效<strong id="routing-live-mode">读取中</strong></span>
+              <span>正在编辑<strong id="routing-edit-mode">效率优先</strong></span>
+              <span>继承全局的账号<strong id="routing-inherit-count">0</strong></span>
+              <button id="routing-open-clients" type="button" class="secondary">配置账号策略</button>
+            </div>
+            <fieldset class="routing-mode-cards"><legend class="sr-only">选择策略</legend>
+              <label class="routing-mode-card"><input type="radio" name="routing-objective" value="cost"><strong>成本优先</strong><p>尽量使用本地模型，减少云端费用。</p></label>
+              <label class="routing-mode-card"><input type="radio" name="routing-objective" value="efficiency" checked><strong>效率优先</strong><p>本地满足速度要求时继续使用，持续慢时下一轮切换 Flash。</p></label>
+              <label class="routing-mode-card"><input type="radio" name="routing-objective" value="quality"><strong>质量优先</strong><p>从第一轮优先使用高质量模型，不可用时允许降到 Flash。</p></label>
+            </fieldset>
+            <label class="toggle-row"><span>仅使用本地模型（约束所有策略）</span><input id="routing-local-only" type="checkbox"></label>
+            <p id="routing-local-notice" class="field-hint" hidden>已禁止上云。没有符合要求的本地模型时将排队或返回明确错误。</p>
+            <div data-objective-options="cost" hidden><p class="field-hint">优先保留本地会话与缓存；关闭“仅本地”后，本地无法处理时允许 Flash 兜底。</p></div>
+            <div data-objective-options="efficiency">
+              <div class="control-grid">
+                <label>最大首个输出等待（秒）<input type="number" data-performance="max_first_output_seconds" min="1" max="1800" value="180"></label>
+                <label>最低生成速度（Token/秒）<input type="number" data-performance="min_decode_tps" min="0.1" max="1000" step="0.1" value="10"></label>
+              </div>
+              <p class="field-hint">只在下一轮切换，不中断当前生成。一次严重等待或持续降速后重新评估，并考虑迁移后的缓存成本。</p>
+            </div>
+            <div data-objective-options="quality" hidden>
+              <div id="routing-quality-order"></div>
+              <label class="toggle-row"><span>高质量模型不可用时允许 Flash 兜底</span><input id="routing-quality-fallback" type="checkbox" checked></label>
+              <label class="toggle-row"><span>允许 Astra 将输出上限作为建议值</span><input id="routing-advisory" type="checkbox" checked></label>
+              <p class="field-hint">Astra 订阅接口不能保证严格输出上限。模型仍需满足权限、上下文和输入能力；不可用原因会记录在路由审计。</p>
+            </div>
+            <div class="routing-advanced">
+              <h3>性能与迁移设置</h3><div class="control-grid">
+<label>降速比例<input type="number" data-performance="slowdown_ratio" min="0.05" max="0.95" step="0.05" value="0.5"></label>
+<label>统计窗口（秒）<input type="number" data-performance="window_seconds" min="60" max="86400" step="1" value="1800"></label>
+<label>每组最多样本<input type="number" data-performance="max_samples" min="5" max="100" step="1" value="100"></label>
+<label>基线最少样本<input type="number" data-performance="min_samples" min="5" max="100" step="1" value="5"></label>
+<label>样本最少输出 Token<input type="number" data-performance="min_output_tokens" min="16" max="4096" step="1" value="128"></label>
+<label>样本最短生成秒数<input type="number" data-performance="min_decode_seconds" min="1" max="120" step="1" value="5"></label>
+<label>最小节省比例<input type="number" data-performance="min_saving_ratio" min="0.01" max="0.95" step="0.01" value="0.3"></label>
+<label>最少节省秒数<input type="number" data-performance="min_saving_seconds" min="1" max="600" step="1" value="15"></label>
+<label>迁移冷却（秒）<input type="number" data-performance="cooldown_seconds" min="0" max="86400" step="1" value="600"></label>
+</div><h3>Flash 备选顺序</h3><div id="routing-flash-order"></div>
+              <label class="toggle-row"><span>只观察策略建议，继续使用原有路由</span><input id="routing-observe-only" type="checkbox"></label>
+            </div>
+            <div class="routing-mode-toolbar"><button id="routing-apply" type="button">验证并应用</button><span id="routing-apply-state" role="status"></span></div>
+          </section>
           <div id="policy-impact-report" class="policy-impact-report" hidden></div>
           <div class="policy-flow">
             <section class="settings-band policy-stage-card">
@@ -1268,6 +1323,9 @@
               最大并发
               <input id="client-parallel" type="number" min="1" step="1" required>
             </label>
+            <label>路由策略<select id="client-routing-mode"><option value="inherit">继承全局</option><option value="cost">成本优先</option><option value="efficiency">效率优先</option><option value="quality">质量优先</option></select></label>
+            <label class="toggle-row"><span>此账号仅使用本地模型</span><input id="client-local-only" type="checkbox"></label>
+
             <label>
               信息披露
               <select id="client-disclosure-mode">
@@ -1290,6 +1348,7 @@
           </fieldset>
         </div>
         <div class="dialog-actions">
+          <a href="/lan-https" target="_blank" rel="noopener">新设备连接与证书指引</a>
           <button class="secondary" type="button" data-close-dialog="client-dialog">取消</button>
           <button type="submit">保存账号</button>
         </div>
@@ -1344,6 +1403,7 @@
           <input id="generated-key" type="text" readonly>
         </label>
         <p class="secret-warning">关闭后无法再次查看。</p>
+        <p><a href="/lan-https" target="_blank" rel="noopener">连接地址、信任证书下载与安装指引</a> · 新设备安装一次即可，新账号无需重新生成证书。</p>
       </div>
       <div class="dialog-actions">
         <button id="copy-generated-key" type="button">复制</button>
@@ -1411,6 +1471,7 @@
           <fieldset class="model-permissions">
             <legend>输入模态</legend>
             <div id="endpoint-modalities" class="permission-grid"></div>
+            <p class="muted">图像开关控制此端点是否接收图片。请按实际模型和服务能力配置；草稿检查仅验证配置与健康状态，不进行识图测试。激活后对新请求生效。</p>
           </fieldset>
           <fieldset class="model-permissions">
             <legend>tool_choice 模式</legend>
@@ -1434,7 +1495,9 @@
     </dialog>
 
     <script src="/assets/vendor/mermaid/mermaid.min.js"></script>
+    <script src="/assets/view-preferences.js"></script>
     <script src="/assets/cache-audit.js"></script>
+    <script src="/assets/routing-modes.js"></script>
     <script src="/assets/app.js"></script>
   </body>
 </html>
