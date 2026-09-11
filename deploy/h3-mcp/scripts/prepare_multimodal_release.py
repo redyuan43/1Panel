@@ -85,13 +85,57 @@ def studio_overlay(files):
     source = replace(source, '<option value="portrait">竖版 · 预览 480×864</option>', '<option value="portrait" selected>竖版 · 预览 480×864</option>')
     source = replace(source, '<button type="button" data-value="cloud" class="strategy-option">', '<button type="button" data-value="cloud" class="strategy-option" disabled>')
     files["frontend/index.html"] = source.encode()
-    for filename in ("input-assets.js", "input-assets.css", "input-edit.js"):
+    for filename in ("input-assets.js", "input-assets.css", "input-edit.js", "comparison-status.js"):
         files["frontend/" + filename] = (BASE / "frontend" / filename).read_bytes()
     for filename in ("mcp-settings.html", "mcp-settings.js", "mcp-settings.css"):
         files["frontend/" + filename] = (BASE / "frontend" / filename).read_bytes()
     for name, content in files.items():
         if name.endswith(".py"):
             preparer.parse_python(content, name)
+    return files
+
+
+def fleet_residue_overlay(files):
+    files = dict(files)
+    files["app/backend_residue.py"] = (BASE / "fleet/backend_residue.py").read_bytes()
+    source = files["app/main.py"].decode()
+    source = replace(source, '                (*values.values(), prompt_id),\n            )\n        return self.get(prompt_id)',
+        '                (*values.values(), prompt_id),\n            )\n'
+        '            from .backend_residue import record_terminal\n'
+        '            record_terminal(connection, prompt_id)\n        return self.get(prompt_id)')
+    for indent in ("        ", "            "):
+        anchor = indent + 'updated = fleet.store.update(prompt_id, status="cancelled")\n' + indent + 'fleet.cleanup_job_inputs(updated)'
+        source = replace(source, anchor, indent + 'updated = fleet.store.update(prompt_id, status="cancelled")\n'
+            + indent + 'await fleet.recipes.completed(updated, {})\n' + indent + 'fleet.cleanup_job_inputs(updated)')
+    source += '\nfrom .backend_residue import install as install_backend_residue\ninstall_backend_residue(fleet)\n'
+    files["app/main.py"] = source.encode()
+    source = files["app/recipe_dispatch.py"].decode()
+    source = replace(source, '(time.time(), event, json.dumps(details)))\n',
+        '(time.time(), event, json.dumps(details)))\n'
+        '            from .backend_residue import record_settled\n'
+        '            record_settled(connection, event, details)\n')
+    source = replace(source, '            if job["status"] == "error":\n',
+        '            if job["status"] in {"error", "cancelled", "missing"}:\n')
+    source = replace(source, '        if record and record["state"] == "observing":\n            sample = await self.sample()',
+        '        if record and record["state"] == "observing" and history:\n            sample = await self.sample()')
+    source = replace(source, '        failed_oom = bool(re.search(r"CUDA.*out of memory|OutOfMemoryError|allocation on device", encoded, re.I))',
+        '        failed_oom = bool((record or {}).get("cuda_oom_detected") or job.get("failure_reason") == "cuda_oom"\n'
+        '                          or re.search(r"CUDA.*out of memory|OutOfMemoryError|allocation on device", encoded, re.I))')
+    source = replace(source, 'execution_seconds=duration or None, progress_json=json.dumps(progress),\n                                failure_reason="cuda_oom" if failed_oom else job.get("failure_reason"))',
+        'execution_seconds=duration or job.get("execution_seconds"), progress_json=json.dumps(progress),\n'
+        '                                failure_reason=job.get("failure_reason") or ("cuda_oom" if failed_oom else None))')
+    source = replace(source, '"execution_seconds": duration or None, "cuda_oom": failed_oom,',
+        '"execution_seconds": duration or job.get("execution_seconds"), "cuda_oom": failed_oom,')
+    source = replace(source, '{"cuda_oom_detected": failed_oom, "messages": messages}',
+        '{"cuda_oom_detected": failed_oom, "messages": messages, "terminal_status": job["status"]}')
+    anchor = '        with self.fleet.store._connect() as connection:\n            connection.execute("INSERT OR REPLACE INTO controls VALUES (?,?)", (\n                "warm:" + binding["id"], json.dumps({"recipe_id": job["recipe_id"], "idle_since": time.time(),\n                                                    "runtime_version": binding["runtime_version"]})))\n'
+    source = replace(source, anchor, '        if job["status"] == "completed":\n' + ''.join('    ' + line for line in anchor.splitlines(keepends=True)))
+    source = replace(source, '"runtime_version": binding["runtime_version"]})))',
+        '"runtime_version": binding["runtime_version"], "identity": binding["identity"],\n'
+        '                                                        "prompt_id": job["prompt_id"]})))')
+    files["app/recipe_dispatch.py"] = source.encode()
+    for name in ("app/main.py", "app/recipe_dispatch.py", "app/backend_residue.py"):
+        preparer.parse_python(files[name], name)
     return files
 
 
@@ -198,7 +242,7 @@ def fleet_overlay(files):
     for name, content in files.items():
         if name.endswith(".py"):
             preparer.parse_python(content, name)
-    return files
+    return fleet_residue_overlay(files)
 
 
 def control_overlay(proxy_source, image_id):
