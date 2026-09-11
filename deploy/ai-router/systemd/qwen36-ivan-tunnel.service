@@ -1,0 +1,13 @@
+[Unit]
+Description=AI Router tunnel to Ivan Qwen3.6 worker
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -T -o BatchMode=yes -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -L 127.0.0.1:18888:127.0.0.1:8888 ivan-laptop
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

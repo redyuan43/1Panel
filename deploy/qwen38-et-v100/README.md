@@ -53,13 +53,14 @@ systemd --user (Linger=yes，开机自启)
 | MODEL_PATH | /home/ai/models/Qwen38-EfficientThink-W4A16 | 新模型 |
 | SPECULATIVE_CONFIG | {"method":"mtp","num_speculative_tokens":2} | A/B 最优；draft=Qwen3_5MTP 共享 embedding/lm_head，fork 自动套 1Cat SM70 MTP 默认 |
 | GPU_MEMORY_UTILIZATION | 0.93 | 实测验证值；196K ctx 单请求需 <244K KV tokens 池 |
-| MAX_MODEL_LEN | 196608 | 与旧生产一致（路由别名 196k） |
-| MAX_NUM_BATCHED_TOKENS | 4096 | 沿用旧生产默认；> mamba align 块 1648 约束 |
+| MAX_MODEL_LEN | 262144 | 2026-09-10 实测 257,970 Token 输入通过；兼容保留原 196k 模型 ID |
+| MAX_NUM_BATCHED_TOKENS | 4096 | 保留原预填充批次；当前 Mamba 块为 1600 |
 | KV_CACHE_DTYPE | fp8_e5m2 | 沿用；FLASH_ATTN_V100 storage-only 路径 |
 | NCCL_P2P_DISABLE=1 + UUID 注入 + --ipc host | 沿用 | 实锤：V100+PG500-216 混插卡不开必现 NCCL 无限死锁 |
 | TENSOR_PARALLEL_SIZE | 4 | GPU4-7 同属 NUMA1；TP4 实测通过 |
 | LMCACHE max-gpu-workers | 随 GPU_UUIDS 自动计数（当前 4） | 修复 TP2 硬编码只允许 2 rank 注册的问题 |
 | MAX_NUM_SEQS | 8 | 从 4 提升；解除并发调度上限，单流性能无回归 |
+| LMCACHE_ENABLED | 0 | 暂停 DRAM 回读；保留 vLLM GPU 前缀缓存 |
 | 其余（backend/KV 根目录等） | 沿用旧生产 | — |
 
 ## 与旧部署的差异
@@ -72,6 +73,15 @@ systemd --user (Linger=yes，开机自启)
 
 ## 已知权衡
 
+- 2026-09-10 256K 验收使用原推理版本、TP4、MTP2、量化和八路配置。当前 GPU KV 池为
+  **2,582,714 Token**；单请求实测输入 **257,970 Token**，冷请求 382.222 秒，复用
+  256,000 Token GPU 缓存后约 5 秒。长短混合请求实测同时运行峰值达到 2、4、8，标记均正确。
+- DRAM 缓存的部分前缀回读出现可复现错误，清空重建与改为 1600 预填充批次均未修复。
+  当前只使用已验证的 GPU 前缀缓存；LMCache 服务保留备用，没有连接当前模型。
+  模型重启后需要重新预热，不能将下述历史 DRAM 验证视为当前已修复。
+  `BASE_VLLM_VENV` 和 `SERVER_BIN` 均固定到原 `1cat-vllm-1.5.0-lmcache` 环境，确保
+  只改变缓存连接方式，不切换推理版本。恢复 DRAM 需先修复并重测部分前缀，不能只切开关。
+  详细证据与独立回滚快照位于 `/home/ai/.local/state/ai-router-acceptance/20260910-routing-modes`。
 - TP4 生产 KV 池实测 **2,525,320 tokens**（util 0.93），是 TP2 930,611 的
   **2.71×**；196K 请求理论最大并发 **12.84×**。TP4 的首要收益是 KV 容量、
   单流吞吐和更高批处理上限；PCIe 无 NVLink 条件下并发扩展仍然是次线性的。

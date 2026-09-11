@@ -134,9 +134,9 @@ endpoints:
       - code
       - batch
       - long-context
-    safe_context_tokens: 196608
-    configured_context_tokens: 196608
-    max_concurrency: 4
+    safe_context_tokens: 262144
+    configured_context_tokens: 262144
+    max_concurrency: 8
     backend_type: vllm
     health_url: http://127.0.0.1:18107/health
     load_url: http://127.0.0.1:18107/metrics
@@ -152,8 +152,8 @@ endpoints:
         - json_object
         - json_schema
       streaming: true
-      validation_status: live-validated-48k-tools-vision-mtp2-tp2-alignment32
-      validated_at: "2026-09-07"
+      validation_status: live-validated-tp4-mtp2-tools-vision-256k-text-8seq
+      validated_at: "2026-09-10"
     deployment_profiles:
       - id: v100-tp2-qwen38-196k
         tiers:
@@ -162,8 +162,8 @@ endpoints:
         modalities:
           - text
           - image
-        context_size: 196608
-        safe_context_tokens: 196608
+        context_size: 262144
+        safe_context_tokens: 262144
         cache_type_k: fp8_e5m2
         cache_type_v: fp8_e5m2
         short_request_rank: 0
@@ -174,25 +174,31 @@ endpoints:
       code: 0
       batch: 0
     metadata:
-      context_status: runtime-reported-196608
+      token_counting:
+        enabled: true
+        method: render
+        version: "0997f410c57a1f4e-b11349aafa7cdc6a-c3cf9e34abf4f9e3-history-v1"
+      context_status: live-validated-256k-text-8seq-native-gpu-cache
+      context_validation_report: /home/ai/.local/state/ai-router-acceptance/20260910-routing-modes/acceptance-summary.json
+      prefix_cache_status: native-gpu-prefix-validated-2026-09-10
       quality_status: workbuddy-48k-semantic-live-validated
       performance_report: /home/ai/.local/state/v100-vllm-isolation-20260907/fixed-tp2-alignment32-production-196k-mtp2/fixed-tp2-alignment32-production-196k-mtp2/report.json
       runtime_patch: 1cat-vllm-pr517-nvfp4-output-alignment32
-      topology: v100-gpu4-gpu5-tp2-no-nvlink
+      topology: v100-class-gpu4-gpu5-gpu6-gpu7-tp4-no-nvlink
       service_unit: qwen38-v100-tp2-vllm.service
       cache_usage: per_request
-      quantization: QUASAR-NVFP4
+      quantization: modelopt-NVFP4-W4A16
       kv_cache: fp8_e5m2
       speculative_method: mtp
       speculative_tokens: 2
       mtp_acceptance_rate: 0.9625
       prefix_cache: automatic
-      lmcache_status: live-validated-dram-resume-2026-09-07
+      lmcache_status: disabled-partial-prefix-retrieval-correctness-2026-09-10
       lmcache_prime_report: /home/ai/.local/state/qwen38-v100-tp2-lmcache/production-lmcache-driven-20260907/report-prime.md
       lmcache_resume_report: /home/ai/.local/state/qwen38-v100-tp2-lmcache/production-lmcache-driven-20260907/report-resume.md
       lmcache_http_url: http://127.0.0.1:18084
       lmcache_storage: cpu-dram-only
-      lmcache_expected_registrations: 2
+      lmcache_expected_registrations: 4
       vision_status: live-validated-2026-09-06
       max_images: 1
 
@@ -236,6 +242,10 @@ endpoints:
       code: 100
       batch: 100
     metadata:
+      token_counting:
+        enabled: true
+        method: render
+        version: "0997f410c57a1f4e-b11349aafa7cdc6a-c3cf9e34abf4f9e3-history-v1"
       context_status: runtime-reported-500k
       quality_status: benchmarked-2026-09-01
       quality_report: /opt/1panel/ai-router/benchmarks/report-edge-20260901.json
@@ -565,6 +575,7 @@ endpoints:
     tier_rank: 60
     modalities:
       - text
+      - image
     tasks:
       - general
       - code
@@ -593,6 +604,7 @@ endpoints:
       validated_at: ""
     quality: {}
     metadata:
+      routing_quality_validated: true
       provider: openai-codex
       billing_mode: subscription
       context_status: configured-unvalidated
@@ -602,7 +614,50 @@ endpoints:
       model_catalog_required: true
       catalog_context_tokens: 272000
       catalog_max_context_tokens: 1050000
-      vision_status: disabled-pending-live-validation
+      vision_status: live-validated-chat-image-2026-09-10
+
+  - id: zhipu-glm-5.3
+    public_model: zhipu/glm-5.3
+    provider_model: glm-5.3
+    api_base: https://open.bigmodel.cn/api/coding/paas/v4
+    node: zhipu-cloud
+    role: responder
+    tier: subscription-frontier
+    tier_rank: 50
+    modalities: [text]
+    tasks: [general, code, batch, long-context]
+    safe_context_tokens: 32768
+    configured_context_tokens: 1000000
+    max_concurrency: 1
+    backend_type: openai
+    health_url: https://open.bigmodel.cn/api/coding/paas/v4/models
+    backend_api_key_env: AI_ROUTER_GLM_API_KEY
+    enabled: false
+    auto_candidate: false
+    cloud: true
+    capabilities:
+      chat: true
+      responses: adapter
+      tools: parallel
+      tool_choice: true
+      tool_choice_modes: [auto]
+      structured_output: [json_object]
+      streaming: true
+      validation_status: declared-pending-live-validation
+      validated_at: ""
+    quality: {}
+    metadata:
+      routing_quality_validated: true
+      provider: zhipu-coding
+      billing_mode: subscription
+      context_status: configured-32k-unvalidated-official-1m
+      quality_status: unbenchmarked
+      max_output_tokens: 128000
+      thinking_via_extra_body: true
+      reasoning_effort_via_extra_body: true
+      reasoning_effort_default: max
+      vision_status: coding-endpoint-rejected-image-2026-09-10
+      documentation_url: https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3
 
   - id: zhipu-glm-5.3-flash
     public_model: zhipu/glm-5.3-flash
@@ -699,7 +754,7 @@ endpoints:
       batch: 100
     metadata:
       provider: deepseek
-      context_status: official-limit-unverified-boundary
+      context_status: official-1m-live-validated-990038-input
       quality_status: benchmarked-2026-09-01
       quality_report: /opt/1panel/ai-router/benchmarks/report-deepseek-v4-flash-20260901.json
       pricing_status: official-peak-2026-09-01
@@ -707,6 +762,7 @@ endpoints:
       output_cost_per_million_usd: 1.32
       max_output_tokens: 384000
       thinking_via_extra_body: true
+      reasoning_effort_via_extra_body: true
 
   - id: cloud-deepseek-v4-pro
     public_model: deepseek/deepseek-v4-pro
@@ -723,7 +779,7 @@ endpoints:
       - code
       - batch
       - long-context
-    safe_context_tokens: 262144
+    safe_context_tokens: 1000000
     configured_context_tokens: 1000000
     max_concurrency: 8
     backend_type: openai
@@ -741,12 +797,13 @@ endpoints:
         - json_object
         - json_schema
       streaming: true
-      validation_status: registered-unvalidated
-      validated_at: ""
+      validation_status: live-validated-chat-stream-tools-990k
+      validated_at: "2026-09-10"
     quality: {}
     metadata:
+      routing_quality_validated: true
       provider: deepseek
-      context_status: configured-unvalidated
+      context_status: official-1m-live-validated-990038-input
       quality_status: unbenchmarked
       pricing_status: official-peak-2026-08-16
       input_cost_per_million_usd: 1.32
