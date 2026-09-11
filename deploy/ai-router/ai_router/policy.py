@@ -1698,11 +1698,6 @@ class RoutingPolicy:
                     or "physical_deployment"
                 )
         if (
-            "image" in modalities
-            and str(endpoint.metadata.get("provider", "")) == "deepseek"
-        ):
-            return "deepseek_multimodal_unsupported"
-        if (
             endpoint.backend_type != "ai_pool"
             and not modalities.issubset(set(endpoint.modalities))
         ):

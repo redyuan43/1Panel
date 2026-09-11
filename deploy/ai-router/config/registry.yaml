@@ -723,6 +723,7 @@ endpoints:
     tier_rank: 40
     modalities:
       - text
+      - image
     tasks:
       - general
       - code
@@ -763,6 +764,10 @@ endpoints:
       max_output_tokens: 384000
       thinking_via_extra_body: true
       reasoning_effort_via_extra_body: true
+      vision_status: live-validated-2026-09-11
+      vision_validation_report: /home/ai/.local/state/ai-router-acceptance/20260911-deepseek-upstream/upstream-probe.json
+      upstream_version_status: deepseek-flash-v4.1-verified-2026-09-11
+      upstream_version_fingerprint: aeb56401ca74e127821c4f9126dcb669
 
   - id: cloud-deepseek-v4-pro
     public_model: deepseek/deepseek-v4-pro

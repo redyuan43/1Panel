@@ -211,7 +211,7 @@ curl --fail-with-body \
 | GLM-5.3-Flash | 待启用 | 官方声明原生多模态；仅允许显式验收，真实 Key 请求尚未验收 |
 | AI P40/V100 池 | 未启用 | 小图通过，但高分辨率 mtmd chunk 在 P40/V100 均耗尽 decode workspace |
 | Edge Flash Next | 未启用 | 当前 vLLM 图像请求会导致容器退出 |
-| DeepSeek | 未启用 | API 明确返回 `This model does not support image` |
+| DeepSeek V4.1 Flash | 启用（显式模型） | 2026-09-11 确认上游已是 V4.1 Flash，原生视觉实测通过；未加入 Auto 多模态顺序 |
 
 Edge 当前是 Router 端点整体禁用，不参与文本、图像、显式模型或 Auto 调度；
 模型服务本身保持运行，后续独立验收后再决定是否重新开放。

@@ -678,12 +678,43 @@ def test_v2_image_150k_plus_65536_fits_local_256k(
     assert decision.endpoint.id == "ai-qwen38-27b"
     assert decision.output_reserve_tokens == 65536
     assert decision.context_required == 215536
-    assert (
-        "cloud-deepseek-v4-flash:"
-        "deepseek_multimodal_unsupported"
-    ) in (
-        decision.candidate_rejections
+    # DeepSeek 端点已声明图片能力，不再以模态不兼容被拒绝。
+    assert not any(
+        "deepseek_multimodal_unsupported" in item
+        for item in decision.candidate_rejections
     )
+
+
+def test_deepseek_endpoint_accepts_image_requests(
+    tmp_path: Path,
+) -> None:
+    registry = v2_registry(tmp_path)
+    endpoint = registry.by_id("cloud-deepseek-v4-flash")
+    assert endpoint is not None
+    assert "image" in endpoint.modalities
+    policy, _registry = policy_for(
+        tmp_path,
+        local_healthy=False,
+    )
+    decision = run(
+        policy.choose(
+            requested_model="deepseek/deepseek-v4-flash",
+            evaluation=Evaluation(
+                "general",
+                None,
+                1.0,
+                "test",
+                route_profile="multimodal",
+            ),
+            prompt_tokens=1000,
+            output_reserve_tokens=4096,
+            modalities={"text", "image"},
+            image_count=1,
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert decision.endpoint.id == "cloud-deepseek-v4-flash"
 
 
 def test_v2_returns_422_when_full_context_has_no_candidate(
