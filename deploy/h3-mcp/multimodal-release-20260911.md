@@ -5,7 +5,18 @@
 ### 2026-09-11 用户授权后的部署进展
 
 用户已明确授权开始部署，并告知 WorkBuddy 已启动。本次重新核对 Windows SSH 在线、旧 H3 HTTP 配置具备专用凭证、本地桥接组件尚未安装；Studio/Fleet 当前没有运行或排队任务，两 Control 基础镜像与候选一致。
-AI 持久备份与不可变候选已准备：`/home/ai/.local/state/h3-studio-ivan-production/deployment/multimodal-20260911-r1`。包含一致性数据库备份、项目素材副本及摘要、全部 Compose 覆盖、容器身份和私密配置。接单策略已设为维护暂停；此时尚未切换服务。
+AI 持久备份与不可变候选已准备：`/home/ai/.local/state/h3-studio-ivan-production/deployment/multimodal-20260911-r1`。包含一致性数据库备份、项目素材副本及摘要、全部 Compose 覆盖、容器身份和私密配置。
+Fleet 已切至 `/mnt/ivan-ext4-offload/h3-fleet-releases/20260911-r5-2a477c833431`，Studio 已切至 `releases/20260911-multimodal-r1`，两个 Control 已切至镜像 `sha256:e3c103ee9a7043eeb2083546a684f97624b099c1154b55b53f5ed0494de96b1d`。三个控制面健康；新素材页面、后台状态和设置接口200，匿名管理请求401。六个 Ivan worker 身份、66条 Fleet 历史及19个无关容器身份保持不变。
+部署维护门禁已解除，Studio与两Control的生成环境上限和管理策略均为启用，Fleet后台已启用。四配方沿用原资格开放4060 Ti单路；最后只读采样A4/B8各显示1个兼容槽位（同一GPU，不能相加），Swap恢复连续稳定120秒，运行/排队均0。多素材配置仍未通过执行资格，不以开关绕过。
+
+- Windows 本地组件已安装，原MCP配置和Skill有私密备份；配置中不再保存内联凭证。安装版本 `a98580bcc6132e255b34cd04571184c99e45355e93adab4dc39b68fa97cee119`，回滚回执位于 `%USERPROFILE%\.workbuddy\h3-bridge\installation.json`。
+- Windows独立stdio验收完成初始化及11工具发现；`windows-11-tools.json`明确不是WorkBuddy界面自然语言验收。WorkBuddy自身曾启动新bridge进程，其父链已核实；尚无客户端自身11工具发现的完整日志证据，不能把脚本结果替代它。
+- 原照片通过Windows已安装组件上传成功：`asset_1ffde8cf39a84559994d1c874df95370`，328682字节，383×680，摘要与原文件完全一致，上传回执复查一致。
+- 任务`7732e9926474`现已通过版本化接口新增首帧输入，提示词和64位种子保持原值；旧T2V文本、批准和输出保留在历史，旧审批不再有效。新版本`b5dc29150361dced97b6f28c7fafdd966b85902cd82d47e32ae01dd80f343650`使用`H3_I2V_QUALITY14`，状态`awaiting_prompt_approval`，已向用户请求对这一具体版本重新确认，没有自动开始生成。
+- 真实网页只读验收：首页、原任务新首帧页、设置页均通过，无JavaScript错误、无写请求；原图完整解码显示，使用contain，不裁掉下半幅。截图和回执在AI部署目录，`browser-smoke.json`为最终记录。中间验收脚本先误用未安装的Chromium包装器、后使用了旧开关按钮文字；已修正为现有Chrome和真实按钮状态，没有为测试安装浏览器或修改生产行为。
+- Windows工具发现脚本最初使用系统GBK解码UTF-8结果而报错；改为显式UTF-8后11工具发现通过。此错误来自验收脚本，不作为客户端连接失败证据。
+
+**尚未完成：** 新首帧版本的人工确认、Ivan素材准备/真实首帧成片/播放与资源释放验收、其他多素材分支执行证据，以及WorkBuddy界面自然语言端到端留证。本次没有新增GPU推理；已部署不等于六模式全部生成通过。
 下文“未获得授权/Windows离线”是授权前的历史状态，不再作为本次阻断。
 REF2VA 下载句柄已返回 `download_integrity_failure`，保留临时文件与回执，不注册不合格权重，不盲目重试；不阻塞已有 FL2VA 权重的部署。
 
@@ -13,7 +24,7 @@ REF2VA 下载句柄已返回 `download_integrity_failure`，保留临时文件�
 
 主要代码已形成离线候选；**未部署、未更新实际 WorkBuddy 安装、没有新增 GPU 推理**。已补齐参考视频实际帧率检查与任务级解码预算；非恒定24fps输入明确拒绝执行，不静默变速或假称已转换。仍不能把离线代码称为完整端到端交付。
 维护窗口已请求确认，不能把下列测试通过写成六模式已上线或真实成片通过。
-原任务 `7732e9926474` 的文本、批准、种子、历史和产物未修改。
+授权前原任务 `7732e9926474` 的文本、批准、种子、历史和产物未修改；授权后的版本化首帧编辑见本报告顶部。
 
 ## 已实现
 
@@ -47,7 +58,7 @@ REF2VA 下载句柄已返回 `download_integrity_failure`，保留临时文件�
 
 | 验证 | 结果 | 证据 |
 |---|---|---|
-| Studio/Control/MCP 相关完整回归 | 654通过，0失败/错误/跳过，46.08秒 | `/tmp/h3-multimodal-full-r12.xml` |
+| Studio/Control/MCP 相关完整回归 | 654通过，0失败/错误/跳过，46.08秒（06:44 历史结果；口径为 h3-mcp 侧 438 + ai-router 侧 `tests.test_h3_*` 216，与下文的复跑数字不是同一口径） | `/tmp/h3-multimodal-full-r12.xml` |
 | 私密配置器专项（已包含在完整回归内，不重复计数） | 7通过；Windows 实机分支未验证 | `/tmp/h3-private-configuration-final.xml` |
 | 新安装/资格/生命周期保护测试 | 22通过 | `/tmp/h3-multimodal-release-guards.xml` |
 | Fleet回归及4项实际调度方法集成测试 | 1194通过，11个既有失败；无新增失败，27.90秒 | `/tmp/h3-fleet-full-r7.xml`、`/tmp/h3-fleet-baseline-old-tests.xml` |
@@ -61,6 +72,19 @@ Fleet 既有失败：旧归档文件清单不一致1项，以及旧隔离实验�
 测试中的合成图片/模拟视频仅证明契约、权限、幂等及流程，不是实际成片或画质证据。
 测试候选附加的旧实验文件仅为测试夹具，**不得随正式 Fleet 归档发布**。
 限定复核曾指出磁盘探测缓存缺少独立可信性、旧模型清理路径漏传任务预算两项；已修复并重新核对源文件/冻结摘要。最终全回归保留旧卸载测试及新增传参检查，不能仅以源码字符串检查代替运行验证。中间一次回归因遗漏旧实验夹具而出现14项收集错误，已在隔离测试树补齐；没有把这些夹具装入正式候选。
+
+**复跑前置条件（2026-09-11 18:00 补记）：** 上表「完整回归」必须显式指定 Studio 测试根，否则会得到 10 项假失败：
+
+```
+cd /home/ai/github/1Panel/deploy/h3-mcp
+H3_CONNECTOR_TEST_STUDIO_ROOT=<已叠加候选目录或当前线上 release> python3 -m pytest -q tests/
+```
+
+不指定时默认根是 studio 源码目录，缺 overlay 安装的 `connector_api.py`/`browser_tasks.py`/`input_view.py`/`multimodal_client.py`，于是 `test_browser_tasks.py` 3 项报 `405 != 403/409`、`test_input_assets.py` 1 项断言失败、`test_multimodal_client_chain.py` 3 项 `ModuleNotFoundError`，合计 `7 failed / 3 errors`。**这些不是发布回归**，已逐项核实。
+
+数字必须连「测试根 + 时间」一起记录：18:02 以根 `releases/20260911-status-fix-r1` 复跑（h3-mcp 侧）为 `499 passed, 1 skipped`；自 17:37 起线上 Studio 实际运行 `releases/20260911-firstframe-four-recipes-r1`（drop-in `90-firstframe-four-recipes.conf`），该根比 status-fix-r1 多 accelerated i2v 等 10 处差异，复跑以其结果为准。
+
+独立审计结论（run 生命周期 3 项已修复、比较横幅时钟偏差本轮修复、上述假失败成因与仍待处理项）见 `audit-20260911-run-lifecycle-and-banner.md`。
 
 ## 真实输入和模型阻断
 
@@ -80,7 +104,7 @@ FL2VA 及编码器/VAE 已在现有 A4 运行环境的权重清单中核对。RE
 
 ## 不可变候选与切换步骤
 
-当前冻结并复核摘要的候选：Studio `/tmp/h3-multimodal-studio-candidate-r12`，Fleet `/tmp/h3-multimodal-fleet-release-r5`，Control `/tmp/h3-multimodal-control-candidate-r2`，Windows安装包 `/tmp/h3-workbuddy-multimodal-bundle-r2`。这些仅用于离线构建/验收，正式发布必须复制到持久不可变目录并再次校验所有摘要。
+当前冻结并复核摘要的候选：Studio `/tmp/h3-multimodal-studio-candidate-r12`（**06:42 构建，不含 12:31 的 run 生命周期修复，已过期，不得再作为当前候选**；线上 Studio 自 17:37 起运行 `releases/20260911-firstframe-four-recipes-r1`），Fleet `/tmp/h3-multimodal-fleet-release-r5`，Control `/tmp/h3-multimodal-control-candidate-r2`，Windows安装包 `/tmp/h3-workbuddy-multimodal-bundle-r2`。这些仅用于离线构建/验收，正式发布必须复制到持久不可变目录并再次校验所有摘要。
 Windows包只含 `bridge.cjs`、`configure_bridge.py`、`install_bridge.py`、`SKILL.md`、`multimodal.md` 和摘要清单，不含令牌；服务端上传路由就绪前不能先安装。安装后私密设置入口为 `%USERPROFILE%\.workbuddy\h3-bridge\configure-h3.cmd`，不让模型读取或转发 Token。
 
 1. `scripts/prepare_multimodal_release.py` 从当前 Studio 发布目录叠加独立模块；Control 仅叠加 H3 模块和薄代理，不覆盖脏工作树的 Router 核心。
