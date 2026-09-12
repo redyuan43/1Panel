@@ -91,6 +91,16 @@ systemd --user (Linger=yes，开机自启)
   `LMCACHE_ENABLED=0` 并重启验证（新进程无 KV_TRANSFER_CONFIG，冒烟
   SMOKE_OK 通过）。复测证据：
   `20260910-routing-modes/evidence-20260912-retest-aligned-prefill-cache.json`。
+- **2026-09-12 配置实验 A（已否决并回退）**：单一变量试 `MAX_NUM_BATCHED_TOKENS`
+  4096→1600（对齐统一块大小 N，官方「最细粒度」档）+ 重连 LMCache + 清空 L1。
+  结果比 4096 更糟：cold 写入正确，但 **full_cache_repeat（整前缀回读）即串位**
+  （输出 JADE953×3）。证实 9/10 的 `model-env-aligned-failed.env` 结论可复现：
+  1600 档对连接器检索路径更不利。另获实证：**跨几何复用会直接产生乱码**——
+  清缓存前新几何引擎读到旧 4096 几何写入的条目，输出同样全乱；印证官方文档
+  「缓存条目不得跨注意力后端/块大小共享」。已回退 4096 + LMCACHE_ENABLED=0，
+  清 L1，重启冒烟通过。根因仍指向全注意力层 subpaged 视图编辑未生效
+  （`KV cache group edits applied` 仅出现 mamba-page-view:48），上游 0.5.4 与
+  0.5.5rc6 代码逐字相同，无可用修复。
 - TP4 生产 KV 池实测 **2,525,320 tokens**（util 0.93），是 TP2 930,611 的
   **2.71×**；196K 请求理论最大并发 **12.84×**。TP4 的首要收益是 KV 容量、
   单流吞吐和更高批处理上限；PCIe 无 NVLink 条件下并发扩展仍然是次线性的。
