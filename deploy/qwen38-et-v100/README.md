@@ -60,7 +60,7 @@ systemd --user (Linger=yes，开机自启)
 | TENSOR_PARALLEL_SIZE | 4 | GPU4-7 同属 NUMA1；TP4 实测通过 |
 | LMCACHE max-gpu-workers | 随 GPU_UUIDS 自动计数（当前 4） | 修复 TP2 硬编码只允许 2 rank 注册的问题 |
 | MAX_NUM_SEQS | 8 | 从 4 提升；解除并发调度上限，单流性能无回归 |
-| LMCACHE_ENABLED | 0 | 暂停 DRAM 回读；保留 vLLM GPU 前缀缓存 |
+| LMCACHE_ENABLED | 0 | 2026-09-12 复测复现部分前缀回读错误后再次关闭；保留 vLLM GPU 前缀缓存 |
 | 其余（backend/KV 根目录等） | 沿用旧生产 | — |
 
 ## 与旧部署的差异
@@ -82,6 +82,15 @@ systemd --user (Linger=yes，开机自启)
   `BASE_VLLM_VENV` 和 `SERVER_BIN` 均固定到原 `1cat-vllm-1.5.0-lmcache` 环境，确保
   只改变缓存连接方式，不切换推理版本。恢复 DRAM 需先修复并重测部分前缀，不能只切开关。
   详细证据与独立回滚快照位于 `/home/ai/.local/state/ai-router-acceptance/20260910-routing-modes`。
+- **2026-09-12 复测（决定性）**：升级核查确认 LMCache 无新版本（installed 0.5.4 ==
+  latest 0.5.4，包日期 2026-09-07）。复跑 `validate_aligned_prefill.py cache`：
+  cold 与 full_cache_repeat（cached 4800）均正确，partial_cache_shorter（cached
+  1600，恰一个 chunk）复现标记串位（输出 EMBER842/JADE953/EMBER842，
+  markers_correct=false），与 2026-09-10 失败形态一致。期间 vLLM/LMCache 日志
+  零报错——错误是静默语义错误，日志干净不能作为安全依据。已于当日回退
+  `LMCACHE_ENABLED=0` 并重启验证（新进程无 KV_TRANSFER_CONFIG，冒烟
+  SMOKE_OK 通过）。复测证据：
+  `20260910-routing-modes/evidence-20260912-retest-aligned-prefill-cache.json`。
 - TP4 生产 KV 池实测 **2,525,320 tokens**（util 0.93），是 TP2 930,611 的
   **2.71×**；196K 请求理论最大并发 **12.84×**。TP4 的首要收益是 KV 容量、
   单流吞吐和更高批处理上限；PCIe 无 NVLink 条件下并发扩展仍然是次线性的。
