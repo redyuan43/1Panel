@@ -122,6 +122,30 @@ systemd --user (Linger=yes，开机自启)
   下一步（未执行，待决策）：先做命中粒度判别实验（4096 档下 3-chunk 整前缀回读正确、
   1-chunk 部分回读串位 → 疑似「大命中安全、小命中不安全」），再用 `min_retrieve_tokens`
   圈定安全域；**在加日志确认真实张量 shape/spec kind 之前不开补丁**。
+- **2026-09-12 判别实验（安全域假设被证伪，已回退）**：受控开启 LMCache
+  （env 备份 `*.bak-safedomain-*`，POST /cache/clear 清 L1 后重启），用
+  `validate_safe_domain.py`（r0-r4 套件，探针几何由 render token_ids 逐 token
+  diff 精确计算）测命中粒度与正确性的关系：
+
+  | 套件 | 外部命中 | 判定 | 输出标记 |
+  |---|---|---|---|
+  | r0 cold / full_cache_repeat | 0 / **4800（3 chunk）** | ✅ 正确 | AZURE731/EMBER842/JADE953 |
+  | r1 probe1 | **1600（1 chunk）** | ❌ 串位 | EMBER842/JADE953/EMBER842 |
+  | r2 / r4 probe2（复跑） | **3200（2 chunk）** | ❌ 串位 | AZURE731/JADE953/JADE953 |
+  | r3 整前缀复读（r1/r2 污染后） | 4800（3 chunk） | ✅ 正确 | AZURE731/EMBER842/JADE953 |
+
+  **结论：安全域边界不在 1 vs 2 chunk，而在「部分命中 vs 整前缀命中」——
+  只要回读的是前缀真子集（1 或 2 chunk）即产生静默串位；只有整前缀
+  （3 chunk 全量）回读正确。** 且 r3 证明损伤不累积：部分回读乱掉之后，
+  后续整前缀回读依然正确（错误只发生在回读路径本身，缓存条目本体无损）。
+  另实证：`min_retrieve_tokens`（进程内模式专用，`vllm_v1_adapter.py:1457`）
+  在我们使用的 **MP 模式（LMCacheMPConnector）整条链路（connector /
+  multi_process_adapter / multiprocess daemon）零实现**（grep 0.5.4 全包
+  仅 3 处定义引用，无 MP 路径）——「配置圈安全域」这条路在 MP 模式下不可用，
+  欲圈安全域只能在 `get_num_new_matched_tokens` 打 fail-safe 跳过补丁
+  （失败方向是少取缓存而非取错，风险低于布局补丁，但仍需 1-2 天开发与回归）。
+  实验后已回退 LMCACHE_ENABLED=0、清 L1、重启，冒烟 SMOKE_OK（AZURE731）。
+  证据：`ai-router-acceptance/20260910-routing-modes/aligned-prefill-safedomain-{r0,r1,r2,r3,r4}.json`
 - TP4 生产 KV 池实测 **2,525,320 tokens**（util 0.93），是 TP2 930,611 的
   **2.71×**；196K 请求理论最大并发 **12.84×**。TP4 的首要收益是 KV 容量、
   单流吞吐和更高批处理上限；PCIe 无 NVLink 条件下并发扩展仍然是次线性的。
