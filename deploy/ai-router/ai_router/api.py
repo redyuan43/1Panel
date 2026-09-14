@@ -43,7 +43,7 @@ from .history import (
     SSEAccumulator,
     apply_stored_history,
     assistant_items_from_response,
-    deepseek_history_requires_migration,
+    history_contract_violations,
     history_lookup_identities,
     history_identities,
     normalize_history_for_provider,
@@ -1360,6 +1360,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     ),
                 )
                 capsule = capsule or pre_route_capsule
+                persistence_body = _history_body_for_persistence(
+                    current,
+                    effective_body,
+                    api_kind=api_kind,
+                    capsule=capsule,
+                )
                 compaction_source = (
                     "client"
                     if client_compacted
@@ -1550,7 +1556,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     # and must not become part of this reusable source.
                     await current.training.set_effective_context(
                         training_token,
-                        effective_body=routed_body,
+                        effective_body=persistence_body,
                     )
                 upstream = await _send_upstream(
                     current,
@@ -1720,7 +1726,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 await current.budget.commit(budget_reservation)
                 budget_reservation = None
                 if summary_scope is not None:
-                    summary_messages = extract_messages(routed_body, api_kind)
+                    summary_messages = extract_messages(
+                        persistence_body,
+                        api_kind,
+                    )
                     await summary_scope.remember(summary_messages, summary_scope.indices(summary_messages))
                 state = await _save_conversation(
                     current,
@@ -1750,7 +1759,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             conversation_id=conversation_id,
                             decision=decision,
                             state=state,
-                            body=routed_body,
+                            body=persistence_body,
                             api_kind=api_kind,
                             training_token=training_token,
                             started_at=request.state.started_at,
@@ -1781,10 +1790,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 payload = await upstream.aread()
                 await upstream.aclose()
                 raw_usage = usage_dict(payload)
+                private_payload = payload
                 if (
                     api_kind == "responses"
                     and decision.native_or_adapter == "adapter"
                 ):
+                    private_payload = chat_response_to_responses(
+                        payload,
+                        model=decision.endpoint.public_model,
+                        preserve_history_fields=True,
+                    )
                     payload = chat_response_to_responses(
                         payload,
                         model=decision.endpoint.public_model,
@@ -1801,11 +1816,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current.conversations,
                     state=state,
                     client_id=authenticated.policy.id,
-                    body=routed_body,
+                    body=persistence_body,
                     api_kind=api_kind,
                     assistant_items=private_history_items(
                         assistant_items_from_response(public_payload, api_kind),
-                        assistant_items_from_response(payload, api_kind),
+                        assistant_items_from_response(
+                            private_payload,
+                            api_kind,
+                        ),
                     ),
                 )
                 if current.training is not None:
@@ -2308,6 +2326,119 @@ async def _identity_stream(
     yield b"data: [DONE]\n\n"
 
 
+async def _candidate_history_token_evidence(
+    current: RouterRuntime,
+    *,
+    body: dict[str, Any],
+    api_kind: str,
+    prompt_tokens: int,
+    requested_model: str,
+    conversation: ConversationState | None,
+    identity: IdentityProfile,
+) -> dict[str, dict[str, Any]]:
+    counter = getattr(current, "endpoint_token_counter", None)
+    registry = getattr(current, "registry", None)
+    responders = getattr(registry, "responders", None)
+    if not callable(responders):
+        return {}
+    token_counter = getattr(current, "token_counter", None)
+    candidate_endpoints = tuple(
+        endpoint
+        for endpoint in responders()
+        if endpoint.enabled
+        and (
+            requested_model == "auto"
+            or endpoint in current.registry.by_public_model(requested_model)
+        )
+    )
+    projection_cache: dict[str, tuple[dict[str, Any], int]] = {}
+
+    def projected_candidate(endpoint: Endpoint) -> tuple[dict[str, Any], int]:
+        if not _history_migration_required(current, conversation, endpoint):
+            if (
+                api_kind == "responses"
+                and endpoint.capabilities.responses == "adapter"
+            ):
+                count_payload, count_api_kind = _target_count_payload(
+                    identity,
+                    body,
+                    api_kind,
+                    endpoint,
+                )
+                return body, (
+                    token_counter.count_request(
+                        count_payload,
+                        count_api_kind,
+                    )
+                    if token_counter is not None
+                    else prompt_tokens
+                )
+            return body, prompt_tokens
+        contract = endpoint.metadata.get("history_contract", {})
+        projection_key = json.dumps(
+            {
+                "contract": contract if isinstance(contract, dict) else {},
+                "responses_mode": endpoint.capabilities.responses,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        cached = projection_cache.get(projection_key)
+        if cached is not None:
+            return cached
+        projected = normalize_history_for_provider(
+            body,
+            api_kind,
+            endpoint,
+        )
+        count_payload, count_api_kind = _target_count_payload(
+            identity,
+            projected,
+            api_kind,
+            endpoint,
+        )
+        shared_tokens = (
+            token_counter.count_request(
+                count_payload,
+                count_api_kind,
+            )
+            if token_counter is not None
+            else prompt_tokens
+        )
+        projection_cache[projection_key] = (projected, shared_tokens)
+        return projected, shared_tokens
+
+    async def count_candidate(endpoint: Endpoint):
+        projected, shared_tokens = projected_candidate(endpoint)
+        count_payload, count_api_kind = _target_count_payload(
+            identity,
+            projected,
+            api_kind,
+            endpoint,
+        )
+        result = (
+            await counter.count(
+                endpoint,
+                count_payload,
+                count_api_kind,
+                shared_tokens,
+            )
+            if counter is not None
+            else {
+                "tokens": shared_tokens,
+                "source": "shared_estimate",
+                "exact": False,
+            }
+        )
+        return endpoint.id, result
+
+    return dict(
+        await asyncio.gather(
+            *(count_candidate(endpoint) for endpoint in candidate_endpoints)
+        )
+    )
+
+
 async def _acquire_route_capacity(
     current: RouterRuntime,
     *,
@@ -2359,18 +2490,15 @@ async def _acquire_route_capacity(
         trace.payload["routing_objective"] = {"mode": routing_options["mode"],
             "enabled": routing_options["enabled"], "source": routing_options["source"], "reasoning": reasoning,
             "single_output": body.get("n", 1) == 1}
-    count_evidence = {}
-    counter = getattr(current, "endpoint_token_counter", None)
-    if counter:
-        async def count_candidate(endpoint):
-            source = provider_family(current.registry.by_id(history_conversation.endpoint_id)) if history_conversation else None
-            normalized = normalize_history_for_provider(body, api_kind) if source and source != provider_family(endpoint) else body
-            result = await counter.count(endpoint, identity.inject(normalized, api_kind), api_kind, prompt_tokens)
-            return endpoint.id, result
-        counted = await asyncio.gather(*(count_candidate(e) for e in current.registry.responders()
-                      if e.enabled and e.metadata.get("token_counting", {}).get("enabled")
-                      and (requested_model == "auto" or e in current.registry.by_public_model(requested_model))))
-        count_evidence = dict(counted)
+    count_evidence = await _candidate_history_token_evidence(
+        current,
+        body=body,
+        api_kind=api_kind,
+        prompt_tokens=prompt_tokens,
+        requested_model=requested_model,
+        conversation=history_conversation,
+        identity=identity,
+    )
     if trace:
         trace.payload["token_counting"] = {"shared_estimate": prompt_tokens, "candidates": count_evidence}
     pool_wait_deadlines = {}
@@ -3182,6 +3310,22 @@ async def _send_upstream(
     )
     if responses_adapter:
         payload = responses_request_to_chat(payload)
+        payload = normalize_request(payload, "chat").body
+    upstream_api_kind = "chat" if responses_adapter else api_kind
+    send_contract_violations = history_contract_violations(
+        decision.endpoint,
+        payload,
+        upstream_api_kind,
+    )
+    if send_contract_violations:
+        if decision.trace:
+            decision.trace.payload["history_contract_violations"] = list(
+                send_contract_violations
+            )
+        raise HistoryMigrationRequiredError(
+            "the final upstream payload is missing history fields required "
+            "by the selected model"
+        )
     direct = bool(decision.upstream_api_base)
     extra_body_fields = []
     if decision.endpoint.metadata.get("thinking_via_extra_body"):
@@ -3216,7 +3360,6 @@ async def _send_upstream(
         if decision.upstream_api_base
         else f"{current.internal_base_url}/v1"
     )
-    upstream_api_kind = "chat" if responses_adapter else api_kind
     url = (
         f"{base_url}/"
         f"{'chat/completions' if upstream_api_kind == 'chat' else 'responses'}"
@@ -3474,6 +3617,15 @@ async def _maybe_compact_for_route(
     routing_options: dict[str, Any] | None = None,
     summary_scope=None,
 ) -> tuple[dict[str, Any], int, Any | None]:
+    count_evidence = await _candidate_history_token_evidence(
+        current,
+        body=body,
+        api_kind=api_kind,
+        prompt_tokens=prompt_tokens,
+        requested_model=requested_model,
+        conversation=conversation,
+        identity=identity,
+    )
     try:
         await current.policy.choose(
             requested_model=requested_model,
@@ -3488,6 +3640,10 @@ async def _maybe_compact_for_route(
             excluded_endpoint_ids=excluded_endpoints,
             routing_key=f"{request_id}:preflight",
             routing_options=routing_options,
+            candidate_prompt_tokens={
+                endpoint_id: value["tokens"]
+                for endpoint_id, value in count_evidence.items()
+            },
         )
         return body, prompt_tokens, None
     except (NoCompatibleModelError, NoEligibleModelError, RouteDirectiveIncompatibleError) as original:
@@ -3532,6 +3688,57 @@ async def _maybe_compact_for_route(
     return routed, compacted_prompt_tokens, capsule
 
 
+def _history_migration_required(
+    current: RouterRuntime,
+    conversation: ConversationState | None,
+    endpoint: Endpoint,
+) -> bool:
+    if conversation is None:
+        return False
+    previous_endpoint = current.registry.by_id(conversation.endpoint_id)
+    source_provider = (
+        conversation.provider_family
+        if conversation.provider_family
+        else provider_family(previous_endpoint)
+    )
+    target_provider = provider_family(endpoint)
+    return bool(
+        conversation.endpoint_id != endpoint.id
+        or (
+            source_provider
+            and target_provider
+            and source_provider != target_provider
+        )
+    )
+
+
+def _history_body_for_persistence(
+    current: RouterRuntime,
+    body: dict[str, Any],
+    *,
+    api_kind: str,
+    capsule: Any | None,
+) -> dict[str, Any]:
+    if capsule is None:
+        return json.loads(json.dumps(body))
+    messages = current.compactor.cipher.decrypt(capsule.encrypted_messages)
+    if not isinstance(messages, list):
+        raise ConversationStateConflictError()
+    return replace_messages(body, api_kind, messages)
+
+
+def _target_count_payload(
+    identity: IdentityProfile,
+    body: dict[str, Any],
+    api_kind: str,
+    endpoint: Endpoint,
+) -> tuple[dict[str, Any], str]:
+    payload = identity.inject(body, api_kind)
+    if api_kind == "responses" and endpoint.capabilities.responses == "adapter":
+        return responses_request_to_chat(payload), "chat"
+    return payload, api_kind
+
+
 async def _prepare_routed_body(
     current: RouterRuntime,
     body: dict[str, Any],
@@ -3553,61 +3760,91 @@ async def _prepare_routed_body(
         decision.deployment_safe_context_tokens
         or decision.endpoint.safe_context_tokens
     )
-    target_provider = provider_family(decision.endpoint)
-    previous_endpoint = (
-        current.registry.by_id(conversation.endpoint_id)
-        if conversation
-        else None
+    history_migration = _history_migration_required(
+        current,
+        conversation,
+        decision.endpoint,
     )
-    source_provider = (
-        conversation.provider_family
-        if conversation and conversation.provider_family
-        else provider_family(previous_endpoint)
+    def apply_target_tool_schema(value: dict[str, Any]) -> dict[str, Any]:
+        projected = json.loads(json.dumps(value))
+        if (
+            not decision.endpoint.cloud
+            and decision.endpoint.backend_type in {"llama_cpp", "ai_pool"}
+            and isinstance(projected.get("tools"), list)
+        ):
+            projected["tools"] = normalize_llama_tool_schemas(
+                projected["tools"],
+                api_kind,
+            )
+        return projected
+
+    def project_history(value: dict[str, Any]) -> dict[str, Any]:
+        projected = (
+            normalize_history_for_provider(
+                value,
+                api_kind,
+                decision.endpoint,
+            )
+            if history_migration
+            else json.loads(json.dumps(value))
+        )
+        return apply_target_tool_schema(projected)
+
+    routed = project_history(body)
+    contract_body = (
+        responses_request_to_chat(routed)
+        if (
+            api_kind == "responses"
+            and decision.endpoint.capabilities.responses == "adapter"
+        )
+        else routed
     )
-    cross_provider = bool(
-        source_provider
-        and target_provider
-        and source_provider != target_provider
+    contract_api_kind = (
+        "chat"
+        if (
+            api_kind == "responses"
+            and decision.endpoint.capabilities.responses == "adapter"
+        )
+        else api_kind
     )
-    # DeepSeek historically required reasoning_content on tool-call turns,
-    # but live probes (2026-09-11) show deepseek-v4-flash and deepseek-v4-pro
-    # both accept tool transactions with missing or empty reasoning_content.
-    # The preflight therefore only blocks when an endpoint explicitly declares
-    # the requirement via metadata (history_reasoning_required: true).
-    deepseek_incompatible = (
-        target_provider == "deepseek"
-        and deepseek_history_requires_migration(body, api_kind)
-        and bool(decision.endpoint.metadata.get("history_reasoning_required"))
+    contract_violations = history_contract_violations(
+        decision.endpoint,
+        contract_body,
+        contract_api_kind,
     )
-    routed = (
-        normalize_history_for_provider(body, api_kind)
-        if cross_provider
-        else json.loads(json.dumps(body))
-    )
-    if (
-        not decision.endpoint.cloud
-        and decision.endpoint.backend_type in {"llama_cpp", "ai_pool"}
-        and isinstance(routed.get("tools"), list)
-    ):
-        routed["tools"] = normalize_llama_tool_schemas(routed["tools"], api_kind)
     decision.history_mode = (
         "normalized"
-        if cross_provider
+        if history_migration
         else "native"
     )
-    if deepseek_incompatible and not allow_compaction:
+    if decision.trace and contract_violations:
+        decision.trace.payload["history_contract_violations"] = list(
+            contract_violations
+        )
+    if contract_violations and not allow_compaction:
         raise HistoryMigrationRequiredError(
-            "DeepSeek history is missing reasoning_content required for "
-            "the preceding tool transaction"
+            "the selected model requires history fields that are missing "
+            "from a preceding tool transaction"
         )
 
-    routed_prompt_tokens = current.token_counter.count_request(
-        identity.inject(routed, api_kind),
+    count_payload, count_api_kind = _target_count_payload(
+        identity,
+        routed,
         api_kind,
+        decision.endpoint,
+    )
+    routed_prompt_tokens = current.token_counter.count_request(
+        count_payload,
+        count_api_kind,
     )
     counter = getattr(current, "endpoint_token_counter", None)
     if counter:
-        counted = await counter.count(decision.endpoint, identity.inject(routed, api_kind), api_kind, routed_prompt_tokens)
+        counted = await counter.count(
+            decision.endpoint,
+            count_payload,
+            count_api_kind,
+            routed_prompt_tokens,
+        )
         routed_prompt_tokens = counted["tokens"]
         if decision.trace:
             decision.trace.payload.setdefault("token_counting", {})["selected"] = counted
@@ -3615,7 +3852,7 @@ async def _prepare_routed_body(
         routed_prompt_tokens + decision.output_reserve_tokens
         > target_context
     )
-    force_compaction = deepseek_incompatible
+    force_compaction = bool(contract_violations)
     capsule = None
     if needs_context_compaction and not allow_compaction:
         raise NoCompatibleModelError(
@@ -3632,10 +3869,10 @@ async def _prepare_routed_body(
             raise CompactionUnavailableError(
                 "explicitly requested compaction is disabled"
             )
-        capsule, routed, decision.prompt_tokens = (
+        capsule, compacted_history, compacted_prompt_tokens = (
             await _compact_body_for_target(
                 current,
-                routed,
+                apply_target_tool_schema(body),
                 api_kind=api_kind,
                 request_id=request_id,
                 target_context=target_context,
@@ -3644,6 +3881,40 @@ async def _prepare_routed_body(
                 **({"summary_scope": summary_scope} if summary_scope is not None else {}),
             )
         )
+        routed = project_history(compacted_history)
+        count_payload, count_api_kind = _target_count_payload(
+            identity,
+            routed,
+            api_kind,
+            decision.endpoint,
+        )
+        routed_prompt_tokens = (
+            current.token_counter.count_request(
+                count_payload,
+                count_api_kind,
+            )
+            if (
+                history_migration
+                or (
+                    api_kind == "responses"
+                    and decision.endpoint.capabilities.responses == "adapter"
+                )
+            )
+            else compacted_prompt_tokens
+        )
+        if counter:
+            counted = await counter.count(
+                decision.endpoint,
+                count_payload,
+                count_api_kind,
+                routed_prompt_tokens,
+            )
+            routed_prompt_tokens = counted["tokens"]
+            if decision.trace:
+                decision.trace.payload.setdefault("token_counting", {})[
+                    "selected_after_compaction"
+                ] = counted
+        decision.prompt_tokens = routed_prompt_tokens
         decision.history_mode = "capsule"
         if (
             decision.prompt_tokens + decision.output_reserve_tokens
@@ -3653,14 +3924,23 @@ async def _prepare_routed_body(
                 "the compacted request still exceeds the selected model "
                 "context"
             )
-        if deepseek_incompatible and deepseek_history_requires_migration(
-            routed,
-            api_kind,
-        ):
+        contract_body = (
+            responses_request_to_chat(routed)
+            if (
+                api_kind == "responses"
+                and decision.endpoint.capabilities.responses == "adapter"
+            )
+            else routed
+        )
+        remaining_violations = history_contract_violations(
+            decision.endpoint,
+            contract_body,
+            contract_api_kind,
+        )
+        if remaining_violations:
             raise HistoryMigrationRequiredError(
-                "DeepSeek history is still missing reasoning_content "
-                "required for the preceding tool transaction after "
-                "compaction"
+                "the selected model still requires history fields that "
+                "are missing after compaction"
             )
     else:
         decision.prompt_tokens = routed_prompt_tokens
@@ -4233,9 +4513,13 @@ async def _stream_response(
                 (steps[-1]["timestamp"] - decision.trace.payload["started_at"]) * 1000)
     usage_filter = UsageOnlyFilter() if upstream.extensions.get("internal_cache_usage") and api_kind == "chat" else None
     adapter_usage = {}
+    adapter_private_items: list[dict[str, Any]] = []
     def capture_adapter_usage(value):
         adapter_usage.clear()
         adapter_usage.update(value)
+    def capture_adapter_history(items):
+        adapter_private_items.clear()
+        adapter_private_items.extend(copy.deepcopy(items))
     sanitizer = IdentityStreamSanitizer(
         api_kind,
         identity,
@@ -4249,6 +4533,7 @@ async def _stream_response(
                 upstream,
                 model=decision.endpoint.public_model,
                 usage_observer=capture_adapter_usage,
+                history_observer=capture_adapter_history,
             )
             if (
                 api_kind == "responses"
@@ -4299,7 +4584,15 @@ async def _stream_response(
                         api_kind=api_kind,
                         assistant_items=private_history_items(
                             accumulator.assistant_items(),
-                            private_accumulator.assistant_items(),
+                            (
+                                adapter_private_items
+                                if (
+                                    api_kind == "responses"
+                                    and decision.native_or_adapter == "adapter"
+                                    and adapter_private_items
+                                )
+                                else private_accumulator.assistant_items()
+                            ),
                         ),
                     )
                     if accumulator.response_id and state:
@@ -4313,7 +4606,13 @@ async def _stream_response(
                                 training_token,
                                 status_code=status_code,
                                 assistant_items=(
-                                    private_accumulator.assistant_items()
+                                    adapter_private_items
+                                    if (
+                                        api_kind == "responses"
+                                        and decision.native_or_adapter == "adapter"
+                                        and adapter_private_items
+                                    )
+                                    else private_accumulator.assistant_items()
                                 ),
                                 usage=private_accumulator.usage,
                             )

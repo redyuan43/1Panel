@@ -49,7 +49,22 @@ def provider_family(endpoint: Endpoint | None) -> str:
 def normalize_history_for_provider(
     body: dict[str, Any],
     api_kind: str,
+    endpoint: Endpoint | None = None,
 ) -> dict[str, Any]:
+    contract = (
+        endpoint.metadata.get("history_contract", {})
+        if endpoint is not None
+        else {}
+    )
+    if not isinstance(contract, dict):
+        contract = {}
+    accepts_reasoning_content = bool(
+        contract.get("accepts_reasoning_content")
+        or contract.get("requires_reasoning_content")
+    )
+    accepts_reasoning_items = bool(contract.get("accepts_reasoning_items")) and (
+        endpoint is None or endpoint.capabilities.responses == "native"
+    )
     value = copy.deepcopy(body)
     if api_kind == "chat":
         messages = value.get("messages")
@@ -58,7 +73,12 @@ def normalize_history_for_provider(
                 normalized
                 for item in messages
                 if isinstance(item, dict)
-                if (normalized := _normalize_chat_item(item)) is not None
+                if (
+                    normalized := _normalize_chat_item(
+                        item,
+                        accepts_reasoning_content=accepts_reasoning_content,
+                    )
+                ) is not None
             ]
         return value
 
@@ -69,51 +89,63 @@ def normalize_history_for_provider(
             for item in items
             if isinstance(item, dict)
             if (
-                normalized := _normalize_responses_item(item)
+                normalized := _normalize_responses_item(
+                    item,
+                    accepts_reasoning_content=accepts_reasoning_content,
+                    accepts_reasoning_items=accepts_reasoning_items,
+                )
             )
             is not None
         ]
     return value
 
 
-def deepseek_history_requires_migration(
+def history_contract_violations(
+    endpoint: Endpoint,
     body: dict[str, Any],
     api_kind: str,
-) -> bool:
+) -> list[str]:
+    contract = endpoint.metadata.get("history_contract")
+    if not isinstance(contract, dict) or not contract.get(
+        "requires_reasoning_content"
+    ):
+        return []
+    violations: list[str] = []
     if api_kind == "chat":
         messages = body.get("messages")
         if not isinstance(messages, list):
-            return False
-        return any(
-            isinstance(item, dict)
-            and item.get("role") == "assistant"
-            and (
-                bool(item.get("tool_calls"))
-                or bool(item.get("codex_reasoning_items"))
-                or bool(item.get("codex_message_items"))
-            )
-            and not isinstance(item.get("reasoning_content"), str)
-            for item in messages
-        )
+            return violations
+        for item in messages:
+            if (
+                isinstance(item, dict)
+                and item.get("role") == "assistant"
+                and (
+                    bool(item.get("tool_calls"))
+                    or bool(item.get("codex_reasoning_items"))
+                    or bool(item.get("codex_message_items"))
+                )
+                and not isinstance(item.get("reasoning_content"), str)
+            ):
+                violations.append("missing_reasoning_content")
+        return list(dict.fromkeys(violations))
 
     items = body.get("input")
     if not isinstance(items, list):
-        return False
-    return any(
-        isinstance(item, dict)
-        and (
-            item.get("type") == "reasoning"
-            or (
-                item.get("type") == "function_call"
-                and not isinstance(item.get("reasoning_content"), str)
-            )
-        )
-        for item in items
-    )
+        return violations
+    for item in items:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and not isinstance(item.get("reasoning_content"), str)
+        ):
+            violations.append("missing_reasoning_content")
+    return list(dict.fromkeys(violations))
 
 
 def _normalize_chat_item(
     item: dict[str, Any],
+    *,
+    accepts_reasoning_content: bool = False,
 ) -> dict[str, Any] | None:
     role = str(item.get("role", "")).lower()
     if role not in {"system", "developer", "user", "assistant", "tool"}:
@@ -125,6 +157,8 @@ def _normalize_chat_item(
     }
     if role == "assistant":
         allowed.update({"tool_calls", "refusal", "audio"})
+        if accepts_reasoning_content:
+            allowed.add("reasoning_content")
     elif role == "tool":
         allowed.add("tool_call_id")
     result = {
@@ -169,11 +203,22 @@ def _normalize_chat_tool_call(
 
 def _normalize_responses_item(
     item: dict[str, Any],
+    *,
+    accepts_reasoning_content: bool = False,
+    accepts_reasoning_items: bool = False,
 ) -> dict[str, Any] | None:
     item_type = str(item.get("type", ""))
     if item_type == "reasoning":
-        return None
-    if item_type == "function_call":
+        if not accepts_reasoning_items:
+            return None
+        allowed = {
+            "type",
+            "id",
+            "encrypted_content",
+            "summary",
+            "status",
+        }
+    elif item_type == "function_call":
         allowed = {
             "type",
             "call_id",
@@ -181,6 +226,8 @@ def _normalize_responses_item(
             "arguments",
             "status",
         }
+        if accepts_reasoning_content:
+            allowed.add("reasoning_content")
     elif item_type == "function_call_output":
         allowed = {
             "type",
@@ -196,6 +243,8 @@ def _normalize_responses_item(
             "status",
             "name",
         }
+        if accepts_reasoning_content:
+            allowed.add("reasoning_content")
     else:
         return None
     result = {
@@ -350,9 +399,16 @@ def _canonical_history_items(
         if not isinstance(item, dict):
             continue
         if "role" in item:
-            normalized = _normalize_chat_item(item)
+            normalized = _normalize_chat_item(
+                item,
+                accepts_reasoning_content=True,
+            )
         else:
-            normalized = _normalize_responses_item(item)
+            normalized = _normalize_responses_item(
+                item,
+                accepts_reasoning_content=True,
+                accepts_reasoning_items=True,
+            )
         if normalized is None:
             continue
         normalized = canonical_message_for_hash(normalized)
@@ -633,10 +689,7 @@ def assistant_items_from_response(
                     and item.get("role") == "assistant"
                 )
                 or item.get("type") == "function_call"
-                or (
-                    item.get("type") == "reasoning"
-                    and item.get("encrypted_content")
-                )
+                or item.get("type") == "reasoning"
             )
         ]
         if items:
@@ -658,6 +711,7 @@ class SSEAccumulator:
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
         self._buffer = ""
         self._text: list[str] = []
+        self._chat_reasoning_content: list[str] = []
         self._chat_tool_calls: dict[int, dict[str, Any]] = {}
         self._chat_reasoning_items: list[dict[str, Any]] = []
         self._chat_message_items: list[dict[str, Any]] = []
@@ -679,7 +733,15 @@ class SSEAccumulator:
 
     def assistant_items(self) -> list[dict[str, Any]]:
         if self.api_kind == "chat":
-            if not self._text and not self._chat_tool_calls:
+            if not any(
+                (
+                    self._text,
+                    self._chat_reasoning_content,
+                    self._chat_tool_calls,
+                    self._chat_reasoning_items,
+                    self._chat_message_items,
+                )
+            ):
                 return []
             message: dict[str, Any] = {
                 "role": "assistant",
@@ -698,6 +760,10 @@ class SSEAccumulator:
                 message["codex_message_items"] = copy.deepcopy(
                     self._chat_message_items
                 )
+            if self._chat_reasoning_content:
+                message["reasoning_content"] = "".join(
+                    self._chat_reasoning_content
+                )
             return [message]
 
         source = (
@@ -714,10 +780,7 @@ class SSEAccumulator:
                     and item.get("role") == "assistant"
                 )
                 or item.get("type") == "function_call"
-                or (
-                    item.get("type") == "reasoning"
-                    and item.get("encrypted_content")
-                )
+                or item.get("type") == "reasoning"
             )
         ]
         if self._text and not any(
@@ -781,6 +844,10 @@ class SSEAccumulator:
             if isinstance(delta, dict):
                 if isinstance(delta.get("content"), str):
                     self._text.append(delta["content"])
+                if isinstance(delta.get("reasoning_content"), str):
+                    self._chat_reasoning_content.append(
+                        delta["reasoning_content"]
+                    )
                 self._consume_chat_tool_calls(delta.get("tool_calls"))
                 if isinstance(
                     delta.get("codex_reasoning_items"),

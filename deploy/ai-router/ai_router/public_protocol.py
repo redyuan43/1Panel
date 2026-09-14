@@ -116,4 +116,8 @@ def private_history_items(public: list[dict], original: list[dict]) -> list[dict
             for key in ("codex_reasoning_items", "codex_message_items"):
                 if key in raw:
                     visible[key] = copy.deepcopy(raw[key])
+        if visible.get("type") == raw.get("type") and "reasoning_content" in raw:
+            visible["reasoning_content"] = copy.deepcopy(
+                raw["reasoning_content"]
+            )
     return result

@@ -5,6 +5,7 @@ import json
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -13,6 +14,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from ai_router.api import (
+    _history_body_for_persistence,
     _maybe_compact_for_route,
     _prepare_routed_body,
     create_app,
@@ -24,8 +26,9 @@ from ai_router.errors import (
     NoEligibleModelError,
 )
 from ai_router.history import (
-    deepseek_history_requires_migration,
+    history_contract_violations,
     normalize_history_for_provider,
+    persist_history,
 )
 from ai_router.identity import IdentityProfile
 from ai_router.policy import RoutingPolicy
@@ -826,7 +829,7 @@ def test_v2_returns_503_for_mixed_incompatible_and_temporary_rejections(
     assert raised.value.status_code == 503
 
 
-def test_deepseek_tool_history_is_rejected_before_upstream(
+def test_required_tool_history_is_rejected_before_upstream(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -835,7 +838,9 @@ def test_deepseek_tool_history_is_rejected_before_upstream(
         registry.by_id("cloud-deepseek-v4-flash"),
         metadata={
             **registry.by_id("cloud-deepseek-v4-flash").metadata,
-            "history_reasoning_required": True,
+            "history_contract": {
+                "requires_reasoning_content": True,
+            },
         },
     )
     assert endpoint is not None
@@ -891,8 +896,10 @@ def test_deepseek_tool_history_is_rejected_before_upstream(
             {"role": "user", "content": "continue"},
         ]
     }
-    assert deepseek_history_requires_migration(body, "chat")
-    normalized = normalize_history_for_provider(body, "chat")
+    assert history_contract_violations(endpoint, body, "chat") == [
+        "missing_reasoning_content"
+    ]
+    normalized = normalize_history_for_provider(body, "chat", endpoint)
     assert "codex_reasoning_items" not in normalized["messages"][0]
     assert normalized["messages"][0]["tool_calls"][0]["id"] == "call_1"
     decision = RouteDecision(
@@ -922,7 +929,7 @@ def test_deepseek_tool_history_is_rejected_before_upstream(
     run(runtime.close())
 
 
-def test_deepseek_tool_history_still_rejected_after_compaction(
+def test_required_tool_history_still_rejected_after_compaction(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -931,7 +938,9 @@ def test_deepseek_tool_history_still_rejected_after_compaction(
         registry.by_id("cloud-deepseek-v4-flash"),
         metadata={
             **registry.by_id("cloud-deepseek-v4-flash").metadata,
-            "history_reasoning_required": True,
+            "history_contract": {
+                "requires_reasoning_content": True,
+            },
         },
     )
     assert endpoint is not None
@@ -987,7 +996,9 @@ def test_deepseek_tool_history_still_rejected_after_compaction(
             {"role": "user", "content": "continue"},
         ]
     }
-    assert deepseek_history_requires_migration(body, "chat")
+    assert history_contract_violations(endpoint, body, "chat") == [
+        "missing_reasoning_content"
+    ]
 
     async def compact_without_fixing_reasoning_content(
         _current,
@@ -1042,7 +1053,7 @@ def test_deepseek_tool_history_passes_without_reasoning_flag(
     # Live probes (2026-09-11) show deepseek-v4-flash and deepseek-v4-pro
     # accept tool transactions with missing or empty reasoning_content, so
     # the preflight must not block migration unless the endpoint explicitly
-    # declares history_reasoning_required.
+    # declares a matching history contract.
     registry = v2_registry(tmp_path)
     endpoint = registry.by_id("cloud-deepseek-v4-flash")
     assert endpoint is not None
@@ -1098,7 +1109,7 @@ def test_deepseek_tool_history_passes_without_reasoning_flag(
             {"role": "user", "content": "continue"},
         ]
     }
-    assert deepseek_history_requires_migration(body, "chat")
+    assert history_contract_violations(endpoint, body, "chat") == []
     decision = RouteDecision(
         endpoint=endpoint,
         requested_model="auto",
@@ -1124,6 +1135,157 @@ def test_deepseek_tool_history_passes_without_reasoning_flag(
     )
     assert capsule is None
     assert routed["messages"][0]["tool_calls"][0]["id"] == "call_1"
+    run(runtime.close())
+
+
+def test_same_provider_endpoint_migration_uses_target_history_contract(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    registry = v2_registry(tmp_path)
+    target = registry.by_id("cloud-deepseek-v4-flash")
+    source = registry.by_id("cloud-deepseek-v4-pro")
+    assert target is not None
+    assert source is not None
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(tmp_path / "route-traces.sqlite3"),
+    )
+    runtime = build_runtime(
+        settings=v2_settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    conversation = ConversationState(
+        conversation_id="same-provider-migration",
+        public_model=source.public_model,
+        endpoint_id=source.id,
+        tier_rank=source.tier_rank,
+        task="general",
+        last_seen=time.time(),
+        provider_family="deepseek",
+    )
+    body = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "private chain",
+                "codex_reasoning_items": [{"encrypted_content": "cipher"}],
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": "{}"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": "done"},
+        ]
+    }
+
+    def route_decision(endpoint: Endpoint) -> RouteDecision:
+        return RouteDecision(
+            endpoint=endpoint,
+            requested_model="auto",
+            task="general",
+            prompt_tokens=100,
+            output_reserve_tokens=16,
+            reason="migration",
+            affinity="migrated",
+            score=1,
+        )
+
+    stripped_decision = route_decision(target)
+    stripped, _ = run(
+        _prepare_routed_body(
+            runtime,
+            body,
+            api_kind="chat",
+            decision=stripped_decision,
+            request_id="same-provider-strip",
+            conversation=conversation,
+        )
+    )
+    assert stripped_decision.history_mode == "normalized"
+    assert "reasoning_content" not in stripped["messages"][0]
+    assert "codex_reasoning_items" not in stripped["messages"][0]
+    persistence_body = _history_body_for_persistence(
+        runtime,
+        body,
+        api_kind="chat",
+        capsule=None,
+    )
+    assert persistence_body["messages"][0]["reasoning_content"] == (
+        "private chain"
+    )
+    state = ConversationState(
+        conversation_id="persisted-migration",
+        public_model=target.public_model,
+        endpoint_id=target.id,
+        tier_rank=target.tier_rank,
+        task="general",
+        last_seen=time.time(),
+    )
+    run(
+        persist_history(
+            runtime.compactor,
+            runtime.conversations,
+            state=state,
+            client_id="test-client",
+            body=persistence_body,
+            api_kind="chat",
+            assistant_items=[{"role": "assistant", "content": "next"}],
+        )
+    )
+    persisted = runtime.compactor.cipher.decrypt(state.encrypted_capsule)
+    assert persisted[0]["reasoning_content"] == "private chain"
+    assert persisted[0]["codex_reasoning_items"][0][
+        "encrypted_content"
+    ] == "cipher"
+    compacted_messages = [
+        {"role": "user", "content": "authorized compacted summary"}
+    ]
+    compacted_body = _history_body_for_persistence(
+        runtime,
+        body,
+        api_kind="chat",
+        capsule=SimpleNamespace(
+            encrypted_messages=runtime.compactor.cipher.encrypt(
+                compacted_messages
+            )
+        ),
+    )
+    assert compacted_body["messages"] == compacted_messages
+
+    accepting_target = replace(
+        target,
+        metadata={
+            **target.metadata,
+            "history_contract": {"accepts_reasoning_content": True},
+        },
+    )
+    accepted_decision = route_decision(accepting_target)
+    accepted, _ = run(
+        _prepare_routed_body(
+            runtime,
+            body,
+            api_kind="chat",
+            decision=accepted_decision,
+            request_id="same-provider-accept",
+            conversation=conversation,
+        )
+    )
+    assert accepted_decision.history_mode == "normalized"
+    assert accepted["messages"][0]["reasoning_content"] == "private chain"
+    assert "codex_reasoning_items" not in accepted["messages"][0]
+    assert body["messages"][0]["codex_reasoning_items"][0][
+        "encrypted_content"
+    ] == "cipher"
     run(runtime.close())
 
 

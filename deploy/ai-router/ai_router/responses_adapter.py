@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
@@ -84,11 +85,16 @@ def chat_response_to_responses(
     payload: bytes,
     *,
     model: str,
+    preserve_history_fields: bool = False,
 ) -> bytes:
     value = json.loads(payload)
     if not isinstance(value, dict):
         raise ValueError("chat completion response must be an object")
-    response = _chat_value_to_response(value, model=model)
+    response = _chat_value_to_response(
+        value,
+        model=model,
+        preserve_history_fields=preserve_history_fields,
+    )
     return json.dumps(
         response,
         ensure_ascii=False,
@@ -101,6 +107,7 @@ async def chat_stream_to_responses(
     *,
     model: str,
     usage_observer=None,
+    history_observer=None,
 ) -> AsyncIterator[bytes]:
     response_id = f"resp_{uuid4().hex}"
     message_id = f"msg_{uuid4().hex}"
@@ -328,6 +335,22 @@ async def chat_stream_to_responses(
     response["usage"] = _chat_usage_to_responses(usage)
     if reasoning_parts:
         response["reasoning"] = {"summary": "".join(reasoning_parts)}
+    if history_observer is not None:
+        private_output = copy.deepcopy(output)
+        reasoning_content = "".join(reasoning_parts)
+        if reasoning_parts:
+            tool_item = next(
+                (
+                    item
+                    for item in private_output
+                    if item.get("type") == "function_call"
+                ),
+                None,
+            )
+            (tool_item or private_output[0])[
+                "reasoning_content"
+            ] = reasoning_content
+        history_observer(private_output)
     if incomplete_reason:
         response["incomplete_details"] = {"reason": incomplete_reason}
     terminal_event = (
@@ -352,6 +375,23 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
 
     result: list[dict[str, Any]] = []
     pending_calls: list[dict[str, Any]] = []
+    pending_reasoning: list[str] = []
+
+    def flush_pending_calls() -> None:
+        nonlocal pending_calls, pending_reasoning
+        if not pending_calls:
+            return
+        message: dict[str, Any] = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": pending_calls,
+        }
+        if pending_reasoning:
+            message["reasoning_content"] = "\n".join(pending_reasoning)
+        result.append(message)
+        pending_calls = []
+        pending_reasoning = []
+
     for item in value:
         if not isinstance(item, dict):
             continue
@@ -371,16 +411,18 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
                     },
                 }
             )
+            reasoning_content = item.get("reasoning_content")
+            if (
+                isinstance(reasoning_content, str)
+                and reasoning_content not in pending_reasoning
+            ):
+                pending_reasoning.append(reasoning_content)
             continue
-        if pending_calls:
-            result.append(
-                {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": pending_calls,
-                }
-            )
-            pending_calls = []
+        if item_type == "reasoning":
+            # Native Responses reasoning items have no lossless Chat wire
+            # representation. They remain in the Router's internal history.
+            continue
+        flush_pending_calls()
         if item_type == "function_call_output":
             result.append(
                 {
@@ -393,22 +435,15 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
             )
             continue
         role = str(item.get("role") or "user")
-        result.append(
-            {
-                "role": role,
-                "content": _responses_content_to_chat(
-                    item.get("content")
-                ),
-            }
-        )
-    if pending_calls:
-        result.append(
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": pending_calls,
-            }
-        )
+        message = {
+            "role": role,
+            "content": _responses_content_to_chat(item.get("content")),
+        }
+        reasoning_content = item.get("reasoning_content")
+        if isinstance(reasoning_content, str):
+            message["reasoning_content"] = reasoning_content
+        result.append(message)
+    flush_pending_calls()
     return result
 
 
@@ -486,6 +521,7 @@ def _chat_value_to_response(
     value: dict[str, Any],
     *,
     model: str,
+    preserve_history_fields: bool = False,
 ) -> dict[str, Any]:
     choices = value.get("choices")
     choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -504,17 +540,29 @@ def _chat_value_to_response(
     )
     status, incomplete_reason = _response_completion(finish_reason)
     text = _text(message.get("content"))
-    output: list[dict[str, Any]] = [
-        _message_item(f"msg_{uuid4().hex}", text, status=status)
+    reasoning = message.get("reasoning_content")
+    message_item = _message_item(
+        f"msg_{uuid4().hex}",
+        text,
+        status=status,
+    )
+    tool_calls = [
+        call
+        for call in message.get("tool_calls") or []
+        if isinstance(call, dict)
     ]
-    for call in message.get("tool_calls") or []:
-        if not isinstance(call, dict):
-            continue
+    if (
+        preserve_history_fields
+        and isinstance(reasoning, str)
+        and not tool_calls
+    ):
+        message_item["reasoning_content"] = reasoning
+    output: list[dict[str, Any]] = [message_item]
+    for call_index, call in enumerate(tool_calls):
         function = call.get("function")
         if not isinstance(function, dict):
             continue
-        output.append(
-            {
+        function_item = {
                 "id": f"fc_{uuid4().hex}",
                 "type": "function_call",
                 "status": status,
@@ -524,7 +572,13 @@ def _chat_value_to_response(
                 "name": str(function.get("name", "")),
                 "arguments": _arguments(function.get("arguments")),
             }
-        )
+        if (
+            preserve_history_fields
+            and isinstance(reasoning, str)
+            and call_index == 0
+        ):
+            function_item["reasoning_content"] = reasoning
+        output.append(function_item)
     response = _response_shell(
         response_id=response_id,
         model=model,
@@ -534,7 +588,6 @@ def _chat_value_to_response(
     response["output"] = output
     response["output_text"] = text
     response["usage"] = _chat_usage_to_responses(value.get("usage"))
-    reasoning = message.get("reasoning_content")
     if isinstance(reasoning, str) and reasoning:
         response["reasoning"] = {"summary": reasoning}
     if incomplete_reason:

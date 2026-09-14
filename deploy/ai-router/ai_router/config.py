@@ -325,6 +325,7 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
     metadata_value = value.get("metadata", {}) or {}
     if not isinstance(metadata_value, dict):
         raise ValueError("endpoint metadata must be an object")
+    validate_routing_declarations(metadata_value)
     read_timeout = metadata_value.get("upstream_read_timeout_seconds")
     if read_timeout is not None and not 1 <= float(read_timeout) <= 3600:
         raise ValueError("endpoint upstream_read_timeout_seconds must be between 1 and 3600")
@@ -429,6 +430,31 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
         quality={str(key): float(score) for key, score in (value.get("quality", {}) or {}).items()},
         metadata=copy.deepcopy(metadata_value),
     )
+
+
+HISTORY_CONTRACT_KEYS = {
+    "accepts_reasoning_content",
+    "accepts_reasoning_items",
+    "requires_reasoning_content",
+}
+
+
+def validate_routing_declarations(metadata: dict[str, Any]) -> None:
+    contract = metadata.get("history_contract")
+    if contract is None:
+        return
+    if not isinstance(contract, dict):
+        raise ValueError("endpoint metadata history_contract must be an object")
+    unknown = sorted(set(contract) - HISTORY_CONTRACT_KEYS)
+    if unknown:
+        raise ValueError(
+            "endpoint metadata history_contract contains unsupported fields: "
+            + ", ".join(unknown)
+        )
+    if not all(isinstance(value, bool) for value in contract.values()):
+        raise ValueError(
+            "endpoint metadata history_contract values must be booleans"
+        )
 
 
 def deployment_profile_from_dict(

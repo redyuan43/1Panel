@@ -105,15 +105,16 @@ X-1Panel-Context-Compacted: true
 该标记表示压缩已经发生，不是压缩权限。Router 会跳过旧亲和和旧存储历史并开启
 新的缓存时期；显式会话 ID 保持不变，没有显式 ID 时生成新的推断 ID。
 
-跨 Provider 时会保留可见内容、工具调用和工具结果，同时删除 Provider 私有
-ID、加密推理项和隐藏推理字段。
+跨端点时会保留可见内容、工具调用和工具结果，并按照目标端点声明的
+`metadata.history_contract` 转换推理字段。默认删除目标未声明支持的 Provider
+私有 ID、加密推理项和隐藏推理字段；Router 内部存储仍保留完整历史。
 
 DeepSeek 工具历史缺少 `reasoning_content` 的预检默认**不再拦截**：
 2026-09-11 的真实上游探测显示 `deepseek-v4-flash` 与 `deepseek-v4-pro`
 对缺失、空字符串和非空 `reasoning_content` 的工具事务均返回 200，
 原约束已失效。只有端点元数据显式声明
-`history_reasoning_required: true` 时，Auto 才会先跳过该端点，全部候选
-均不兼容时返回：
+`history_contract.requires_reasoning_content: true` 时，Auto 才会先跳过该端点，
+全部候选均不兼容时返回：
 
 ```text
 409 history_migration_required
