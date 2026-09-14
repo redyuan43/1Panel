@@ -3,6 +3,9 @@ import { ResPage } from '@/api/interface';
 import { Firewall } from '@/api/interface/firewall';
 import { TimeoutEnum } from '@/enums/http-enum';
 
+export const updateFirewallPortWhitelist = (value: string) =>
+    http.post<Firewall.FilterChainOperationResult>('/hosts/firewall/settings/whitelist', { value });
+
 export const loadFireBaseInfo = (tab: string) =>
     http.post<Firewall.FirewallBase>('/hosts/firewall/base', { name: tab }, TimeoutEnum.T_40S);
 
@@ -16,7 +19,9 @@ export const operateFire = (operation: string, withDockerRestart: boolean) =>
     http.post('/hosts/firewall/operate', { operation, withDockerRestart }, TimeoutEnum.T_10M);
 
 export const operateForwardRule = (request: { rules: Firewall.RuleForward[]; forceDelete?: boolean }) =>
-    http.post('/hosts/firewall/forward/operate', request, TimeoutEnum.T_40S);
+    http.postWithConfig<Firewall.FilterChainOperationResult>('/hosts/firewall/forward/operate', request, {
+        skipErrorMessage: true,
+    });
 
 export const enableForwarding = (taskID?: string) =>
     http.post<Firewall.FilterChainOperationResult>(
@@ -44,8 +49,8 @@ export const loadFirewallNativeDetail = (request: Firewall.NativeDetailRequest) 
     return http.post<string>('/hosts/firewall/rules/native/detail', request, TimeoutEnum.T_40S);
 };
 
-export const checkFirewallRules = (request: Firewall.CheckRequest) => {
-    return http.post<Firewall.CheckResponse>('/hosts/firewall/rules/check', request, TimeoutEnum.T_3M);
+export const adoptFirewallRule = (request: Firewall.AdoptRequest) => {
+    return http.post('/hosts/firewall/rules/adopt', request, TimeoutEnum.T_3M);
 };
 
 export const createFirewallRules = (request: Firewall.CreateRequest) => {
@@ -72,25 +77,11 @@ export const updateFirewallRule = (uuid: string, request: Firewall.UpdateRequest
     return http.post('/hosts/firewall/rules/update', { ...request, uuid }, TimeoutEnum.T_60S);
 };
 
-export const reorderFirewallRule = (uuid: string, request: Firewall.ReorderRequest) => {
-    return http.post('/hosts/firewall/rules/reorder', { ...request, uuid }, TimeoutEnum.T_60S);
-};
-
 export const loadDockerPortGuard = () =>
     http.get<Firewall.DockerGuardList>('/hosts/firewall/docker/ports', {}, { timeout: TimeoutEnum.T_40S });
 
 export const loadDockerPublishedPorts = () =>
     http.get<Firewall.DockerGuardContainer[]>('/hosts/firewall/docker/endpoints', {}, { timeout: TimeoutEnum.T_40S });
-
-export const syncDockerPortGuard = () =>
-    http.postWithConfig(
-        '/hosts/firewall/docker/sync',
-        {},
-        {
-            timeout: TimeoutEnum.T_60S,
-            skipErrorMessage: true,
-        },
-    );
 
 export const operateDockerPortGuard = (operation: 'initialize' | 'bind' | 'unbind', taskID?: string) =>
     http.postWithConfig<Firewall.FilterChainOperationResult>(
@@ -103,13 +94,12 @@ export const operateDockerPortGuard = (operation: 'initialize' | 'bind' | 'unbin
     );
 
 export const upsertDockerPortGuardPolicies = (request: Firewall.DockerGuardPolicyBatch) =>
-    http.postWithConfig('/hosts/firewall/docker/policies/batch', request, {
-        timeout: TimeoutEnum.T_60S,
+    http.postWithConfig<Firewall.FilterChainOperationResult>('/hosts/firewall/docker/policies/batch', request, {
         skipErrorMessage: true,
     });
 
 export const deleteDockerPortGuardPolicies = (request: Firewall.DockerGuardPolicyBatchDelete) =>
-    http.postWithConfig('/hosts/firewall/docker/policies/delete/batch', request, {
+    http.postWithConfig<Firewall.FilterChainOperationResult>('/hosts/firewall/docker/policies/delete/batch', request, {
         timeout: TimeoutEnum.T_60S,
         skipErrorMessage: true,
     });

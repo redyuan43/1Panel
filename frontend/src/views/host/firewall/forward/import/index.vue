@@ -1,33 +1,48 @@
 <template>
-    <DialogPro v-model="visible" :title="$t('commons.button.import')" size="large">
+    <DialogPro v-model="visible" :title="$t('commons.button.import')" size="w-70">
         <div>
             <el-alert :closable="false" show-icon type="info">
                 <template #default>
                     <div>{{ $t('commons.msg.importHelper') }}</div>
                 </template>
             </el-alert>
-            <el-upload
-                action="#"
-                :auto-upload="false"
-                ref="uploadRef"
-                class="float-left mt-2"
-                :show-file-list="false"
-                :limit="1"
-                accept=".json"
-                :on-change="fileOnChange"
-                :on-exceed="handleExceed"
-                v-model:file-list="uploaderFiles"
-            >
-                <el-button class="float-left" type="primary">{{ $t('commons.button.upload') }}</el-button>
-            </el-upload>
+            <el-alert v-if="submitError" class="mb-3" type="error" :closable="false" :title="submitError" />
+            <div class="import-file-bar mt-3">
+                <el-upload
+                    ref="uploadRef"
+                    v-model:file-list="uploaderFiles"
+                    action="#"
+                    :auto-upload="false"
+                    :show-file-list="false"
+                    :limit="1"
+                    accept=".json"
+                    :on-change="fileOnChange"
+                    :on-exceed="handleExceed"
+                >
+                    <el-button type="primary" icon="Upload">{{ $t('commons.button.upload') }}</el-button>
+                </el-upload>
+                <div v-if="uploaderFiles.length" class="import-file-info">
+                    <el-icon><Document /></el-icon>
+                    <span class="import-file-name">{{ uploaderFiles[0].name }}</span>
+                </div>
+                <el-text v-else type="info">.json</el-text>
+            </div>
 
-            <el-card class="mt-2 w-full" v-loading="loading">
+            <el-card class="mt-3 w-full" shadow="never" v-loading="loading">
+                <template #header>
+                    <div class="import-preview-header">
+                        <span>{{ $t('commons.button.preview') }}</span>
+                        <el-tag v-if="displayData.length" type="info" effect="plain">
+                            {{ $t('commons.table.total', [displayData.length]) }}
+                        </el-tag>
+                    </div>
+                </template>
                 <ComplexTable
                     :pagination-config="paginationConfig"
                     @search="search"
                     v-model:selects="selects"
                     :data="pageData"
-                    :height="440"
+                    :height="300"
                 >
                     <el-table-column type="selection" fix />
                     <el-table-column label="IP" :min-width="60" prop="family">
@@ -68,7 +83,7 @@
                 <el-button @click="visible = false">
                     {{ $t('commons.button.cancel') }}
                 </el-button>
-                <el-button type="primary" :disabled="selects.length === 0" @click="onImport">
+                <el-button type="primary" :loading="loading" :disabled="selects.length === 0" @click="onImport">
                     {{ $t('commons.button.import') }}
                 </el-button>
             </span>
@@ -77,10 +92,12 @@
 </template>
 
 <script lang="ts" setup>
-import { ref } from 'vue';
-import { genFileId, UploadFile, UploadFiles, UploadProps, UploadRawFile } from 'element-plus';
-import { MsgError, MsgSuccess } from '@/utils/message';
+import { reactive, ref } from 'vue';
+import { genFileId, type UploadFile, type UploadFiles, type UploadProps, type UploadRawFile } from 'element-plus';
+import { MsgError } from '@/utils/message';
 import i18n from '@/lang';
+import { getErrorMessage } from '@/utils/misc';
+import { isAxiosError } from 'axios';
 import { getNetworkOptions } from '@/api/modules/host';
 import { operateForwardRule, searchForwardRule } from '@/api/modules/firewall';
 import { Firewall } from '@/api/interface/firewall';
@@ -90,11 +107,13 @@ import {
     isValidPortRange,
     normalizePortRange,
 } from '@/views/host/firewall/utils/validation';
+import { Document } from '@element-plus/icons-vue';
 
-const emit = defineEmits<{ (e: 'search'): void }>();
+const emit = defineEmits<{ (e: 'created', taskID: string): void }>();
 
 const visible = ref(false);
 const loading = ref(false);
+const submitError = ref('');
 const selects = ref<any>([]);
 const displayData = ref<any>([]);
 const currentRules = ref<Firewall.RuleInfo[]>([]);
@@ -102,8 +121,8 @@ const currentFireName = ref('');
 const availableInterfaces = ref<string[]>([]);
 
 const uploadRef = ref();
-const uploaderFiles = ref();
-const pageData = ref([]);
+const uploaderFiles = ref<UploadFile[]>([]);
+const pageData = ref<any[]>([]);
 const paginationConfig = reactive({
     currentPage: 1,
     pageSize: 10,
@@ -111,10 +130,19 @@ const paginationConfig = reactive({
 });
 
 const acceptParams = async (fireName: string): Promise<void> => {
-    visible.value = true;
+    loading.value = false;
+    submitError.value = '';
     displayData.value = [];
     selects.value = [];
+    currentRules.value = [];
+    availableInterfaces.value = [];
+    uploaderFiles.value = [];
+    pageData.value = [];
+    paginationConfig.currentPage = 1;
+    paginationConfig.total = 0;
+    uploadRef.value?.clearFiles();
     currentFireName.value = fireName;
+    visible.value = true;
     loadCurrentData(fireName);
 };
 
@@ -139,8 +167,14 @@ const search = () => {
 };
 
 const fileOnChange = (_uploadFile: UploadFile, uploadFiles: UploadFiles) => {
+    if (!_uploadFile.raw) return;
     loading.value = true;
+    submitError.value = '';
     displayData.value = [];
+    pageData.value = [];
+    selects.value = [];
+    paginationConfig.currentPage = 1;
+    paginationConfig.total = 0;
     uploaderFiles.value = uploadFiles;
 
     const reader = new FileReader();
@@ -214,31 +248,28 @@ const checkDataFormat = (item: any): boolean => {
 
 const compareRules = (importedRules: any[]) => {
     const newRules: any[] = [];
-    const conflictRules: any[] = [];
     const duplicateRules: any[] = [];
 
+    const ruleKey = (rule: Firewall.RuleForward | Firewall.RuleInfo) =>
+        `${rule.family}:${rule.protocol}:${rule.port}:${rule.targetIP}:${rule.targetPort}:${rule.interface || ''}`;
+    const existingKeys = new Set(currentRules.value.map(ruleKey));
     for (const importedRule of importedRules) {
-        const key = `${importedRule.family}:${importedRule.protocol}:${importedRule.port}:${importedRule.targetIP}:${importedRule.targetPort}:${importedRule.interface || ''}`;
-
-        const existingRule = currentRules.value.find((rule) => {
-            const existingKey = `${rule.family}:${rule.protocol}:${rule.port}:${rule.targetIP}:${rule.targetPort}:${rule.interface || ''}`;
-            return existingKey === key;
-        });
-
-        if (!existingRule) {
+        if (!existingKeys.has(ruleKey(importedRule))) {
             newRules.push({ ...importedRule, status: 'new' });
         } else {
             duplicateRules.push({ ...importedRule, status: 'duplicate' });
         }
     }
 
-    displayData.value = [...newRules, ...conflictRules, ...duplicateRules];
+    displayData.value = [...newRules, ...duplicateRules];
     paginationConfig.total = displayData.value.length;
     search();
 };
 
 const onImport = async () => {
+    if (loading.value || selects.value.length === 0) return;
     loading.value = true;
+    submitError.value = '';
     const rules: Firewall.RuleForward[] = [];
     for (const rule of selects.value) {
         rules.push({
@@ -252,19 +283,55 @@ const onImport = async () => {
         });
     }
 
-    await operateForwardRule({ rules })
-        .then(() => {
-            loading.value = false;
-            MsgSuccess(i18n.global.t('commons.msg.operationSuccess'));
-            emit('search');
-            visible.value = false;
-        })
-        .catch(() => {
-            loading.value = false;
-        });
+    try {
+        const result = (await operateForwardRule({ rules })).data;
+        if (!result.taskID || !result.queued) {
+            submitError.value = i18n.global.t('commons.msg.operationFailed');
+            return;
+        }
+        visible.value = false;
+        emit('created', result.taskID);
+    } catch (error) {
+        submitError.value =
+            (isAxiosError(error) && error.response?.data?.message) ||
+            (error && getErrorMessage(error)) ||
+            i18n.global.t('commons.res.commonError');
+    } finally {
+        loading.value = false;
+    }
 };
 
 defineExpose({
     acceptParams,
 });
 </script>
+
+<style scoped lang="scss">
+.import-file-bar {
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    gap: 12px;
+}
+
+.import-file-info {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    color: var(--el-text-color-regular);
+}
+
+.import-file-name {
+    overflow: hidden;
+    max-width: 420px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.import-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+</style>

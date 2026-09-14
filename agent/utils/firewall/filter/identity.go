@@ -41,6 +41,116 @@ func RuleKey(rule FirewallRule) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return normalizedRuleKey(normalized)
+}
+
+func RuleMatchKey(rule FirewallRule) (string, error) {
+	normalized, err := NormalizeRule(rule)
+	if err != nil {
+		return "", err
+	}
+	normalized.Action, normalized.NativeKind, normalized.OrderBucket = "", "", ""
+	normalized.Priority = nil
+	return normalizedRuleKey(normalized)
+}
+
+func OppositeActions(left, right Action) bool {
+	return left == ActionAccept && (right == ActionDrop || right == ActionReject) ||
+		right == ActionAccept && (left == ActionDrop || left == ActionReject)
+}
+
+func SameRuleContent(before, after FirewallRule) (bool, error) {
+	before, err := NormalizeRule(before)
+	if err != nil {
+		return false, err
+	}
+	after, err = NormalizeRule(after)
+	if err != nil {
+		return false, err
+	}
+	previous, err := RuleMatchKey(before)
+	if err != nil {
+		return false, err
+	}
+	requested, err := RuleMatchKey(after)
+	return err == nil && previous == requested && before.Action == after.Action, err
+}
+
+type RuleCollisionIndex map[string][]Action
+
+func (index RuleCollisionIndex) Add(rule FirewallRule) error {
+	key, err := RuleMatchKey(rule)
+	if err != nil {
+		return err
+	}
+	index[key] = append(index[key], rule.Action)
+	return nil
+}
+
+func (index RuleCollisionIndex) CheckDuplicate(rule FirewallRule) error {
+	key, err := RuleMatchKey(rule)
+	if err != nil {
+		return err
+	}
+	for _, action := range index[key] {
+		if action == rule.Action {
+			return checkCollisionActions(rule.Action, action)
+		}
+	}
+	return nil
+}
+
+func (index RuleCollisionIndex) Check(rule FirewallRule) error {
+	key, err := RuleMatchKey(rule)
+	if err != nil {
+		return err
+	}
+	for _, action := range index[key] {
+		if err := checkCollisionActions(rule.Action, action); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func CheckRuleCollision(requested, existing FirewallRule) error {
+	wanted, err := RuleMatchKey(requested)
+	if err != nil {
+		return err
+	}
+	actual, err := RuleMatchKey(existing)
+	if err != nil {
+		return err
+	}
+	if wanted != actual {
+		return nil
+	}
+	return checkCollisionActions(requested.Action, existing.Action)
+}
+
+func checkCollisionActions(requested, existing Action) error {
+	if requested == existing {
+		return fmt.Errorf("%w: equivalent rule already exists", ErrRuleOperation)
+	}
+	if OppositeActions(requested, existing) {
+		return ErrRuleConflict
+	}
+	return nil
+}
+
+func CheckObservedRuleCollisions(snapshot Snapshot, requested FirewallRule, excluded *Locator) error {
+	for _, observed := range snapshot.Rules {
+		if observed.ParseStatus != ParseStatusSupported || excluded != nil && SameLocator(observed.Locator, *excluded) {
+			continue
+		}
+		if err := CheckRuleCollision(requested, observed.Rule); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizedRuleKey(normalized FirewallRule) (string, error) {
 	identity := ruleIdentity{
 		Scope:              normalized.Scope.Key(),
 		Family:             normalized.Scope.Family,
@@ -71,6 +181,10 @@ func InstanceKey(rule ObservedRule) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return instanceKeyWithRuleKey(rule, ruleKey)
+}
+
+func instanceKeyWithRuleKey(rule ObservedRule, ruleKey string) (string, error) {
 	locator, err := validatedLocator(rule.Locator, rule.Rule.Scope)
 	if err != nil {
 		return "", err
@@ -174,4 +288,21 @@ func hashJSON(value any) (string, error) {
 	}
 	sum := sha256.Sum256(payload)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+func FindCandidate(candidates []ObservedRule, selected string) (ObservedRule, error) {
+	matched := make([]ObservedRule, 0, 1)
+	for _, candidate := range candidates {
+		identity, err := InstanceKey(candidate)
+		if err != nil {
+			continue
+		}
+		if selected != "" && identity == selected {
+			matched = append(matched, candidate)
+		}
+	}
+	if len(matched) != 1 {
+		return ObservedRule{}, ErrRuleOperation
+	}
+	return matched[0], nil
 }

@@ -33,14 +33,15 @@
                 </el-radio-group>
             </el-form-item>
             <div v-if="runtime.resource === 'appstore'">
-                <el-form-item :label="$t('app.app')" prop="appID">
-                    <el-row :gutter="20">
-                        <el-col :span="12">
+                <el-form-item :label="$t('app.app')" prop="appDetailID" :rules="Rules.requiredSelect">
+                    <el-row :gutter="20" class="w-[calc(100%+20px)] gap-y-3 lg:w-auto lg:gap-y-0">
+                        <el-col :span="12" :xs="24" :sm="24" :md="12" class="min-w-0">
                             <el-select
                                 v-model="runtime.appID"
+                                :validate-event="false"
                                 :disabled="mode === 'edit'"
                                 @change="changeApp(runtime.appID)"
-                                class="p-w-200"
+                                class="w-full min-w-0 lg:!w-[200px]"
                             >
                                 <el-option
                                     v-for="(app, index) in apps"
@@ -50,10 +51,10 @@
                                 ></el-option>
                             </el-select>
                         </el-col>
-                        <el-col :span="12">
+                        <el-col :span="12" :xs="24" :sm="24" :md="12" class="min-w-0">
                             <el-select
                                 v-model="runtime.version"
-                                :disabled="mode === 'edit'"
+                                :validate-event="false"
                                 @change="changeVersion()"
                                 class="p-w-200"
                             >
@@ -62,6 +63,7 @@
                                     :key="index"
                                     :label="version"
                                     :value="version"
+                                    class="w-full min-w-0 lg:!w-[200px]"
                                 ></el-option>
                             </el-select>
                         </el-col>
@@ -390,19 +392,28 @@ const changePHPVersion = (version: string) => {
 const changeVersion = () => {
     loading.value = true;
     initParam.value = false;
+    runtime.appDetailID = undefined;
     extensions.value = undefined;
     getAppDetail(runtime.appID, runtime.version, 'runtime')
         .then((res) => {
             runtime.appDetailID = res.data.id;
-            runtime.image = res.data.image + ':' + runtime.version;
+            runtimeForm.value?.clearValidate('appDetailID');
+            if (mode.value === 'create') {
+                runtime.image = res.data.image + ':' + runtime.version;
+            }
             appParams.value = res.data.params;
             const fileds = res.data.params.formFields;
             formFields.value = {};
             for (const index in fileds) {
                 formFields.value[fileds[index]['envKey']] = fileds[index];
-                runtime.params[fileds[index]['envKey']] = fileds[index]['default'];
+                const key = fileds[index]['envKey'];
+                if (mode.value === 'create' || runtime.params[key] === undefined || key === 'PHP_VERSION') {
+                    runtime.params[key] = fileds[index]['default'];
+                }
                 if (fileds[index]['envKey'] == 'PHP_VERSION') {
-                    runtime.image = '1panel-php-fpm:' + fileds[index]['default'];
+                    if (mode.value === 'create') {
+                        runtime.image = '1panel-php-fpm:' + fileds[index]['default'];
+                    }
                 }
             }
             initParam.value = true;

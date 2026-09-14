@@ -507,6 +507,8 @@ const message = {
         closeCurrent: 'Mevcut olanı kapat',
         closeOther: 'Diğerlerini kapat',
         closeAll: 'Tümünü Kapat',
+        keepAlive: 'Sayfa oturumunu koru',
+        cancelKeepAlive: 'Sayfa oturumunu korumayı bırak',
     },
     header: {
         logout: 'Çıkış',
@@ -956,7 +958,9 @@ const message = {
             from_remote: 'Bu model 1Panel aracılığıyla indirilmedi, ilgili çekme logları yok.',
             no_logs: 'Bu modelin çekme logları silindi ve görüntülenemiyor.',
             vllmVersionHelper: 'FusionXpark GB 10 sunucuları için lütfen -cu130 sürümünü seçin.',
-            ascendVisibleDevices: 'Görünür Ascend cihazları',
+            vllmDeployProfile: 'Dağıtım modeli',
+            vllmProfileFlash0731: 'DeepSeek V4 Flash 0731',
+            vllmProfileVisionExp: 'DeepSeek V4 Flash Vision Exp',
             vllmCommandPortHelper:
                 'Başlatma komutu {0} numaralı bağlantı noktasını kullanmalıdır; aksi halde hizmete erişilemez.',
             ascendVisibleDevices: 'Görünür Ascend cihazları (ASCEND_RT_VISIBLE_DEVICES)',
@@ -1148,7 +1152,6 @@ const message = {
             cachedToken: 'Önbellek Token',
             cacheHitRate: 'Önbellek İsabet Oranı',
             activeUsers: 'Aktif kullanıcılar',
-            activeStreamingRequests: 'Etkin akış istekleri',
             activeModels: 'Aktif modeller',
             failedRequests: 'Başarısız istekler',
             averageTokenPerRequest: 'Ortalama Token/istek',
@@ -2084,6 +2087,9 @@ const message = {
         profileBlockDesc: 'Channel, select ve eşzamanlama araçlarındaki engelleme süresini ölçer.',
     },
     terminal: {
+        showTerminalButton: 'Terminal kısayolu',
+        showTerminalButtonHelper:
+            'Etkinleştirildiğinde, sayfanın sağ alt köşesinde terminal kısayol düğmesi görüntülenir.',
         local: 'Yerel',
         defaultConn: 'Varsayılan Bağlantı',
         defaultConnHelper:
@@ -2125,6 +2131,20 @@ const message = {
         key: 'Özel anahtar',
         keyPassword: 'Özel anahtar şifresi',
         emptyTerminal: 'Şu anda bağlı terminal yok.',
+        sessionReconnecting: 'Bağlantı koptu, yeniden bağlanılıyor...',
+        sessionExpired:
+            "Oturum artık kullanılamıyor, yeni bir oturum açmak için Enter'a basın veya yeniden bağlan'a tıklayın",
+        sessionKicked: 'Bu oturum başka bir pencerede açıldı',
+        sessionCount: '{0} oturum',
+        sessionRules: 'Terminal oturumu kuralları',
+        sessionRuleClose: 'Terminali kapatmak oturumu hemen sonlandırır.',
+        sessionRuleDisconnect:
+            'Yenileme, tarayıcı kapanması veya bağlantı kaybından sonra 30 dakika içinde kurtarılabilir.',
+        sessionRuleRevalidate: 'Giriş geçersizse veya doğrulama zaman aşımına uğrarsa oturum sona erer.',
+        sessionRuleResources: 'Daha fazla terminal daha fazla kaynak tüketir. Kullanmadığınız terminalleri kapatın.',
+        minimize: 'Küçült',
+        closeAllSessions: 'Tüm oturumları kapat',
+        closeAllConfirm: 'Tüm terminal oturumları kesilecek ve geri alınamayacak. Devam edilsin mi?',
         lineHeight: 'Satır Yüksekliği',
         letterSpacing: 'Harf Aralığı',
         fontSize: 'Font Boyutu',
@@ -2667,6 +2687,7 @@ const message = {
         panelInstallDir: '1Panel kurulum dizini silinemez',
         wgetTask: 'İndirme Görevi',
         stopWgetConfirm: 'Bu indirme görevini durdurmak istediğinizden emin misiniz?',
+        downloadRecordsNotRemoved: 'Bazı kayıtlar kaldırılamadı. Yenileyip tekrar deneyin.',
         existFileTitle: 'Aynı ada sahip dosya uyarısı',
         existFileHelper: 'Yüklenen dosya, aynı ada sahip bir dosya içeriyor, üzerine yazmak istiyor musunuz?',
         existFileSize: 'Dosya boyutu (yeni -> eski)',
@@ -2795,6 +2816,7 @@ const message = {
         portChangeHelper: 'Servis portunu değiştir ve servisi yeniden başlat. Devam etmek istiyor musunuz?',
         theme: 'Tema',
         menuTabs: 'Menü sekmeleri',
+        menuTabsHelper: 'Etkinleştirdikten sonra sayfa oturumunu korumak için sekmedeki kilit düğmesine tıklayın.',
         menuAccordion: 'Çoklu menü genişletme',
         menuAccordionHelper:
             'Etkinleştirildikten sonra, yan çubuktaki birden fazla menü grubu aynı anda açık kalabilir.',
@@ -3209,6 +3231,8 @@ const message = {
         upgradeNow: 'Şimdi yükselt',
         source: 'İndirme kaynağı',
         versionNotSame: 'Düğüm sürümü ana düğümle uyuşmuyor. Lütfen Düğüm Yönetiminde yükseltin ve tekrar deneyin.',
+        currentNodeVersionNotSame:
+            'Geçerli düğüm sürümü ana düğümle uyuşmuyor. Geçerli düğümü yükseltmek için yöneticiyle iletişime geçin.',
         versionCompare:
             '{0} düğümünün zaten en son yükseltilebilir sürümde olduğu tespit edildi. Lütfen birincil düğüm sürümünü kontrol edin ve tekrar deneyin!',
         about: 'Hakkında',
@@ -3294,14 +3318,15 @@ const message = {
         restoreCommunity: 'Community Edition sürümünü geri yükle',
         restoreCommunityOnline: 'Çevrimiçi geri yükleme',
         restoreCommunityOffline: 'Çevrimdışı geri yükleme',
-        restoreCommunityPackageFound:
-            'Kullanılabilir bir çevrimdışı Community Edition paketi algılandı. Çevrimdışı geri yükleme kullanılabilir.',
-        restoreCommunityPackageMissing:
-            'Kullanılabilir bir çevrimdışı Community Edition paketi algılanmadı. Çevrimdışı geri yükleme şu anda kullanılamıyor.',
+        restoreCommunityPackageFound: 'Paket hazır',
+        restoreCommunityPackageMissing: 'Paket bekleniyor',
+        restoreCommunityPackageChecking: 'Paket kontrol ediliyor',
+        restoreCommunityPackageReadyHelper: 'Çevrimdışı geri yüklemeye devam edebilirsiniz.',
         restoreCommunityOnlineHelper:
             'Geçerli sürümün Community Edition paketi otomatik olarak indirilecek ve Enterprise sürümüne özel veriler temizlenecektir.',
         restoreCommunityOfflineHelper:
             'Geçerli Enterprise sürümünden eski olmayan resmi bir paketi {path} dizinine yerleştirin. Kullanılabilir bir paket algılandığında geçiş etkinleştirilir.',
+        restoreCommunityCopyDownloadLink: 'İndirme bağlantısını kopyala',
         restoreCommunityConfirm:
             'Sürüm değişikliğinden sonra mevcut Enterprise süper yönetici hesabıyla Community Edition sürümüne giriş yapabilirsiniz. Enterprise sürümüne özel veriler geçiş sırasında silinecektir. Lütfen dikkatli ilerleyin.',
         restoreCommunityStarting:
@@ -3329,6 +3354,7 @@ const message = {
         monitor:
             'Ticari sürüme yükselterek web sitesinin gerçek zamanlı durumunu, ziyaretçi eğilimlerini, kaynaklarını ve istek günlüklerini görüntüleyebilirsiniz.',
         alert: 'Ticari sürüme yükselterek SMS uyarıları alabilir, uyarı günlüklerini görüntüleyebilir ve kritik olayları takip edebilirsiniz.',
+        vm: '1Panel ile sanal makineleri, imajları, şablonları, sanal ağları ve depolama kaynaklarını yönetmek için ticari sürüme yükseltin.',
         node: 'Ticari sürüme yükselterek 1Panel ile birden fazla Linux sunucusunu yönetebilirsiniz.',
         nodeApp:
             'Ticari sürüme yükselterek düğümleri manuel değiştirmeden çok düğümlü uygulama sürümlerini toplu olarak yükseltebilirsiniz.',
@@ -3974,6 +4000,14 @@ const message = {
         gzipMinLengthHelper: 'Minimum Sıkıştırılmış Dosya',
         gzipCompLevelHelper: 'Sıkıştırma Oranı',
         gzipHelper: 'İletim için sıkıştırmayı etkinleştir',
+        brotliHelper: 'brotli sıkıştırmayı etkinleştir, genellikle gzip ile karşılaştırıldığında daha küçüktür',
+        brotliCompLevelHelper: 'Brotli sıkıştırma oranı, 0 ile 11 arası',
+        brotliManagedExternallyHelper:
+            'Brotli, nginx.conf dosyasında elle yapılandırıldı; panel yalnızca geçerli değerleri gösterir ve üzerine yazmaz.',
+        brotliManagedUnavailableHelper:
+            'Panel, yönetilen brotli yapılandırmasını nginx.conf dosyasına otomatik olarak ekleyemedi; aşağıdaki değerler etkin olmayacak.',
+        brotliMinLengthHelper: 'brotli ile sıkıştırılacak minimum yanıt boyutu',
+        brotliSaveFailed: 'Brotli ayarları kaydedilemedi; yukarıdaki gzip ayarları uygulandı',
         connections: 'Aktif bağlantılar',
         accepts: 'Kabul edilenler',
         handled: 'İşlenenler',
@@ -4134,31 +4168,23 @@ const message = {
             drifted: 'Farklı',
         },
         ruleTargetRequired: 'En az bir IP adresi veya port girin',
-        batchRuleLimit: 'Bir seferde en fazla {0} kural oluşturulabilir',
         resolution_adopt: 'Yönetimi devral',
+        plan_duplicate_rules:
+            'Koşulları ve eylemleri aynı olan yinelenen kurallar yönetime alınamaz. Yinelenen kuralları elle silip yeniden deneyin.',
         adoptRuleConfirm: 'Devraldıktan sonra 1Panel bu mevcut kuralı yönetebilir ve silebilir. Devam edilsin mi?',
-        plan_equivalent_external_rule: 'Aynı harici kural zaten var. Kopya oluşturmak yerine yönetimi devralın.',
-        plan_multiple_equivalent_external_rules: 'Birden fazla aynı harici kural var. Yönetilecek kuralı seçin.',
-        plan_equivalent_managed_rule: 'Aynı kural zaten 1Panel tarafından yönetiliyor. Kopya gerekmez.',
+        plan_exact_rule_conflict:
+            'Aynı eşleşme koşullarına sahip, ancak izin verme veya reddetme eylemi zıt olan bir kural zaten var.',
         allRulesAlreadyExist: 'Kontrol edilen {0} kuralın tümü zaten mevcut. Oluşturulacak yeni kural yok.',
-        ruleCheckResult: 'Kural kontrol sonuçları',
-        ruleCheckStatus_creatable: 'Oluşturulabilir',
-        ruleCheckStatus_existing: 'Zaten mevcut',
-        ruleCheckStatus_error: 'Hata',
-        ruleCheckExistingHelper: 'Aynı kural zaten mevcut ve atlanacak.',
-        ruleCheckReadyHelper: 'Kontrol başarılı. Bu kural oluşturulabilir.',
-        ruleCheckExternalExists: 'Aynı harici kural zaten mevcut ve otomatik olarak atlanacak.',
-        ruleCheckBlockedHelper: 'Hatalı kurallar gönderilemez. Geri dönüp düzenleyin ve yeniden kontrol edin.',
         plan_managed_rule_drifted: 'Yönetilen kural etkin güvenlik duvarıyla eşleşmiyor. Önce farkı giderin.',
         plan_opaque_rule_in_target_scope: 'Hedef kapsamda güvenle ayrıştırılamayan bir kural var. İşlem durduruldu.',
         plan_runtime_permanent_mismatch: 'Etkin ve kalıcı güvenlik duvarı yapılandırmaları farklı. Önce eşitleyin.',
         plan_protected_rule: 'Bu kural korumalıdır; yönetimi devralınamaz, değiştirilemez veya silinemez.',
         plan_blocked: 'Bu kural güvenle uygulanamıyor. Listeyi yenileyip tekrar deneyin.',
         scopeDefaultMismatch: 'Sistemin varsayılan zone değeri {0}; bu sayfa yalnızca public zone alanını yönetir.',
-        scopeInactive: 'Yönetilen kapsam etkin değil. Yeni kurallar mevcut trafiği etkilemeyebilir.',
         scopeMissing: 'Yönetilen {0} kapsamı eksik ve ilk kural uygulanırken güvenli şekilde oluşturulacak.',
         scopeUnmanagedActive: 'Başka etkin kapsamlar algılandı: {0}. 1Panel bunların kurallarını değiştirmez.',
-        scopeRuntimeMismatch: 'Etkin ve kalıcı yapılandırmalar şu öğelerde farklı: {0}.',
+        scopeRuntimeMismatch:
+            'Etkin ve kalıcı firewalld yapılandırmaları eşleşmiyor. Güvenlik duvarını yeniden başlatın.',
         dockerRestart: 'Güvenlik duvarı işlemleri Docker hizmetinin yeniden başlatılmasını gerektirir',
         firewallHelper: '{0} sistem güvenlik duvarı',
         firewallNotStart: 'Sistem güvenlik duvarı şu anda etkin değil. Önce etkinleştirin.',
@@ -4188,29 +4214,10 @@ const message = {
         configuredRules: '{0} kural yapılandırıldı',
         addressFamily: 'IP sürümü',
         portOrRange: 'Port / aralık',
-        exportAllRules: 'Tüm kuralları dışa aktar',
         importBackendHelper:
             'İçe aktarılan kurallar geçerli {0} arka ucu için dönüştürülür. Kaynak kurallar değiştirilmez.',
-        resetDirectRulesHelper:
-            '{0} içindeki 1Panel sistem güvenlik duvarı zincirlerini, çalışma zamanı kurallarını ve kalıcı dosyaları silin; veritabanı ilkelerini koruyun',
-        resetWhitelistRulesHelper:
-            '{0} içindeki etkin özel yapılandırmayı sıfırlayın, kurulum varsayılanlarını geri yükleyin ve {0} öğesini devre dışı bırakın; veritabanı ilkeleri korunur ve yeniden eşitlenebilir.',
-        cleanupForwardingBackendHelper:
-            '{0} içindeki 1Panel bağlantı noktası yönlendirme çalışma zamanı kurallarını sıfırlayın: ilgili tüm kuralları ve zincirleri silip veritabanı verilerini koruyun',
-        cleanupDockerBackendHelper:
-            '{0} içindeki 1Panel Docker bağlantı noktası koruma çalışma zamanı kurallarını sıfırlayın: ilgili tüm kuralları ve zincirleri silip veritabanı verilerini koruyun',
-        cleanupBeforeBackendSwitch:
-            'Mevcut {0} arka ucu hâlâ 1Panel çalışma zamanı kuralları içeriyor. {1} arka ucuna geçmeden önce sıfırlayın.',
-        cleanupAction: 'Sıfırla',
-        backendSwitchNotice:
-            'Sistem güvenlik duvarı, bağlantı noktası yönlendirme veya Docker korumasını değiştirmeden önce mevcut arka ucu sıfırlayın. Veritabanı ilkeleri korunur ve geçişten sonra yeniden başlatılabilir veya eşitlenebilir.',
-        switchBackendHelper: '{0} arka ucuna geçilsin mi?',
-        switchDockerBackendHelper:
-            '{0} arka ucuna geçilsin mi? Docker yapılandırması güncellenecek ve Docker yeniden başlatılacak.',
         ruleSyncTitle: 'Kuralları eşitle',
         ruleSyncAction: 'Kuralları eşitle',
-        ruleSyncHelper:
-            'Seçilen güvenlik duvarındaki 1Panel yönetimli kuralları mevcut güvenlik duvarıyla eşitler. Kaynak kurallar silinmez ve harici kurallar eşitlenmez.',
         ruleSyncDatabase: '1Panel veritabanı',
         ruleSyncDatabaseHelper:
             'Mevcut güvenlik duvarındaki yönetilen kuralları 1Panel veritabanı kurallarına göre eşitler ve uyumlu hale getirir. Eksik kurallar eklenir, fazla kurallar silinir.',
@@ -4219,7 +4226,6 @@ const message = {
             '{1}, {0} veritabanı kuralıyla tam olarak eşleşecek şekilde eşitlensin mi? Hedefteki {2} kural silinecek ve eksik kurallar eklenecektir.',
         ruleSyncSource: 'Yapılandırma kaynağı',
         ruleSyncTarget: 'Mevcut arka uç',
-        ruleSyncTotal: 'Dönüştürülen kurallar',
         ruleSyncReady: 'Hazır',
         ruleSyncExisting: 'Mevcut',
         ruleSyncRemove: 'Silinecek',
@@ -4230,24 +4236,16 @@ const message = {
             managedOrderDiffers: 'Yönetilen kuralların sırası veritabanı sırasından farklı.',
             managedOnlyInTarget: 'Yönetilen kural yalnızca hedef güvenlik duvarında mevcut.',
             managedRuntimeCannotRemove: 'Yönetilen etkin kural güvenli bir şekilde kaldırılamıyor.',
-            managedOrderBlocked:
-                'Yönetilen kurallar harici, tanınmayan veya korunan kuralların üzerinden yeniden sıralanamaz.',
-            mayBlockManagement: 'Kural mevcut yönetim bağlantısını engelleyebilir.',
             missingFromTarget: 'Kural hedef güvenlik duvarında bulunmuyor.',
             targetDiffers: 'Hedef kural veritabanı ilkesinden farklı.',
             alreadyExistsInTarget: 'Kural hedef güvenlik duvarında zaten mevcut.',
             onlyInTarget: 'Kural yalnızca hedef güvenlik duvarında mevcut.',
             stale: 'Güvenlik duvarı kuralının durumu güncel değil. Yenileyip tekrar deneyin.',
-            lockoutRisk: 'Bu değişiklik yönetim erişimini engelleyebilir.',
             protectedRule: 'Bu korumalı güvenlik duvarı kuralı değiştirilemez.',
+            dockerAcceptReadOnly:
+                'Bu ACCEPT kuralı salt okunurdur ve diğer kurallar eşitlenirken korunur. Kaldırmak için ana makinede manuel olarak silin.',
             cannotReconcile: 'Hedef kural eşitlenemiyor: {0}',
         },
-        ruleSyncConfirm: '{0} kural {1} arka ucundan {2} arka ucuna eşitlensin mi? Kaynak arka uç değiştirilmez.',
-        ruleSyncResetSource: 'Eşitleme başarılı olunca kaynak güvenlik duvarı {0} sıfırlansın ve devre dışı bırakılsın',
-        ruleSyncResetSourceHelper: 'Kaynak yalnızca tüm kurallar başarıyla eşitlendikten sonra sıfırlanır.',
-        ruleSyncResetSourceBlocked: 'Bazı kurallar eşitlenemiyor. Kaynağı sıfırlamadan önce bunları çözün.',
-        ruleSyncResetSourceConfirm:
-            '{0} kural {1} üzerinden {2} üzerine eşitlenip ardından {1} sıfırlansın ve devre dışı bırakılsın mı? Tüm yapılandırma silinir ve geri alınamaz.',
         ruleSyncPartial: 'Eşitleme tamamlandı: {0} başarılı, {1} zaten mevcut, {2} başarısız.',
         ruleSyncSuccess: 'Eşitleme tamamlandı: {0} başarılı, {1} zaten mevcut, {2} silindi.',
         ruleSyncStatus: {
@@ -4256,6 +4254,22 @@ const message = {
             remove: 'Silinecek',
             blocked: 'Kullanılamaz',
         },
+        resetDirectRulesHelper:
+            '{0} içindeki 1Panel sistem güvenlik duvarı zincirlerini, çalışma zamanı kurallarını ve kalıcı dosyaları silin; veritabanı ilkelerini koruyun',
+        resetWhitelistRulesHelper:
+            '{0} içindeki etkin özel yapılandırmayı sıfırlayın, kurulum varsayılanlarını geri yükleyin ve {0} öğesini devre dışı bırakın; veritabanı ilkeleri korunur ve yeniden eşitlenebilir.',
+        cleanupForwardingBackendHelper:
+            '{0} içindeki 1Panel bağlantı noktası yönlendirme çalışma zamanı kurallarını sıfırlayın: ilgili tüm kuralları ve zincirleri silip veritabanı verilerini koruyun',
+        cleanupDockerBackendHelper:
+            '{0} içindeki 1Panel Docker bağlantı noktası koruma çalışma zamanı kurallarını sıfırlayın: ilgili tüm kuralları ve zincirleri silip veritabanı verilerini koruyun',
+        cleanupBeforeBackendSwitch:
+            'Mevcut {0} arka ucu hâlâ 1Panel çalışma zamanı kuralları içeriyor. {1} arka ucuna geçmeden önce sıfırlayın. Sıfırlama yalnızca çalışma zamanı kurallarını temizler; veritabanı ilkeleri korunur ve geçişten sonra yeniden başlatılabilir veya eşitlenebilir.',
+        cleanupAction: 'Sıfırla',
+        backendSwitchNotice:
+            'Yalnızca bir güvenlik duvarı yönetim yönteminin etkinleştirilmesi önerilir. Birden fazla güvenlik duvarının aynı anda çalışması kural çakışmalarına, tutarsız durumlara veya konteyner bağlantı noktası erişim sorunlarına yol açabilir.',
+        switchBackendHelper: '{0} arka ucuna geçilsin mi?',
+        switchDockerBackendHelper:
+            '{0} arka ucuna geçilsin mi? Docker yapılandırması güncellenecek ve Docker yeniden başlatılacak.',
         uninstalledStatus: 'Yüklü değil',
         selectedBackendNotInstalled:
             '{backend} hizmeti algılanmadı. {library} üzerinden manuel olarak yükleyin veya {settings} bölümünden güvenlik duvarı arka ucunu değiştirin.',
@@ -4263,6 +4277,22 @@ const message = {
         partiallyInitialized: 'Kısmen başlatıldı',
         dockerGuardHelper:
             'Docker konteynerlerinin ana makinede yayımladığı portlar için erişim kısıtlamaları ayarlayın. Korunmayan portlar Docker varsayılan erişim davranışını korur.',
+        dockerTrafficPathMixed: 'Seçilen portlar farklı erişim yolları kullanıyor. Bunları ayrı ayrı yapılandırın.',
+        dockerTrafficPathUnknown:
+            'Bu portun erişim yolu belirlenemedi. Docker ağ yapılandırmasını kontrol edip tekrar deneyin.',
+        dockerTrafficPathReason: {
+            nat_inspect_failed:
+                'Docker NAT kuralları okunamadı. Güvenlik duvarı komutlarını ve izinlerini kontrol edip sayfayı yenileyin.',
+            proxy_inspect_failed:
+                'docker-proxy işlemleri incelenemedi. Sistem işlem bilgilerine erişimi kontrol edip sayfayı yenileyin.',
+            nat_chain_unreachable:
+                'Bu port için bir Docker yönlendirme kuralı var ancak NAT giriş zinciri etkin değil. Docker güvenlik duvarı kurallarını kontrol edin veya Docker’ı yeniden başlatıp sayfayı yenileyin.',
+            no_matching_path:
+                'Bu port için etkin bir Docker yönlendirme kuralı veya proxy işlemi bulunamadı. Konteyneri başlatın ya da yeniden başlatıp sayfayı yenileyin. Sorun sürerse Docker ağ yapılandırmasını kontrol edin.',
+        },
+        dockerInputPolicyNotEffective:
+            'Bu port doğrudan ana makine tarafından alındığından mevcut konteyner port koruma kuralı uygulanmaz. Ana makine güvenlik duvarında yapılandırın.',
+        dockerInputUseHostFirewall: 'Bu bağlantı noktasına erişimi ana makine güvenlik duvarında yapılandırın.',
         dockerInputNotProtected:
             'Ana makine INPUT kuralları bu Docker yayımlanmış portunu doğrudan korumaz. Konteyner portu korumasını açmak için tıklayın.',
         notInitialized: 'Başlatılmadı',
@@ -4294,9 +4324,7 @@ const message = {
             'Seçili kuralların yapılandırmaları farklı. Tümünün üzerine yazmak için yeniden ayarlayın; açıklamanın boş bırakılması tüm açıklamaları temizler.',
         effective: 'Etkin',
         forwardUnsynced: 'Senkronize değil',
-        notEnabled: 'Etkin değil',
         notEffective: 'Uygulanmıyor',
-        dockerGuardStatusEffective: '{0} konteyner portu koruması normal çalışıyor',
         dockerGuardStatusReason: {
             command_missing:
                 '{0} güvenlik duvarı bileşeni kullanılamıyor, bu nedenle ilgili koruma etkinleştirilemiyor. Sistem güvenlik duvarını kontrol edin',
@@ -4318,11 +4346,7 @@ const message = {
         forwardPortHelper: 'Port aralıklarını destekler, örn.: 8080-8089',
         forwardInboundInterface: 'İletme Gelen Ağ Arayüzü',
         exportHelper: '{0} güvenlik duvarı kuralını dışa aktarmak üzere. Devam etmek istiyor musunuz?',
-        importSuccess: '{0} kural başarıyla içe aktarıldı',
-        importPartialSuccess: 'İçe aktarma tamamlandı: {0} başarılı, {1} başarısız',
         basicStatus: 'Mevcut güvenlik duvarı bağlı değil. Önce bağlayın.',
-        baseIptables: 'iptables Servisi',
-        forwardIptables: 'iptables Port Yönlendirme Servisi',
         initMsg: '{0} başlatılmak üzere, devam etmek istiyor musunuz?',
         initDirectBackendConflictMsg:
             '{1} hâlâ bağlı. {0} başlatılırsa iki güvenlik duvarı kural kümesi de etkin olur ve erişimi beklenmedik şekilde engelleyebilir. Devam edilsin mi?',
@@ -4335,7 +4359,7 @@ const message = {
             'Bağlantıyı Kaldır - Bağlantı kaldırıldığında, eklenen tüm güvenlik duvarı kuralları geçersiz olacaktır. Dikkatli ilerleyin. Onaylıyor musunuz?',
         portWhiteList: 'Port beyaz listesi',
         portWhiteListAlter:
-            'Kaydetmek mevcut güvenlik duvarı kurallarını hemen değiştirmez. Yeni portlar bir sonraki başlatma veya etkinleştirmede açılır. Listeden kaldırılan bir portu kapatmak için mevcut kuralı kurallar listesinden elle silin.',
+            'Değişiklikler kaydedildiğinde hemen uygulanır. Eklenen portlara otomatik olarak izin verilir. Portu listeden çıkarmak yalnızca korumasını kaldırır. Portu kapatmak için kural listesinden izin kuralını silin.',
         portWhiteListHelper: 'IPv4/IPv6, TCP/UDP, tek portlar ve 8000-8100 gibi port aralıklarını destekler.',
         chain: 'Zincir',
         sourceIP: 'Kaynak IP',
@@ -4355,9 +4379,14 @@ const message = {
             'Bu kural {0} için {1} erişimine izin veriyor. Silinmesi birden fazla hizmete erişimi etkileyebilir. Devam edilsin mi?',
         deleteRiskRulesConfirm:
             '{0} kural silinecek. {1} izin kuralı hizmet erişimini etkileyebilir. Devam edilsin mi?',
-        editRuleConfirm: 'Şu alanlar değiştirilecek: {0}. Kural hemen uygulanıp doğrulanacak. Devam edilsin mi?',
+        editRuleConfirm: 'Bu kuralı değiştirmek istediğinizden emin misiniz?',
     },
     runtime: {
+        importEnv: 'Ortam Değişkenlerini İçe Aktar',
+        envImportError: 'Satır {0}: {1}',
+        envInvalidAssignment: 'Geçerli bir NAME=value ataması bekleniyor',
+        envUnclosedQuote: 'Kapatılmamış tırnak',
+        envUnexpectedText: 'Kapanış tırnağından sonra beklenmeyen metin',
         runtime: 'Çalışma Zamanı',
         default: 'Varsayılan',
         workDir: 'Çalışma dizini',
@@ -6377,6 +6406,14 @@ const message = {
             nodeDashTitle4: 'Zamanlanmış Görev Yönetimi',
             nodeDashContent4:
                 'Çoklu düğüm zamanlanmış görevlerinin birleşik yönetimi, durum izleme, hızlı başlatma/durdurma ve manuel tetikleme çalıştırma desteği',
+            vmTitle1: 'Sanal makineler',
+            vmContent1: 'Sanal makineler oluşturun ve yönetin, durumlarını izleyin ve kaynak tahsisini ayarlayın.',
+            vmTitle2: 'İmajlar ve şablonlar',
+            vmContent2: 'Sanal makine oluşturmayı kolaylaştırmak için ISO imajlarını ve şablonları yönetin.',
+            vmTitle3: 'Sanal ağlar',
+            vmContent3: 'Sanal ağları yönetin ve sanal makinelerin ağ bağlantılarını yapılandırın.',
+            vmTitle4: 'Depolama havuzları',
+            vmContent4: 'Depolama havuzlarını yönetin ve sanal makinelere depolama kaynakları tahsis edin.',
             nodeTitle1: 'Tek Tıkla Düğüm Ekleme',
             nodeContent1: 'Birden fazla sunucu düğümünü hızlıca entegre eder',
             nodeTitle2: 'Toplu Yükseltme',
@@ -6821,7 +6858,58 @@ const message = {
             barkConfigHelper: 'Bark uyarı bildirim yapılandırması',
             webhookName: 'Bot adı',
             webhookUrl: 'Webhook URL',
-            alertConfigProHelper: 'Ticari sürüm ayrıca WeCom, DingTalk, Feishu ve SMS bildirimlerini destekler.',
+            custom: 'Webhook',
+            webhookPreset: 'Ön ayar',
+            genericJsonPreset: 'Genel JSON',
+            customPreset: 'Özel',
+            webhookUrlSecretHelper: 'Webhook URL şifreli olarak saklanır ve burada görüntülenip düzenlenebilir',
+            webhookPublicAddressHelper:
+                'Yalnızca genel ağdan erişilebilen HTTP/HTTPS adresleri desteklenir; yerel, özel ve ayrılmış adresler engellenir',
+            customWebhookRecoveryRequired:
+                'Bu yapılandırma geçersiz veya eski bir sürümden geliyor. Webhook URL ve gerekli gizli Header değerlerini yeniden girip kaydedin.',
+            clearSecret: 'Temizle',
+            keepSecret: 'Değiştirme',
+            secretCleared: 'Kaydettiğinizde bu gizli değer temizlenecek',
+            bodyType: 'Body türü',
+            bodyTemplate: 'Body şablonu',
+            formFieldName: 'Alan adı',
+            formFieldValue: 'Alan değeri',
+            addFormField: 'Alan ekle',
+            webhookAdvanced: 'Gelişmiş',
+            headers: 'Headers',
+            headerName: 'Header adı',
+            headerValue: 'Header değeri',
+            secretValue: 'Gizli değer',
+            addHeader: 'Header ekle',
+            templateVariables: 'Şablon değişkenleri',
+            templateVariableTitle: 'Uyarı başlığı',
+            templateVariableMessage: 'Uyarı içeriği',
+            templateVariableType: 'Uyarı türü',
+            templateVariableNodeName: 'Düğüm adı',
+            templateVariableTimestamp: 'Olay zamanı',
+            templateVariablesHelper:
+                'title=uyarı başlığı, message=içerik, type=tür, nodeName=düğüm adı, timestamp=olay zamanı. Body içine eklemek için değişkene tıklayın.',
+            testResultStale: 'Yapılandırma değişti; önceki test sonucu artık geçerli değil',
+            alertConfigChanged: 'Yapılandırma güncellendi. Yenileyip tekrar deneyin.',
+            presetOverwriteHelper: 'Ön ayarı değiştirmek mevcut Body yapılandırmasını değiştirecek. Devam edilsin mi?',
+            customWebhookValidation: {
+                displayNameRequired: 'Bir görünen ad girin',
+                urlRequired: 'Bir Webhook URL girin',
+                urlInvalid: 'Webhook URL geçerli bir HTTP veya HTTPS URL olmalıdır',
+                bodyRequired: 'İstek Body içeriğini yapılandırın',
+                jsonInvalid: 'JSON Body şablonu geçersiz',
+                formFieldRequired: 'Form alan adları zorunludur',
+                formFieldDuplicate: 'Form alan adları benzersiz olmalıdır',
+                headerRequired: 'Header adları zorunludur',
+                headerInvalid: 'Header adı geçersiz',
+                headerDuplicate: 'Header adları benzersiz olmalıdır',
+                headerReserved: 'Bu Header sistem tarafından yönetilir ve özelleştirilemez',
+                headerMustBeSecret:
+                    'Kimlik doğrulama veya kimlik bilgisi Header alanları gizli değer olarak işaretlenmelidir',
+                templateVariableInvalid: 'Body desteklenmeyen bir şablon değişkeni içeriyor',
+                secretRequired: 'Bir gizli değer girin veya Değiştirme ya da Temizle seçeneğini kullanın',
+            },
+            alertConfigProHelper: 'Ticari sürüm daha fazla bildirim kanalı ekler.',
         },
         theme: {
             lingXiaGold: 'LXware Gold',
@@ -6871,6 +6959,8 @@ const message = {
             submitSuccess: 'Senkronizasyon görevi başarıyla gönderildi.',
         },
         vm: {
+            countLimitHelper:
+                'Professional sürümü en fazla {0} sanal makine oluşturulmasına izin verir. Enterprise sürümünde sayı sınırı yoktur.',
             vm: 'Sanal Makine',
             title: 'Sanal Makine Yönetimi',
             healthCheck: 'Sağlık kontrolü',
@@ -6952,6 +7042,8 @@ const message = {
                 },
             },
             dependencies: 'Bağımlılıklar',
+            architectureUnsupported:
+                'Mevcut sistem mimarisi {0} desteklenmiyor. VM özellikleri şu anda yalnızca AMD64 ve ARM64 mimarilerini destekliyor.',
             dependencyPurpose: 'Amaç',
             dependencyPurposeMap: {
                 libvirt: 'Yaşam döngüsü denetimi ve kaynak zamanlaması için VM yönetim hizmetleri sağlar.',

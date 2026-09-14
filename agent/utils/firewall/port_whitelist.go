@@ -79,11 +79,6 @@ func validatePortWhitelist(rules []PortWhitelist) ([]PortWhitelist, error) {
 		if _, ok := exists[key]; ok {
 			continue
 		}
-		for _, current := range result {
-			if current.Family == rule.Family && current.Protocol == rule.Protocol && whitelistPortsOverlap(current.Port, rule.Port) {
-				return nil, fmt.Errorf("overlapping firewall port whitelist rules: %s and %s", current.Port, rule.Port)
-			}
-		}
 		exists[key] = struct{}{}
 		result = append(result, rule)
 	}
@@ -129,21 +124,6 @@ func parseWhitelistPort(value string) (int, error) {
 		return 0, fmt.Errorf("invalid firewall port whitelist: %s", value)
 	}
 	return port, nil
-}
-
-func whitelistPortsOverlap(left, right string) bool {
-	parseRange := func(value string) (int, int) {
-		parts := strings.Split(value, "-")
-		start, _ := strconv.Atoi(parts[0])
-		if len(parts) == 1 {
-			return start, start
-		}
-		end, _ := strconv.Atoi(parts[1])
-		return start, end
-	}
-	leftStart, leftEnd := parseRange(left)
-	rightStart, rightEnd := parseRange(right)
-	return leftStart <= rightEnd && rightStart <= leftEnd
 }
 
 func NormalizePortWhitelist(items []PortWhitelist) []PortWhitelist {
@@ -283,4 +263,21 @@ func ExcludePorts(ports, excluded []PortWhitelist) []PortWhitelist {
 		}
 	}
 	return result
+}
+
+func NormalizeRequiredPorts(ports []PortWhitelist) ([]PortWhitelist, error) {
+	result := make([]PortWhitelist, 0, len(ports))
+	for _, port := range ports {
+		port.Protocol = strings.ToLower(strings.TrimSpace(port.Protocol))
+		if port.Protocol != "tcp" && port.Protocol != "udp" {
+			return nil, fmt.Errorf("unsupported required firewall port protocol %q", port.Protocol)
+		}
+		portNumber, err := strconv.Atoi(strings.TrimSpace(port.Port))
+		if err != nil || portNumber < 1 || portNumber > 65535 {
+			return nil, fmt.Errorf("invalid required firewall port %q", port.Port)
+		}
+		port.Port = strconv.Itoa(portNumber)
+		result = append(result, port)
+	}
+	return NormalizePortWhitelist(result), nil
 }

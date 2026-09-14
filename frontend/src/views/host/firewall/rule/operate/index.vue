@@ -6,16 +6,9 @@
         :auto-close="!loading"
         @close="handleClose"
     >
-        <el-form
-            v-if="!showingPreview"
-            ref="formRef"
-            v-loading="loading"
-            label-position="top"
-            :model="form"
-            :rules="rules"
-        >
+        <el-form ref="formRef" v-loading="loading" label-position="top" :model="form" :rules="rules">
             <el-form-item :label="$t('firewall.action')" prop="action">
-                <el-radio-group v-model="form.action">
+                <el-radio-group v-model="form.action" :disabled="descriptionOnly">
                     <el-radio-button value="accept">
                         {{ $t('firewall.accept') }}
                     </el-radio-button>
@@ -25,7 +18,7 @@
                 </el-radio-group>
             </el-form-item>
             <el-form-item :label="$t('commons.table.protocol')" prop="protocol">
-                <el-select v-model="form.protocol" class="w-full" @change="changeProtocol">
+                <el-select v-model="form.protocol" :disabled="descriptionOnly" class="w-full" @change="changeProtocol">
                     <el-option v-if="mode === 'create' || provider === 'ufw'" label="TCP/UDP" value="tcp/udp" />
                     <el-option label="TCP" value="tcp" />
                     <el-option label="UDP" value="udp" />
@@ -43,6 +36,7 @@
                         ref="sourceAddressRefs"
                         v-model.trim="item.address"
                         class="source-address-select"
+                        :disabled="descriptionOnly"
                         clearable
                         :placeholder="$t('firewall.sourceAddressPlaceholder')"
                         @keyup.enter.prevent="addSourceAddressOnEnter(index)"
@@ -63,7 +57,7 @@
                         v-model.trim="form.destinationPorts[index]"
                         class="destination-port-input"
                         clearable
-                        :disabled="!portProtocol"
+                        :disabled="descriptionOnly || !portProtocol"
                         :placeholder="$t('firewall.destinationPortPlaceholder')"
                         @keyup.enter.prevent="addDestinationPortOnEnter(index)"
                     >
@@ -71,123 +65,55 @@
                             <el-button
                                 v-if="mode === 'create'"
                                 icon="Delete"
-                                :disabled="!portProtocol"
+                                :disabled="descriptionOnly || !portProtocol"
                                 @click="removeRuleRow(index)"
                             />
                         </template>
                     </el-input>
                 </div>
-                <el-button v-if="mode === 'create'" class="mt-2" :disabled="!portProtocol" @click="addRuleRow">
+                <el-button
+                    v-if="mode === 'create'"
+                    class="mt-2"
+                    :disabled="descriptionOnly || !portProtocol"
+                    @click="addRuleRow"
+                >
                     {{ $t('commons.button.add') }}
                 </el-button>
             </el-form-item>
             <el-form-item v-if="showPriorityField" :label="priorityFieldLabel">
                 <el-input-number
                     v-model="form.priority"
+                    :disabled="descriptionOnly"
                     :min="priorityMin"
                     :max="priorityMax"
                     controls-position="right"
                 />
-                <span class="priority-range">{{ priorityMin }} ~ {{ priorityMax }}</span>
+                <span v-if="!descriptionOnly" class="priority-range">{{ priorityMin }} ~ {{ priorityMax }}</span>
             </el-form-item>
             <el-form-item :label="$t('commons.table.description')">
                 <el-input v-model.trim="form.description" clearable />
             </el-form-item>
         </el-form>
 
-        <div v-if="showingPreview" v-loading="loading" class="rule-preview">
-            <div class="rule-preview-title">
-                <span>{{ $t('firewall.ruleCheckResult') }}</span>
-            </div>
-            <div class="rule-check-groups">
-                <section v-for="group in ruleCheckGroups" :key="group.status" class="rule-check-group">
-                    <div class="rule-check-group-header">
-                        <div class="rule-check-group-title">
-                            <div class="rule-check-group-status">
-                                <span class="rule-check-group-label">{{ group.label }} · {{ group.items.length }}</span>
-                                <span class="rule-check-group-description">
-                                    {{ ruleCheckGroupDescription(group.status) }}
-                                </span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="rule-check-items">
-                        <div v-for="item in group.items" :key="ruleCheckItemKey(item)" class="rule-check-item">
-                            <div class="rule-check-item-main">
-                                <div class="rule-check-rule-summary">
-                                    <span class="rule-check-protocol">
-                                        {{ previewProtocol(previewRule(item)) }}
-                                    </span>
-                                    <span class="rule-check-separator">·</span>
-                                    <span class="rule-check-address">{{ previewAddress(previewRule(item)) }}</span>
-                                    <span class="rule-check-arrow">→</span>
-                                    <span>
-                                        {{ $t('commons.table.port') }}
-                                        {{ previewRule(item).destinationPort || '*' }}
-                                    </span>
-                                </div>
-                            </div>
-                            <div class="rule-check-item-meta">
-                                <span
-                                    class="rule-check-action"
-                                    :class="previewRule(item).action === 'accept' ? 'is-accept' : 'is-drop'"
-                                >
-                                    <i
-                                        class="iconfont rule-check-action-icon"
-                                        :class="previewRule(item).action === 'accept' ? 'p-yunxu' : 'p-a-44tubiao-139'"
-                                        aria-hidden="true"
-                                    />
-                                    {{ $t(`firewall.${previewRule(item).action === 'accept' ? 'accept' : 'drop'}`) }}
-                                </span>
-                                <span v-if="previewRulePriority(previewRule(item)) !== undefined">
-                                    {{ priorityFieldLabel }}：{{ previewRulePriority(previewRule(item)) }}
-                                </span>
-                                <span v-if="previewRule(item).description" class="rule-check-description">
-                                    {{ previewRule(item).description }}
-                                </span>
-                                <span
-                                    v-if="ruleCheckStatus(item.plan) === 'error'"
-                                    class="rule-check-item-reason"
-                                    :class="`is-${ruleCheckStatus(item.plan)}`"
-                                >
-                                    {{ ruleCheckDescription(item.plan) }}
-                                </span>
-                            </div>
-                        </div>
-                    </div>
-                </section>
-            </div>
-        </div>
-
         <template #footer>
             <el-button :disabled="loading" @click="drawerVisible = false">
                 {{ $t('commons.button.cancel') }}
             </el-button>
-            <el-button v-if="showingPreview" :disabled="loading" @click="backToForm">
-                {{ $t('commons.button.back') }}
-            </el-button>
-            <el-button
-                type="primary"
-                :disabled="loading || (showingPreview && hasBlockingRules)"
-                @click="onCheckOrSubmit"
-            >
-                {{ $t(showingPreview ? 'commons.button.submit' : 'commons.button.check') }}
+            <el-button type="primary" :disabled="loading" @click="onSubmit">
+                {{ $t('commons.button.submit') }}
             </el-button>
         </template>
     </DrawerPro>
-    <ErrDialog ref="errDialogRef" @close="backToForm" />
 </template>
 
 <script lang="ts" setup>
 import { Firewall } from '@/api/interface/firewall';
-import { checkFirewallRules, createFirewallRules, updateFirewallRule } from '@/api/modules/firewall';
+import { createFirewallRules, updateFirewallRule } from '@/api/modules/firewall';
 import { Rules } from '@/global/form-rules';
 import i18n from '@/lang';
-import { MsgError, MsgSuccess, MsgWarning } from '@/utils/message';
+import { MsgError, MsgSuccess } from '@/utils/message';
 import { computed, nextTick, reactive, ref, watch } from 'vue';
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
-import ErrDialog from './err-message.vue';
 import {
     formatHostAddress,
     inferAddressFamily,
@@ -200,37 +126,23 @@ import {
 const provider = ref<Firewall.Provider>('iptables');
 const mode = ref<'create' | 'edit'>('create');
 const editingUUID = ref('');
+const descriptionOnly = ref(false);
 const editingRule = ref<Firewall.Rule>();
+const originalFormRule = ref<Firewall.Rule>();
 const drawerVisible = ref(false);
 const loading = ref(false);
 const formRef = ref<FormInstance>();
 const sourceAddressRefs = ref<Array<{ focus: () => void }>>([]);
 const destinationPortRefs = ref<Array<{ focus: () => void }>>([]);
-const errDialogRef = ref<InstanceType<typeof ErrDialog>>();
 const previewRules = ref<Firewall.Rule[]>([]);
-const previewVisible = ref(false);
-const checkCompleted = ref(false);
 
-interface PriorityPositionRange {
-    min: number;
-    max: number;
-}
-
-const positionRanges = ref<Partial<Record<Firewall.Family, PriorityPositionRange>>>({});
+const positionRanges = ref<Partial<Record<Firewall.Family, Firewall.PositionRange>>>({});
 const firewalldPrioritySupported = ref(true);
-
-interface BatchPlanItem {
-    rule: Firewall.Rule;
-    plan: Firewall.RuleCheckResult;
-    resolution?: Firewall.ApplicableCheckAction;
-}
 
 interface SourceAddressItem {
     family: Firewall.Family;
     address: string;
 }
-
-const batchPlans = ref<BatchPlanItem[]>([]);
 
 const form = reactive({
     protocol: 'tcp',
@@ -287,100 +199,24 @@ const rules = reactive<FormRules>({
 });
 
 const portProtocol = computed(() => ['tcp', 'udp', 'tcp/udp'].includes(form.protocol));
-const wildcardAddress = (family: Firewall.Family) => {
-    if (family === 'ipv6') return '::/0';
-    if (family === 'inet') return '0.0.0.0/0, ::/0';
-    return '0.0.0.0/0';
-};
-const wildcardAddressLabel = (family: Firewall.Family) =>
-    `${wildcardAddress(family)}（${i18n.global.t('firewall.anyWhere')}）`;
 const isWildcardAddress = (_family: Firewall.Family, address?: string) => !address?.trim();
 const priorityFieldLabel = computed(() => i18n.global.t('firewall.priority'));
 const showPriorityField = computed(() => {
-    if (provider.value === 'ufw') return mode.value === 'edit';
-    if (provider.value !== 'firewalld') return true;
+    if (provider.value !== 'firewalld') return mode.value === 'edit';
     return (
         firewalldPrioritySupported.value && (mode.value === 'create' || editingRule.value?.nativeKind === 'rich_rule')
     );
 });
 const selectedPositionRanges = computed(() => {
-    const families = [...new Set(form.sourceAddresses.map((item) => item.family))];
+    const families =
+        mode.value === 'edit' && editingRule.value
+            ? [editingRule.value.scope.family]
+            : [...new Set(form.sourceAddresses.map((item) => item.family))];
     if (families.length === 0) return [{ min: 1, max: 1 }];
     return families.map((family) => positionRanges.value[family] || { min: 1, max: 1 });
 });
-const positionalPriorityMin = computed(() => Math.max(1, ...selectedPositionRanges.value.map((range) => range.min)));
-const positionalPriorityMax = computed(() => Math.min(...selectedPositionRanges.value.map((range) => range.max)));
-const priorityMin = computed(() => (provider.value === 'firewalld' ? -32768 : positionalPriorityMin.value));
-const priorityMax = computed(() => (provider.value === 'firewalld' ? 32767 : positionalPriorityMax.value));
-const showingPreview = computed(() => previewVisible.value && previewRules.value.length > 0);
-
-const supportedPlanReasons = new Set([
-    'equivalent_external_rule',
-    'multiple_equivalent_external_rules',
-    'equivalent_managed_rule',
-    'managed_rule_drifted',
-    'opaque_rule_in_target_scope',
-    'runtime_permanent_mismatch',
-    'protected_rule',
-]);
-
-const planReasonMessage = (reason: string) =>
-    i18n.global.t(`firewall.plan_${supportedPlanReasons.has(reason) ? reason : 'blocked'}`);
-
-type RuleCheckDisplayStatus = 'creatable' | 'existing' | 'error';
-
-const ruleCheckStatus = (result: Firewall.RuleCheckResult): RuleCheckDisplayStatus => {
-    if (result.decision === 'blocked') return 'error';
-    if (result.decision === 'no_change' || result.classification === 'exact_external') return 'existing';
-    return 'creatable';
-};
-
-const ruleCheckDescription = (result: Firewall.RuleCheckResult) => {
-    if (ruleCheckStatus(result) === 'creatable') return i18n.global.t('firewall.ruleCheckReadyHelper');
-    if (result.classification === 'exact_external') return i18n.global.t('firewall.ruleCheckExternalExists');
-    return planReasonMessage(result.reason);
-};
-
-const ruleCheckGroupDescription = (status: RuleCheckDisplayStatus) => {
-    if (status === 'error') return i18n.global.t('firewall.ruleCheckBlockedHelper');
-    if (status === 'existing') return i18n.global.t('firewall.ruleCheckExistingHelper');
-    return i18n.global.t('firewall.ruleCheckReadyHelper');
-};
-
-const ruleCheckCounts = computed(() => {
-    const counts: Record<RuleCheckDisplayStatus, number> = {
-        creatable: 0,
-        existing: 0,
-        error: 0,
-    };
-    for (const item of batchPlans.value) counts[ruleCheckStatus(item.plan)]++;
-    return counts;
-});
-
-const ruleCheckGroupOrder: RuleCheckDisplayStatus[] = ['error', 'creatable', 'existing'];
-const ruleCheckGroups = computed(() =>
-    ruleCheckGroupOrder
-        .map((status) => ({
-            status,
-            label: i18n.global.t(`firewall.ruleCheckStatus_${status}`),
-            items: batchPlans.value.filter((item) => ruleCheckStatus(item.plan) === status),
-        }))
-        .filter((group) => group.items.length > 0),
-);
-
-const previewRule = (item: BatchPlanItem) => item.plan.requestedRule || item.rule;
-const previewRulePriority = (rule: Firewall.Rule) => rule.priority ?? rule.orderIndex;
-const ruleCheckItemKey = (item: BatchPlanItem) =>
-    [
-        item.plan.checkFlag,
-        previewRule(item).scope.family,
-        previewRule(item).protocol,
-        previewRule(item).sourceAddress,
-        previewRule(item).destinationPort,
-    ].join(':');
-
-const hasBlockingRules = computed(() => ruleCheckCounts.value.error > 0);
-const existingRuleItems = computed(() => batchPlans.value.filter((item) => ruleCheckStatus(item.plan) === 'existing'));
+const priorityMin = computed(() => Math.max(...selectedPositionRanges.value.map((range) => range.min)));
+const priorityMax = computed(() => Math.min(...selectedPositionRanges.value.map((range) => range.max)));
 const normalizeSourceAddresses = () => {
     const seen = new Set<string>();
     let normalized = form.sourceAddresses.flatMap((item) => {
@@ -465,11 +301,12 @@ const resetForm = () => {
     form.destinationAddress = '';
     form.destinationPorts = [''];
     form.action = 'accept';
-    form.priority =
-        provider.value === 'firewalld' || provider.value === 'ufw' ? undefined : positionalPriorityMax.value;
+    form.priority = undefined;
     form.description = '';
     editingUUID.value = '';
+    descriptionOnly.value = false;
     editingRule.value = undefined;
+    originalFormRule.value = undefined;
     resetBatch();
     formRef.value?.clearValidate();
 };
@@ -477,16 +314,18 @@ const resetForm = () => {
 const acceptParams = (
     value: Firewall.Provider,
     item?: Firewall.InventoryItem,
-    ranges: Partial<Record<Firewall.Family, PriorityPositionRange>> = {},
+    ranges: Partial<Record<Firewall.Family, Firewall.PositionRange>> = {},
     supportsExplicitPriority = true,
+    onlyDescription = false,
 ) => {
     provider.value = value;
     firewalldPrioritySupported.value = supportsExplicitPriority;
     positionRanges.value = ranges;
     mode.value = item?.desired?.uuid ? 'edit' : 'create';
     resetForm();
+    descriptionOnly.value = mode.value === 'edit' && onlyDescription;
     if (mode.value === 'edit' && item?.desired?.uuid) {
-        const rule = item.rule;
+        const rule = descriptionOnly.value ? item.desired.rule : item.rule;
         const currentPosition = item.observed?.locator.position || rule.orderIndex;
         editingUUID.value = item.desired.uuid;
         editingRule.value = {
@@ -507,8 +346,9 @@ const acceptParams = (
         form.destinationPorts = [rule.destinationPort || ''];
         if (form.destinationPorts.length === 0) form.destinationPorts = [''];
         form.action = rule.action === 'reject' ? 'drop' : rule.action;
-        form.priority = provider.value === 'firewalld' ? rule.priority : currentPosition || positionalPriorityMax.value;
+        form.priority = provider.value === 'firewalld' ? rule.priority : currentPosition || priorityMax.value;
         form.description = rule.description || '';
+        originalFormRule.value = buildRule();
     }
     drawerVisible.value = true;
 };
@@ -527,23 +367,7 @@ const handleClose = () => {
 
 const resetBatch = () => {
     previewRules.value = [];
-    previewVisible.value = false;
-    checkCompleted.value = false;
-    batchPlans.value = [];
 };
-
-watch(
-    form,
-    () => {
-        if (!checkCompleted.value) return;
-        checkCompleted.value = false;
-        previewRules.value = [];
-        batchPlans.value = [];
-    },
-    { deep: true },
-);
-
-const backToForm = () => resetBatch();
 
 const changeProtocol = () => {
     if (!portProtocol.value) {
@@ -563,9 +387,11 @@ const buildRule = (
           ? 'ipv6'
           : protocol === 'icmp'
             ? 'ipv4'
-            : provider.value === 'firewalld'
-              ? 'inet'
-              : source.family;
+            : mode.value === 'edit'
+              ? editingRule.value?.scope.family || source.family
+              : provider.value === 'firewalld'
+                ? 'inet'
+                : source.family;
     const action =
         mode.value === 'edit' && editingRule.value?.action === 'reject' && form.action === 'drop'
             ? 'reject'
@@ -594,17 +420,14 @@ const buildRule = (
                         chain: 'incoming',
                         direction: 'input',
                     },
-        protocol,
+        protocol: mode.value === 'edit' && provider.value === 'ufw' && protocol === 'tcp/udp' ? 'all' : protocol,
         sourceAddress: isWildcardAddress(source.family, source.address) ? '' : source.address,
         sourcePort: form.sourcePort,
         destinationAddress: form.destinationAddress,
         destinationPort,
         action,
         priority: provider.value === 'firewalld' && firewalldPrioritySupported.value ? form.priority : undefined,
-        orderIndex:
-            provider.value === 'firewalld' || (provider.value === 'ufw' && mode.value === 'create')
-                ? undefined
-                : form.priority,
+        orderIndex: provider.value === 'firewalld' || mode.value === 'create' ? undefined : form.priority,
         description: form.description,
     };
 };
@@ -621,24 +444,13 @@ const editableFieldLabels: Array<[keyof Firewall.Rule, string]> = [
     ['description', 'commons.table.description'],
 ];
 
-const changedFieldLabels = (before: Firewall.Rule, after: Firewall.Rule) =>
+const changedRuleFields = (before: Firewall.Rule, after: Firewall.Rule) =>
     editableFieldLabels
         .filter(([field]) => JSON.stringify(before[field] ?? '') !== JSON.stringify(after[field] ?? ''))
-        .map(([, label]) => i18n.global.t(label));
+        .map(([field]) => field);
 
-const availableResolutions = (result: Firewall.RuleCheckResult) =>
-    (result.allowedActions || []).filter((item): item is Firewall.ApplicableCheckAction => item !== 'cancel');
-
-const previewAddress = (rule: Firewall.Rule) => {
-    if (rule.sourceAddress && !isWildcardAddress(rule.scope.family, rule.sourceAddress)) {
-        return formatHostAddress(rule.sourceAddress, rule.scope.family);
-    }
-    return wildcardAddressLabel(rule.scope.family);
-};
-const previewProtocol = (rule: Firewall.Rule) =>
-    rule.scope.provider === 'ufw' && rule.protocol === 'all' && rule.destinationPort
-        ? 'TCP/UDP'
-        : rule.protocol.toUpperCase();
+const isMetadataOnlyEdit = (before: Firewall.Rule, after: Firewall.Rule) =>
+    changedRuleFields(before, after).every((field) => ['description', 'orderIndex', 'priority'].includes(field));
 
 const buildPreviewRules = () => {
     if (!normalizeSourceAddresses()) return false;
@@ -669,77 +481,21 @@ const buildPreviewRules = () => {
         MsgError(i18n.global.t('commons.msg.notSupportOperation'));
         return false;
     }
-    if (rules.length > 256) {
-        MsgError(i18n.global.t('firewall.batchRuleLimit', [256]));
-        return false;
-    }
     previewRules.value = rules;
     return true;
 };
 
-const prepareBatchPlans = async () => {
-    checkCompleted.value = false;
-    batchPlans.value = [];
-    const results = (await checkFirewallRules({ items: previewRules.value.map((rule) => ({ rule })) })).data.items;
-    if (results.length !== previewRules.value.length) {
+const submitCreateTask = async () => {
+    if (!(await prepareRulesFromForm())) return;
+    const result = (
+        await createFirewallRules({ items: previewRules.value.map((rule) => ({ rule, sourceKind: 'user' })) })
+    ).data;
+    if (!result.taskID || !result.queued) {
         MsgError(i18n.global.t('commons.msg.operationFailed'));
         return;
     }
-    for (let ruleIndex = 0; ruleIndex < previewRules.value.length; ruleIndex++) {
-        const rule = previewRules.value[ruleIndex];
-        const result = results[ruleIndex];
-        const available = availableResolutions(result);
-        batchPlans.value.push({
-            rule,
-            plan: result,
-            resolution:
-                ruleCheckStatus(result) === 'creatable'
-                    ? available.find((action) => action !== 'select_adopt')
-                    : undefined,
-        });
-    }
-    previewRules.value = results.map((result) => result.requestedRule);
-    checkCompleted.value = true;
-    previewVisible.value = true;
-};
-
-const executeBatchPlans = async () => {
-    if (hasBlockingRules.value) {
-        MsgError(i18n.global.t('firewall.ruleCheckBlockedHelper'));
-        return;
-    }
-    const items: Firewall.CreateItem[] = [];
-    for (const item of batchPlans.value) {
-        if (ruleCheckStatus(item.plan) === 'existing') continue;
-        const available = availableResolutions(item.plan);
-        const selectedResolution = available.includes(item.resolution as Firewall.ApplicableCheckAction)
-            ? item.resolution
-            : undefined;
-        if (!selectedResolution) {
-            MsgError(i18n.global.t('commons.msg.operationFailed'));
-            return;
-        }
-        items.push({
-            checkFlag: item.plan.checkFlag,
-            action: selectedResolution,
-            rule: item.plan.requestedRule,
-            sourceKind: 'user',
-        });
-    }
-
-    if (items.length === 0) {
-        MsgWarning(i18n.global.t('firewall.allRulesAlreadyExist', [existingRuleItems.value.length]));
-        drawerVisible.value = false;
-        return;
-    }
-    const result = (await createFirewallRules({ items })).data;
-    if (result.succeeded > 0) emit('search');
-    if (result.failed > 0 || (result.skipped || 0) > 0) {
-        errDialogRef.value?.acceptParams(result);
-        return;
-    }
-    MsgSuccess(i18n.global.t('commons.msg.operationSuccess'));
     drawerVisible.value = false;
+    emit('created', result.taskID);
 };
 
 const prepareRulesFromForm = async () => {
@@ -751,77 +507,81 @@ const prepareRulesFromForm = async () => {
     return buildPreviewRules();
 };
 
-const checkRules = async () => {
-    if (!(await prepareRulesFromForm())) return;
-    if (mode.value === 'edit' && editingUUID.value) {
-        const result = (
-            await checkFirewallRules({
-                items: [{ uuid: editingUUID.value, rule: previewRules.value[0] }],
-            })
-        ).data.items[0];
-        previewRules.value = [result.requestedRule];
-        batchPlans.value = [{ rule: result.requestedRule, plan: result }];
-        checkCompleted.value = true;
-        previewVisible.value = true;
-        return;
-    }
-    await prepareBatchPlans();
-};
-
 const executeEdit = async () => {
     if (!editingUUID.value || previewRules.value.length === 0) return;
-    if (hasBlockingRules.value) {
-        MsgError(i18n.global.t('firewall.ruleCheckBlockedHelper'));
-        return;
-    }
     const updatedRule = previewRules.value[0];
-    const changed = editingRule.value ? changedFieldLabels(editingRule.value, updatedRule) : [];
+    const before = originalFormRule.value || editingRule.value;
+    const changed = before ? changedRuleFields(before, updatedRule) : [];
     if (changed.length === 0) {
         drawerVisible.value = false;
         return;
     }
     try {
-        await ElMessageBox.confirm(
-            i18n.global.t('firewall.editRuleConfirm', [changed.join(', ')]),
-            i18n.global.t('firewall.edit'),
-            {
-                confirmButtonText: i18n.global.t('commons.button.confirm'),
-                cancelButtonText: i18n.global.t('commons.button.cancel'),
-                type: 'warning',
-            },
-        );
+        await ElMessageBox.confirm(i18n.global.t('firewall.editRuleConfirm'), i18n.global.t('firewall.edit'), {
+            confirmButtonText: i18n.global.t('commons.button.confirm'),
+            cancelButtonText: i18n.global.t('commons.button.cancel'),
+            type: 'warning',
+        });
     } catch {
         return;
     }
-    await updateFirewallRule(editingUUID.value, { rule: updatedRule });
+    let request: Firewall.UpdateRequest = { rule: updatedRule };
+    if (before && isMetadataOnlyEdit(before, updatedRule)) {
+        const description = changed.includes('description') ? updatedRule.description || '' : undefined;
+        if (changed.includes('priority')) {
+            request = { priority: updatedRule.priority!, description };
+        } else if (changed.includes('orderIndex')) {
+            request = { orderIndex: updatedRule.orderIndex!, description };
+        } else {
+            request = { description: description || '' };
+        }
+    }
+    await updateFirewallRule(editingUUID.value, request);
     MsgSuccess(i18n.global.t('commons.msg.operationSuccess'));
     emit('search');
     drawerVisible.value = false;
 };
 
-const submitCheckedRules = async () => {
-    if (mode.value === 'edit') {
-        await executeEdit();
-        return;
-    }
-    await executeBatchPlans();
-};
-
-const onCheckOrSubmit = async () => {
+const onSubmit = async () => {
     if (loading.value) return;
     loading.value = true;
     try {
-        if (showingPreview.value) {
-            await submitCheckedRules();
-        } else {
-            await checkRules();
+        if (mode.value === 'create') {
+            await submitCreateTask();
+        } else if (
+            originalFormRule.value &&
+            (descriptionOnly.value || isMetadataOnlyEdit(originalFormRule.value, buildRule()))
+        ) {
+            const rule = descriptionOnly.value
+                ? { ...originalFormRule.value, description: form.description }
+                : buildRule();
+            const changed = changedRuleFields(originalFormRule.value, rule);
+            if (changed.some((field) => field === 'priority' || field === 'orderIndex')) {
+                const value = rule.priority ?? rule.orderIndex;
+                if (
+                    typeof value !== 'number' ||
+                    !Number.isInteger(value) ||
+                    value < priorityMin.value ||
+                    value > priorityMax.value
+                ) {
+                    MsgError(i18n.global.t('commons.rule.numberRange', [priorityMin.value, priorityMax.value]));
+                    return;
+                }
+            }
+            previewRules.value = [rule];
+            await executeEdit();
+        } else if (await prepareRulesFromForm()) {
+            await executeEdit();
         }
     } finally {
         loading.value = false;
     }
 };
 
-const emit = defineEmits<{ (event: 'search'): void }>();
+const emit = defineEmits<{
+    (event: 'search'): void;
+    (event: 'created', taskID: string): void;
+}>();
 
 defineExpose({ acceptParams });
 </script>
@@ -847,10 +607,6 @@ defineExpose({ acceptParams });
     gap: 8px;
 }
 
-.rule-check-alert {
-    margin-bottom: 12px;
-}
-
 .source-address-select {
     flex: 1;
 }
@@ -862,156 +618,5 @@ defineExpose({ acceptParams });
 .priority-range {
     margin-left: 12px;
     color: var(--el-text-color-secondary);
-}
-
-.rule-preview {
-    margin-top: 4px;
-    color: var(--el-text-color-primary);
-}
-
-.rule-preview-title {
-    display: flex;
-    align-items: center;
-    margin-bottom: 12px;
-    color: var(--el-text-color-primary);
-    font-weight: 500;
-}
-
-.rule-check-groups {
-    max-height: 460px;
-    overflow-y: auto;
-}
-
-.rule-check-group + .rule-check-group {
-    margin-top: 16px;
-}
-
-.rule-check-group-header {
-    display: flex;
-    align-items: center;
-    min-height: 32px;
-    padding: 0 4px;
-    color: var(--el-text-color-primary);
-    font-weight: 500;
-}
-
-.rule-check-group-title {
-    display: flex;
-    align-items: flex-start;
-    min-width: 0;
-}
-
-.rule-check-group-status {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    flex-wrap: wrap;
-    gap: 6px;
-}
-
-.rule-check-group-label {
-    flex: none;
-    font-size: 14px;
-    font-weight: 500;
-    color: var(--el-text-color-primary);
-    line-height: 20px;
-}
-
-.rule-check-group-description {
-    color: var(--el-text-color-secondary);
-    font-size: 11px;
-    font-weight: normal;
-    line-height: 18px;
-}
-
-.rule-check-items {
-    overflow: hidden;
-    border: 1px solid var(--el-border-color-lighter);
-    border-radius: 6px;
-    background: var(--el-fill-color-light);
-}
-
-.rule-check-item {
-    padding: 12px 14px;
-    background: var(--el-fill-color-light);
-
-    & + & {
-        border-top: 1px solid var(--el-border-color-lighter);
-    }
-}
-
-.rule-check-item-main {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-}
-
-.rule-check-rule-summary {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    gap: 8px;
-    color: var(--el-text-color-primary);
-    font-size: 13px;
-}
-
-.rule-check-protocol {
-    flex: none;
-    font-weight: 500;
-}
-
-.rule-check-separator,
-.rule-check-arrow {
-    flex: none;
-    color: var(--el-text-color-placeholder);
-}
-
-.rule-check-address {
-    overflow-wrap: anywhere;
-}
-
-.rule-check-item-meta {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-    margin-top: 7px;
-    gap: 12px;
-    color: var(--el-text-color-secondary);
-    font-size: 12px;
-}
-
-.rule-check-action {
-    display: inline-flex;
-    align-items: center;
-    flex: none;
-    gap: 4px;
-    color: var(--el-text-color-secondary);
-    line-height: 18px;
-
-    &.is-accept .rule-check-action-icon {
-        color: var(--el-color-primary);
-    }
-
-    &.is-drop .rule-check-action-icon {
-        color: var(--el-color-info);
-    }
-}
-
-.rule-check-action-icon {
-    font-size: 14px;
-    line-height: 1;
-}
-
-.rule-check-description {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.rule-check-item-reason {
-    &.is-error {
-        color: var(--el-color-danger);
-    }
 }
 </style>

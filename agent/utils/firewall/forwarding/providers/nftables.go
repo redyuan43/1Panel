@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/1Panel-dev/1Panel/agent/constant"
 	"github.com/1Panel-dev/1Panel/agent/global"
 	"github.com/1Panel-dev/1Panel/agent/utils/cmd"
 	"github.com/1Panel-dev/1Panel/agent/utils/firewall/forwarding"
@@ -35,7 +34,10 @@ func (n *nftablesAdapter) Name() string { return "nftables" }
 func (n *nftablesAdapter) List() ([]forwarding.Rule, error) {
 	rules := make([]forwarding.Rule, 0)
 	for _, family := range []string{forwarding.FamilyIPv4, forwarding.FamilyIPv6} {
-		stdout, err := nftRun("-a", "list", "chain", nftTableFamily(family), nftForwardTable, nftForwardChain(forwarding.ChainPreRouting))
+		stdout, err := nftables_helper.ReadChain(nftRun, nftTableFamily(family), nftForwardTable, nftForwardChain(forwarding.ChainPreRouting))
+		if errors.Is(err, nftables_helper.ErrChainNotFound) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to list nftables %s forwarding rules: %w", family, err)
 		}
@@ -56,21 +58,8 @@ func (n *nftablesAdapter) Reconcile(rules []forwarding.Rule) error {
 }
 
 func (n *nftablesAdapter) Enable() error {
-	if err := n.system.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), constant.FilePerm); err != nil {
-		return fmt.Errorf("failed to enable IP forwarding: %w", err)
-	}
-	if err := n.system.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1"), constant.FilePerm); err != nil {
-		return fmt.Errorf("failed to enable IPv6 forwarding: %w", err)
-	}
-	data, err := n.system.ReadFile("/etc/sysctl.conf")
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to read /etc/sysctl.conf: %w", err)
-	}
-	if err := n.system.WriteFile("/etc/sysctl.conf", []byte(enableForwardingSysctls(string(data), true)), constant.FilePerm); err != nil {
-		return fmt.Errorf("failed to persist IP forwarding: %w", err)
-	}
-	if err := n.system.RunWithOptionalSudo("sysctl", "-p"); err != nil {
-		return fmt.Errorf("failed to apply IP forwarding: %w", err)
+	if err := ensureForwardingSysctls(n.system, true); err != nil {
+		return err
 	}
 	if err := ensureNftForwardTables(); err != nil {
 		return fmt.Errorf("initialize nftables forwarding table: %w", err)

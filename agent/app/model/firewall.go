@@ -16,14 +16,18 @@ const FirewallRuleSequenceStep int64 = 1 << 32
 type DockerPortGuardPolicy struct {
 	BaseModel
 
-	UUID        string `gorm:"size:64;not null;uniqueIndex" json:"uuid"`
-	Family      string `gorm:"size:16;not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"family"`
-	HostIP      string `gorm:"size:64;not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"hostIP"`
-	HostPort    uint16 `gorm:"not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"hostPort"`
-	Protocol    string `gorm:"size:8;not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"protocol"`
-	Mode        string `gorm:"size:32;not null" json:"mode"`
-	Sources     string `gorm:"type:text" json:"-"`
-	Description string `gorm:"type:text" json:"description"`
+	UUID         string `gorm:"size:64;not null;uniqueIndex" json:"uuid"`
+	ReadOnly     bool   `gorm:"not null;default:false;uniqueIndex:idx_docker_port_guard_endpoint" json:"-"`
+	Family       string `gorm:"size:16;not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"family"`
+	HostIP       string `gorm:"size:64;not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"hostIP"`
+	HostPort     uint16 `gorm:"not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"hostPort"`
+	Protocol     string `gorm:"size:8;not null;uniqueIndex:idx_docker_port_guard_endpoint" json:"protocol"`
+	Mode         string `gorm:"size:32;not null" json:"mode"`
+	Sources      string `gorm:"type:text" json:"-"`
+	Description  string `gorm:"type:text" json:"description"`
+	NativeAction string `gorm:"size:32;not null;default:''" json:"-"`
+	NativeRules  string `gorm:"type:text" json:"-"`
+	Sequence     int64  `gorm:"not null;default:0" json:"-"`
 }
 
 type ForwardingRule struct {
@@ -66,19 +70,6 @@ func FirewallRuleOwner(sourceKind, sourceID string) string {
 		return sourceKind
 	}
 	return sourceKind + ":" + sourceID
-}
-
-func FirewallRulesRevision(rules []FirewallRule) (string, error) {
-	ordered := append([]FirewallRule(nil), rules...)
-	sort.Slice(ordered, func(i, j int) bool {
-		return ordered[i].UUID < ordered[j].UUID
-	})
-	payload, err := json.Marshal(ordered)
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(payload)
-	return hex.EncodeToString(sum[:]), nil
 }
 
 func FirewallRuleFromDomain(rule filter.FirewallRule) (FirewallRule, error) {

@@ -65,5 +65,7 @@ func coreMigrations() []*gormigrate.Migration {
 		migrations.AddWebsiteTemplateMenu,
 		migrations.RepairXpackAppMenus,
 		migrations.UpdateFirewallMenuPath,
+		migrations.RemoveUpageHideMenu,
+		migrations.MoveVirtualMachineMenuToXpack,
 	}
 }

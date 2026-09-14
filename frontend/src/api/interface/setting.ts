@@ -101,6 +101,7 @@ export namespace Setting {
         dashboardSimpleNodeVisible: string;
     }
     export interface TerminalInfo {
+        showTerminalButton?: string;
         lineHeight: string;
         letterSpacing: string;
         fontSize: string;
@@ -308,6 +309,8 @@ export namespace Setting {
         message: string;
         packageExist: boolean;
         packageDirectory: string;
+        packageName: string;
+        packageURL: string;
     }
     export type CommunityRestoreMode = 'online' | 'offline';
     export interface NodeItem {

@@ -192,9 +192,14 @@
                                     <template #default="{ row }">
                                         <span
                                             class="firewall-action"
-                                            :class="row.rule.action === 'accept' ? 'is-accept' : 'is-drop'"
+                                            :class="{
+                                                'is-accept': row.rule.action === 'accept',
+                                                'is-drop': isDenyAction(row.rule.action),
+                                                'is-unknown': !isKnownAction(row.rule.action),
+                                            }"
                                         >
                                             <i
+                                                v-if="isKnownAction(row.rule.action)"
                                                 class="iconfont firewall-action-icon"
                                                 :class="row.rule.action === 'accept' ? 'p-yunxu1' : 'p-a-44tubiao-226'"
                                                 aria-hidden="true"
@@ -276,6 +281,8 @@
                                 <el-table-column :label="$t('firewall.used')" min-width="200">
                                     <template #default="{ row }">
                                         <span v-if="isReadOnlyNativeRule(row)">-</span>
+                                        <el-icon v-else-if="usageLoading" class="is-loading"><Loading /></el-icon>
+                                        <span v-else-if="usageFailed">-</span>
                                         <el-tag v-else-if="ruleUsageEntries(row).length === 0" type="info" size="small">
                                             {{ $t('firewall.unUsed') }}
                                         </el-tag>
@@ -364,14 +371,16 @@
                 </LayoutContent>
             </div>
         </div>
-        <RuleOperate ref="ruleOperateRef" @search="search" />
-        <RuleImport ref="ruleImportRef" @search="search" />
+        <RuleOperate ref="ruleOperateRef" @search="search" @created="openCreateTask" />
+        <RuleImport ref="ruleImportRef" @created="openCreateTask" />
+        <TaskLog ref="createTaskLogRef" @close="search" />
         <RuleSync ref="ruleSyncRef" @search="search" />
         <ProcessDetail ref="processDetailRef" />
         <ConfirmDialog ref="resetConfirmRef" @confirm="prepareResetRules" />
         <DockerRestart
             ref="dockerRestartRef"
             v-model:withDockerRestart="withDockerRestart"
+            :title="$t('firewall.cleanupAction')"
             @submit="submitResetRules"
         />
     </div>
@@ -381,8 +390,7 @@
 import { Firewall } from '@/api/interface/firewall';
 import { Process } from '@/api/interface/process';
 import {
-    checkFirewallRules,
-    createFirewallRules,
+    adoptFirewallRule,
     deleteFirewallRules,
     loadDockerPublishedPorts,
     loadFirewallNativeDetail,
@@ -395,6 +403,7 @@ import i18n from '@/lang';
 import { getCurrentDateFormatted } from '@/utils/date';
 import { downloadWithContent } from '@/utils/file';
 import { MsgError, MsgSuccess } from '@/utils/message';
+import { dockerGuardEndpointManagementMessage, dockerGuardManagementTarget } from '@/views/host/firewall/docker/model';
 import { formatHostAddress } from '@/views/host/firewall/utils/validation';
 import RuleImport from '@/views/host/firewall/rule/import/index.vue';
 import RuleOperate from '@/views/host/firewall/rule/operate/index.vue';
@@ -403,11 +412,12 @@ import FireRouter from '@/views/host/firewall/index.vue';
 import FireStatus from '@/views/host/firewall/status/index.vue';
 import ProcessDetail from '@/views/host/process/process/detail/index.vue';
 import ConfirmDialog from '@/components/confirm-dialog/index.vue';
+import TaskLog from '@/components/log/task/index.vue';
 import DockerRestart from '@/components/docker-proxy/docker-restart.vue';
 import { loadDockerStatus } from '@/api/modules/container';
-import { computed, onMounted, reactive, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { ElMessageBox } from 'element-plus';
-import { Expand, Filter, Lock, WarningFilled } from '@element-plus/icons-vue';
+import { Expand, Filter, Loading, Lock, WarningFilled } from '@element-plus/icons-vue';
 
 interface RuleRow extends Firewall.InventoryItem {
     rowKey: string;
@@ -419,16 +429,13 @@ interface UsageEntry {
     owner: string;
     pid?: number;
     docker?: boolean;
+    dockerManagementTarget?: Firewall.DockerGuardEndpoint['managementTarget'];
+    dockerEndpoint?: Firewall.DockerGuardEndpoint;
 }
 
 interface DisplayNotice {
     key: string;
     text: string;
-}
-
-interface PriorityPositionRange {
-    min: number;
-    max: number;
 }
 
 type RuleFilter = 'family:ipv4' | 'family:ipv6' | 'action:accept' | 'action:deny' | `state:${Firewall.InventoryState}`;
@@ -465,6 +472,8 @@ const cacheFilterValues = (key: string, values: readonly string[]) => {
 const fireStatusRef = ref<InstanceType<typeof FireStatus>>();
 const ruleOperateRef = ref<InstanceType<typeof RuleOperate>>();
 const ruleImportRef = ref<InstanceType<typeof RuleImport>>();
+const createTaskLogRef = ref<InstanceType<typeof TaskLog>>();
+const openCreateTask = (taskID: string) => createTaskLogRef.value?.openWithTaskID(taskID, true);
 const ruleSyncRef = ref<InstanceType<typeof RuleSync>>();
 const processDetailRef = ref<InstanceType<typeof ProcessDetail>>();
 const resetConfirmRef = ref<InstanceType<typeof ConfirmDialog>>();
@@ -491,14 +500,19 @@ const showFirewallUnavailablePrompt = computed(
 const firewallVersion = ref('');
 const selectedRuleFilters = ref<RuleFilter[]>(loadCachedFilterValues(ruleFilterStorageKey, ruleFilterOptions, []));
 const visibleIptablesChains = ref<string[]>(
-    loadCachedFilterValues(chainFilterStorageKey, iptablesChains, iptablesChains),
+    loadCachedFilterValues(chainFilterStorageKey, iptablesChains, ['1PANEL_BASIC']),
 );
 const searchName = ref('');
 const inventoryItems = ref<Firewall.InventoryItem[]>([]);
+const positionRanges = ref<Partial<Record<Firewall.Family, Firewall.PositionRange>>>({});
 const inventoryTotal = ref(0);
 const managedTotal = ref(0);
 const listeningProcesses = ref<Process.ListeningProcess[]>([]);
 const dockerEndpoints = ref<Firewall.DockerGuardEndpoint[]>([]);
+const usageLoading = ref(false);
+const usageFailed = ref(false);
+let searchRequestID = 0;
+let usageRequest: Promise<void> = Promise.resolve();
 const selects = ref<RuleRow[]>([]);
 const scopeNotices = ref<Firewall.ScopeNotice[]>([]);
 
@@ -577,9 +591,15 @@ const inventoryRequest = (page = paginationConfig.currentPage, pageSize = pagina
 });
 
 const search = async () => {
+    const requestID = ++searchRequestID;
+    listeningProcesses.value = [];
+    dockerEndpoints.value = [];
+    usageLoading.value = false;
+    usageFailed.value = false;
     if (!isFirewallReady.value) {
         loading.value = false;
         inventoryItems.value = [];
+        positionRanges.value = {};
         scopeNotices.value = [];
         paginationConfig.total = 0;
         inventoryTotal.value = 0;
@@ -591,6 +611,7 @@ const search = async () => {
     if (scopes.length === 0) {
         loading.value = false;
         inventoryItems.value = [];
+        positionRanges.value = {};
         scopeNotices.value = [];
         paginationConfig.total = 0;
         inventoryTotal.value = 0;
@@ -599,12 +620,13 @@ const search = async () => {
     }
 
     loading.value = true;
+    usageLoading.value = true;
+    usageRequest = Promise.all([loadListeningProcesses(requestID), loadDockerEndpoints(requestID)]).then(() => {
+        if (requestID === searchRequestID) usageLoading.value = false;
+    });
     try {
-        const [response] = await Promise.all([
-            searchFirewallRules(inventoryRequest()),
-            loadListeningProcesses(),
-            loadDockerEndpoints(),
-        ]);
+        const response = await searchFirewallRules(inventoryRequest());
+        if (requestID !== searchRequestID) return;
         const total = response.data.total || 0;
         const lastPage = Math.max(1, Math.ceil(total / paginationConfig.pageSize));
         if (paginationConfig.currentPage > lastPage) {
@@ -613,13 +635,18 @@ const search = async () => {
             return;
         }
         inventoryItems.value = response.data.items || [];
+        positionRanges.value = {
+            ipv4: response.data.ipv4Range,
+            ipv6: response.data.ipv6Range,
+            inet: response.data.ipv4Range,
+        };
         scopeNotices.value = response.data.notices || [];
         paginationConfig.total = total;
         inventoryTotal.value = response.data.allTotal || 0;
         managedTotal.value = response.data.managedTotal || 0;
         selects.value = [];
     } finally {
-        loading.value = false;
+        if (requestID === searchRequestID) loading.value = false;
     }
 };
 
@@ -727,21 +754,26 @@ const listeningProtocolNumbers = (protocol: string) => {
             return [];
     }
 };
-const loadListeningProcesses = async () => {
+const loadListeningProcesses = async (requestID: number) => {
     try {
         const response = await getListeningProcess();
+        if (requestID !== searchRequestID) return;
         listeningProcesses.value = response.data || [];
     } catch {
+        if (requestID !== searchRequestID) return;
         listeningProcesses.value = [];
+        usageFailed.value = true;
     }
 };
-const loadDockerEndpoints = async () => {
+const loadDockerEndpoints = async (requestID: number) => {
     try {
-        dockerEndpoints.value = (await loadDockerPublishedPorts()).data.flatMap(
-            (container) => container.endpoints || [],
-        );
+        const response = await loadDockerPublishedPorts();
+        if (requestID !== searchRequestID) return;
+        dockerEndpoints.value = response.data.flatMap((container) => container.endpoints || []);
     } catch {
+        if (requestID !== searchRequestID) return;
         dockerEndpoints.value = [];
+        usageFailed.value = true;
     }
 };
 const ruleUsageEntries = (row: RuleRow): UsageEntry[] => {
@@ -763,6 +795,7 @@ const ruleUsageEntries = (row: RuleRow): UsageEntry[] => {
         ];
     });
     const docker = dockerEndpoints.value
+        .filter((endpoint) => row.rule.scope.family === 'inet' || endpoint.family === row.rule.scope.family)
         .filter((endpoint) => protocols.includes(endpoint.protocol === 'tcp' ? 1 : 2))
         .filter((endpoint) => isPortInRule(row.rule.destinationPort, endpoint.hostPort))
         .map((endpoint) => ({
@@ -770,13 +803,26 @@ const ruleUsageEntries = (row: RuleRow): UsageEntry[] => {
             ports: [endpoint.hostPort],
             owner: `Docker: ${endpoint.containerName || endpoint.containerID?.slice(0, 12) || '-'}`,
             docker: true,
+            dockerManagementTarget: dockerGuardManagementTarget(endpoint),
+            dockerEndpoint: endpoint,
         }));
     return [...processes, ...docker];
 };
 const usageEntryPortText = (entry: UsageEntry) => entry.ports.join(', ') || '-';
+const dockerUsageMessage = (entry: UsageEntry) => {
+    if (entry.dockerManagementTarget === 'host_firewall') {
+        return i18n.global.t('firewall.dockerInputUseHostFirewall');
+    }
+    if (entry.dockerManagementTarget === 'container_guard') {
+        return i18n.global.t('firewall.dockerInputNotProtected');
+    }
+    return entry.dockerEndpoint
+        ? dockerGuardEndpointManagementMessage(entry.dockerEndpoint)
+        : i18n.global.t('firewall.dockerTrafficPathUnknown');
+};
 const usageEntryLabel = (entry: UsageEntry) =>
     entry.docker
-        ? `${entry.owner} (${usageEntryPortText(entry)}) — ${i18n.global.t('firewall.dockerInputNotProtected')}`
+        ? `${entry.owner} (${usageEntryPortText(entry)}) — ${dockerUsageMessage(entry)}`
         : `${entry.owner} (${usageEntryPortText(entry)})`;
 const openUsageDetail = (entry: UsageEntry) => {
     if (entry.docker) {
@@ -786,77 +832,13 @@ const openUsageDetail = (entry: UsageEntry) => {
     if (entry.pid !== undefined) processDetailRef.value?.acceptParams(entry.pid);
 };
 const scopeIdentity = (rule: Firewall.Rule) => JSON.stringify(rule.scope);
-const sameIptablesPositionScope = (rule: Firewall.Rule, family: Firewall.Family, chain: string) =>
-    (rule.scope.provider === 'iptables' || rule.scope.provider === 'nftables') &&
-    rule.scope.family === family &&
-    rule.scope.table === 'filter' &&
-    rule.scope.chain === chain &&
-    rule.scope.direction === 'input';
-
-const priorityPositionRanges = (
-    item?: Firewall.InventoryItem,
-    sourceItems: Firewall.InventoryItem[] = inventoryItems.value,
-): Partial<Record<Firewall.Family, PriorityPositionRange>> => {
-    if (provider.value === 'firewalld') return {};
-    const extraPosition = item ? 0 : 1;
-    if (provider.value === 'ufw') {
-        if (!item) {
-            const maxPosition = sourceItems.reduce((max, row) => Math.max(max, row.observed?.locator.position || 0), 0);
-            const range = { min: 1, max: Math.max(1, maxPosition + 1) };
-            return { ipv4: range, ipv6: range };
-        }
-        const family = item.rule.scope.family;
-        const positions = sourceItems
-            .filter((row) => row.rule.scope.family === family && row.observed?.locator.position)
-            .map((row) => row.observed!.locator.position!);
-        const currentPosition = item.observed?.locator.position || 1;
-        return {
-            [family]: {
-                min: positions.length > 0 ? Math.min(...positions) : currentPosition,
-                max: positions.length > 0 ? Math.max(...positions) : currentPosition,
-            },
-        };
-    }
-    const chain = item?.rule.scope.chain || '1PANEL_BASIC';
-    return Object.fromEntries(
-        (['ipv4', 'ipv6'] as Firewall.Family[]).map((family) => {
-            const scopeRows = sourceItems
-                .filter((row) => sameIptablesPositionScope(row.rule, family, chain))
-                .sort(
-                    (left, right) => (left.observed?.locator.position || 0) - (right.observed?.locator.position || 0),
-                );
-            const maxPosition = scopeRows.reduce((max, row) => Math.max(max, row.observed?.locator.position || 0), 0);
-            if (!item || item.rule.scope.family !== family) {
-                return [family, { min: 1, max: Math.max(1, maxPosition + extraPosition) }];
-            }
-            const currentPosition = item.observed?.locator.position || 1;
-            const currentIndex = scopeRows.findIndex(
-                (row) => row.observed?.locator.position === item.observed?.locator.position,
-            );
-            let min = currentPosition;
-            let max = currentPosition;
-            for (let index = currentIndex - 1; index >= 0 && isEditableManagedRule(scopeRows[index]); index--) {
-                min = scopeRows[index].observed?.locator.position || min;
-            }
-            for (
-                let index = currentIndex + 1;
-                index < scopeRows.length && isEditableManagedRule(scopeRows[index]);
-                index++
-            ) {
-                max = scopeRows[index].observed?.locator.position || max;
-            }
-            return [family, { min, max }];
-        }),
-    );
-};
-
 const toRuleRows = (items: Firewall.InventoryItem[]): RuleRow[] =>
     items.map((item, index) => {
         const nativeGroup = item.rule.orderBucket || item.rule.nativeKind || 'default';
         return {
             ...item,
             rowKey:
-                item.desired?.uuid ||
+                (item.desired && `${scopeIdentity(item.rule)}:${item.desired.rule.uuid || item.desired.uuid}`) ||
                 item.observed?.instanceKey ||
                 item.observed?.marker ||
                 `${scopeIdentity(item.rule)}:${nativeGroup}:${item.observed?.locator.position ?? index}`,
@@ -904,9 +886,11 @@ const notices = computed<DisplayNotice[]>(() => {
     const unique = new Map<string, DisplayNotice>();
     scopeNotices.value.forEach((notice) => {
         if (notice.code === 'managed_scope_missing') return;
+        const text = scopeNoticeText(notice);
+        if (!text) return;
         const key = `${notice.code}:${(notice.values || []).join(',')}`;
         if (!unique.has(key)) {
-            unique.set(key, { key, text: scopeNoticeText(notice) });
+            unique.set(key, { key, text });
         }
     });
     return [...unique.values()];
@@ -915,27 +899,35 @@ const notices = computed<DisplayNotice[]>(() => {
 const scopeNoticeText = (notice: Firewall.ScopeNotice) => {
     const value = (notice.values || []).join(', ') || '-';
     switch (notice.code) {
+        case 'family_unavailable':
+            return value;
         case 'default_scope_mismatch':
             return i18n.global.t('firewall.scopeDefaultMismatch', [value]);
-        case 'managed_scope_inactive':
-            return i18n.global.t('firewall.scopeInactive');
         case 'managed_scope_missing':
             return i18n.global.t('firewall.scopeMissing', [value]);
         case 'unmanaged_active_scopes':
             return i18n.global.t('firewall.scopeUnmanagedActive', [value]);
         case 'runtime_permanent_mismatch':
-            return i18n.global.t('firewall.scopeRuntimeMismatch', [value]);
+            return i18n.global.t('firewall.scopeRuntimeMismatch');
+        default:
+            return '';
     }
 };
 
-const actionLabel = (action: Firewall.Action) => {
+const isDenyAction = (action: string) => action === 'drop' || action === 'reject';
+const isKnownAction = (action: string) => action === 'accept' || isDenyAction(action);
+
+const actionLabel = (action: string) => {
     if (action === 'accept') {
         return i18n.global.t('firewall.accept');
     }
     if (action === 'reject') {
         return i18n.global.t('firewall.reject');
     }
-    return i18n.global.t('firewall.drop');
+    if (action === 'drop') {
+        return i18n.global.t('firewall.drop');
+    }
+    return i18n.global.t('commons.status.unknown');
 };
 
 const ruleSourceLabel = (row: Firewall.InventoryItem) => {
@@ -965,6 +957,7 @@ const ruleStateDetail = (row: Firewall.InventoryItem) =>
 const ruleStateTooltip = (row: Firewall.InventoryItem) => `${ruleStateTitle(row)}：${ruleStateDetail(row)}`;
 
 const ruleIssueText = (row: Firewall.InventoryItem) => {
+    if (row.error) return row.error;
     if (row.observed?.persistence && row.observed.persistence !== 'converged') {
         return i18n.global.t('firewall.plan_runtime_permanent_mismatch');
     }
@@ -975,9 +968,7 @@ const ruleIssueText = (row: Firewall.InventoryItem) => {
 };
 
 const openCreate = async () => {
-    const unavailableScope = scopeNotices.value.find((notice) =>
-        ['managed_scope_inactive', 'managed_scope_missing'].includes(notice.code),
-    );
+    const unavailableScope = scopeNotices.value.find((notice) => notice.code === 'managed_scope_missing');
     if (unavailableScope) {
         try {
             await ElMessageBox.confirm(scopeNoticeText(unavailableScope), i18n.global.t('commons.msg.infoTitle'), {
@@ -988,11 +979,16 @@ const openCreate = async () => {
             return;
         }
     }
-    const sourceItems = await loadAllInventoryItems();
+    const ranges = { ...positionRanges.value };
+    if (isDirectBackend.value) {
+        for (const family of ['ipv4', 'ipv6'] as const) {
+            ranges[family] = { min: 1, max: (ranges[family]?.max || 0) + 1 };
+        }
+    }
     ruleOperateRef.value?.acceptParams(
         provider.value as Firewall.Provider,
         undefined,
-        priorityPositionRanges(undefined, sourceItems),
+        ranges,
         supportsFirewalldPriority.value,
     );
 };
@@ -1060,10 +1056,14 @@ const usageOwnersSummary = (owners: string[]) => {
 };
 
 const deleteRulesConfirmMessage = (selected: RuleRow[]) => {
+    const count = new Set(selected.map((row) => row.desired?.uuid)).size;
     const accepted = selected.filter((row) => row.rule.action === 'accept' && Boolean(row.observed));
     const risky = accepted.filter((row) => isWildcardDestinationPort(row.rule) || ruleUsageEntries(row).length > 0);
     if (selected.length > 1 && risky.length > 0) {
-        return i18n.global.t('firewall.deleteRiskRulesConfirm', [selected.length, risky.length]);
+        return i18n.global.t('firewall.deleteRiskRulesConfirm', [
+            count,
+            new Set(risky.map((row) => row.desired?.uuid)).size,
+        ]);
     }
     if (selected.length === 1 && accepted.length === 1) {
         const [row] = accepted;
@@ -1078,11 +1078,14 @@ const deleteRulesConfirmMessage = (selected: RuleRow[]) => {
             return i18n.global.t('firewall.deleteUsedRuleConfirm', [usageOwnersSummary(owners)]);
         }
     }
-    return i18n.global.t('firewall.deleteRuleConfirm', [selected.length]);
+    return i18n.global.t('firewall.deleteRuleConfirm', [count]);
 };
 
 const removeRules = async (selected: RuleRow[]) => {
     if (selected.length === 0) return;
+    const requestID = searchRequestID;
+    await usageRequest;
+    if (requestID !== searchRequestID) return;
     try {
         await ElMessageBox.confirm(deleteRulesConfirmMessage(selected), i18n.global.t('commons.button.delete'), {
             confirmButtonText: i18n.global.t('commons.button.confirm'),
@@ -1092,16 +1095,10 @@ const removeRules = async (selected: RuleRow[]) => {
         return;
     }
     loading.value = true;
-    const uuids = selected.flatMap((row) => (row.desired?.uuid ? [row.desired.uuid] : []));
+    const uuids = [...new Set(selected.flatMap((row) => (row.desired?.uuid ? [row.desired.uuid] : [])))];
     try {
-        let succeeded = 0;
-        let failed = 0;
-        for (let offset = 0; offset < uuids.length; offset += 256) {
-            const batch = uuids.slice(offset, offset + 256);
-            const result = (await deleteFirewallRules({ uuids: batch })).data;
-            succeeded += result.succeeded;
-            failed += result.failed;
-        }
+        if (uuids.length === 0) return;
+        const { succeeded, failed } = (await deleteFirewallRules({ uuids })).data;
         if (succeeded > 0) {
             MsgSuccess(`${i18n.global.t('commons.msg.operationSuccess')} (${succeeded}/${uuids.length})`);
         }
@@ -1192,40 +1189,11 @@ const adoptRule = async (row: RuleRow) => {
     }
     loading.value = true;
     try {
-        const plan = (await checkFirewallRules({ items: [{ rule: row.rule }] })).data.items[0];
-        if (plan.decision !== 'confirmation_required' || plan.classification !== 'exact_external') {
+        if (!row.observed.instanceKey) {
             MsgError(i18n.global.t('firewall.plan_blocked'));
             return;
         }
-        const candidate = plan.candidates?.find(
-            (item) =>
-                item.locator.position === row.observed?.locator.position &&
-                item.locator.nativeId === row.observed?.locator.nativeId &&
-                item.locator.canonical === row.observed?.locator.canonical,
-        );
-        const resolution: Firewall.ApplicableCheckAction = plan.candidates?.length === 1 ? 'adopt' : 'select_adopt';
-        if (resolution === 'select_adopt' && !candidate?.instanceKey) {
-            MsgError(i18n.global.t('firewall.plan_blocked'));
-            return;
-        }
-        const result = (
-            await createFirewallRules({
-                items: [
-                    {
-                        checkFlag: plan.checkFlag,
-                        action: resolution,
-                        adoptInstanceKey:
-                            resolution === 'select_adopt' ? candidate?.instanceKey : plan.candidates?.[0]?.instanceKey,
-                        rule: plan.requestedRule,
-                        sourceKind: 'user',
-                    },
-                ],
-            })
-        ).data;
-        if (result.failed > 0 || result.skipped > 0) {
-            MsgError(result.errors?.[0]?.error || i18n.global.t('commons.msg.operationFailed'));
-            return;
-        }
+        await adoptFirewallRule({ scope: row.rule.scope, instanceKey: row.observed.instanceKey });
         MsgSuccess(i18n.global.t('commons.msg.operationSuccess'));
         await search();
     } finally {
@@ -1235,8 +1203,14 @@ const adoptRule = async (row: RuleRow) => {
 
 const removeRule = (row: RuleRow) => removeRules([row]);
 
+const canEditDescription = (row: Firewall.InventoryItem) =>
+    Boolean(row.desired?.uuid) &&
+    (row.desired?.origin === 'created' || row.desired?.origin === 'adopted') &&
+    !row.desired?.protected;
+
 const isEditableManagedRule = (row: Firewall.InventoryItem) =>
     Boolean(row.desired?.uuid) &&
+    !row.desired?.expanded &&
     (row.desired?.origin === 'created' || row.desired?.origin === 'adopted') &&
     !row.desired?.protected &&
     !isIptablesSystemPresetScope(row.rule.scope) &&
@@ -1267,14 +1241,16 @@ const displayRulePriority = (row: Firewall.InventoryItem) => {
     return row.observed?.locator.position ?? '-';
 };
 
-const openEdit = async (row: RuleRow) => {
-    if (!isEditableManagedRule(row)) return;
-    const sourceItems = await loadAllInventoryItems();
+const openEdit = (row: RuleRow) => {
+    if (!isEditableManagedRule(row) && !canEditDescription(row)) return;
+    const currentPosition = row.observed?.locator.position || row.rule.orderIndex || 1;
+    const range = positionRanges.value[row.rule.scope.family] || { min: currentPosition, max: currentPosition };
     ruleOperateRef.value?.acceptParams(
         provider.value as Firewall.Provider,
         row,
-        priorityPositionRanges(row, sourceItems),
+        provider.value === 'firewalld' ? positionRanges.value : { [row.rule.scope.family]: range },
         supportsFirewalldPriority.value,
+        !isEditableManagedRule(row),
     );
 };
 
@@ -1297,7 +1273,7 @@ const operationButtons = [
         label: i18n.global.t('commons.button.edit'),
         permission: true,
         nodeAdmin: true,
-        show: (row: RuleRow) => isEditableManagedRule(row),
+        show: (row: RuleRow) => isEditableManagedRule(row) || canEditDescription(row),
         click: openEdit,
     },
     {
@@ -1312,6 +1288,10 @@ const operationButtons = [
 onMounted(() => {
     loading.value = true;
     fireStatusRef.value?.acceptParams();
+});
+
+onBeforeUnmount(() => {
+    searchRequestID++;
 });
 </script>
 
@@ -1352,6 +1332,10 @@ onMounted(() => {
 
     &.is-drop .firewall-action-icon {
         color: var(--el-color-info);
+    }
+
+    &.is-unknown {
+        color: var(--el-text-color-secondary);
     }
 }
 

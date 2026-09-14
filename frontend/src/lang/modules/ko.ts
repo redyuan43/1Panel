@@ -502,6 +502,8 @@ const message = {
         closeCurrent: '현재 탭 닫기',
         closeOther: '다른 탭 닫기',
         closeAll: '모두 닫기',
+        keepAlive: '페이지 세션 유지',
+        cancelKeepAlive: '페이지 세션 유지 해제',
     },
     header: {
         logout: '로그아웃',
@@ -927,7 +929,9 @@ const message = {
             from_remote: '이 모델은 1Panel을 통해 다운로드되지 않았으며 관련 풀 로그가 없습니다.',
             no_logs: '이 모델의 풀 로그가 삭제되어 관련 로그를 볼 수 없습니다.',
             vllmVersionHelper: 'FusionXpark GB 10 서버는 -cu130 버전을 선택하세요.',
-            ascendVisibleDevices: 'Ascend 표시 장치',
+            vllmDeployProfile: '배포 모델',
+            vllmProfileFlash0731: 'DeepSeek V4 Flash 0731',
+            vllmProfileVisionExp: 'DeepSeek V4 Flash Vision Exp',
             vllmCommandPortHelper: '시작 명령은 {0} 포트를 사용해야 하며, 그렇지 않으면 서비스에 접근할 수 없습니다.',
             ascendVisibleDevices: 'Ascend 표시 장치 (ASCEND_RT_VISIBLE_DEVICES)',
             syncModelAccount: '모델 계정에 동기화',
@@ -1118,7 +1122,6 @@ const message = {
             cachedToken: '캐시 Token',
             cacheHitRate: '캐시 적중률',
             activeUsers: '활성 사용자',
-            activeStreamingRequests: '활성 스트리밍 요청',
             activeModels: '활성 모델',
             failedRequests: '실패한 요청',
             averageTokenPerRequest: '평균 Token/요청',
@@ -2028,6 +2031,8 @@ const message = {
         profileBlockDesc: 'Channel, Select 및 동기화 프리미티브의 차단 대기 시간을 측정합니다.',
     },
     terminal: {
+        showTerminalButton: '터미널 바로가기',
+        showTerminalButtonHelper: '활성화하면 페이지 오른쪽 하단에 터미널 바로가기 버튼이 표시됩니다.',
         local: '로컬',
         defaultConn: '기본 연결',
         defaultConnHelper: '이 작업은 【{0}】의 터미널을 연 후 자동으로 노드 터미널에 연결됩니다. 계속하시겠습니까?',
@@ -2064,6 +2069,18 @@ const message = {
         key: '개인 키',
         keyPassword: '개인 키 비밀번호',
         emptyTerminal: '현재 연결된 터미널이 없습니다.',
+        sessionReconnecting: '연결이 끊어졌습니다. 다시 연결하는 중...',
+        sessionExpired: '세션을 더 이상 사용할 수 없습니다. Enter 키를 누르거나 다시 연결을 클릭하여 새 세션을 여세요',
+        sessionKicked: '이 세션은 다른 창에서 열렸습니다',
+        sessionCount: '세션 {0}개',
+        sessionRules: '터미널 세션 규칙',
+        sessionRuleClose: '터미널을 닫으면 세션이 즉시 종료됩니다.',
+        sessionRuleDisconnect: '새로고침, 브라우저 종료, 네트워크 끊김 후 30분 이내에 복구할 수 있습니다.',
+        sessionRuleRevalidate: '로그인이 무효이거나 인증 시간이 초과되면 세션이 종료됩니다.',
+        sessionRuleResources: '터미널이 많을수록 리소스 사용량이 늘어납니다. 사용하지 않는 터미널은 닫아 주세요.',
+        minimize: '최소화',
+        closeAllSessions: '모든 세션 닫기',
+        closeAllConfirm: '모든 터미널 세션이 끊기며 복구할 수 없습니다. 계속하시겠습니까?',
         lineHeight: '줄 높이',
         letterSpacing: '자간',
         fontSize: '글꼴 크기',
@@ -2584,6 +2601,7 @@ const message = {
         panelInstallDir: '1Panel 설치 디렉터리는 삭제할 수 없습니다.',
         wgetTask: '다운로드 작업',
         stopWgetConfirm: '이 다운로드 작업을 중지하시겠습니까?',
+        downloadRecordsNotRemoved: '일부 기록을 제거하지 못했습니다. 새로 고침 후 다시 시도하세요.',
         existFileTitle: '동일한 이름의 파일 경고',
         existFileHelper: '업로드한 파일에 동일한 이름의 파일이 포함되어 있습니다. 덮어쓰시겠습니까?',
         existFileSize: '파일 크기 (새로운 -> 오래된)',
@@ -2707,6 +2725,7 @@ const message = {
         portChangeHelper: '서비스 포트를 수정하고 서비스를 다시 시작합니다. 계속하시겠습니까?',
         theme: '테마',
         menuTabs: '메뉴 탭',
+        menuTabsHelper: '활성화한 후 탭의 잠금 버튼을 클릭하면 페이지 세션을 유지할 수 있습니다.',
         menuAccordion: '메뉴 다중 펼침',
         menuAccordionHelper: '활성화하면 사이드바의 여러 메뉴 그룹을 동시에 펼쳐 둘 수 있습니다.',
         dark: '다크',
@@ -3072,6 +3091,8 @@ const message = {
         upgradeNow: '지금 업그레이드',
         source: '다운로드 소스',
         versionNotSame: '노드 버전이 메인 노드와 일치하지 않습니다. 노드 관리에서 업그레이드한 후 다시 시도해 주세요.',
+        currentNodeVersionNotSame:
+            '현재 노드 버전이 메인 노드와 일치하지 않습니다. 관리자에게 문의하여 현재 노드를 업그레이드하세요.',
         versionCompare:
             '노드 {0}이(가) 이미 업그레이드 가능한 최신 버전입니다. 마스터 노드 버전을 확인 후 다시 시도하세요!',
         about: '정보',
@@ -3171,14 +3192,15 @@ const message = {
         restoreCommunity: '커뮤니티 버전 복원',
         restoreCommunityOnline: '온라인 복원',
         restoreCommunityOffline: '오프라인 복원',
-        restoreCommunityPackageFound:
-            '사용 가능한 Community Edition 오프라인 설치 패키지가 감지되었습니다. 오프라인 복원을 실행할 수 있습니다.',
-        restoreCommunityPackageMissing:
-            '사용 가능한 Community Edition 오프라인 설치 패키지가 감지되지 않아 현재 오프라인 복원을 실행할 수 없습니다.',
+        restoreCommunityPackageFound: '설치 패키지 준비 완료',
+        restoreCommunityPackageMissing: '설치 패키지 배치 대기 중',
+        restoreCommunityPackageChecking: '설치 패키지 확인 중',
+        restoreCommunityPackageReadyHelper: '오프라인 복원을 바로 실행할 수 있습니다.',
         restoreCommunityOnlineHelper:
             '현재 버전의 커뮤니티 버전 패키지를 자동으로 다운로드하고 Enterprise 전용 데이터를 정리합니다.',
         restoreCommunityOfflineHelper:
             '현재 Enterprise 버전 이상인 공식 패키지를 {path}에 저장하세요. 사용 가능한 패키지가 감지되면 전환이 활성화됩니다.',
+        restoreCommunityCopyDownloadLink: '다운로드 링크 복사',
         restoreCommunityConfirm:
             '버전 전환 후 현재 Enterprise 슈퍼 관리자 계정으로 커뮤니티 버전에 로그인할 수 있습니다. 전환 과정에서 Enterprise 전용 데이터가 삭제되므로 신중하게 진행하세요.',
         restoreCommunityStarting: '커뮤니티 버전을 준비 중입니다. 완료되면 패널이 자동으로 다시 시작됩니다.',
@@ -3204,6 +3226,7 @@ const message = {
         monitor:
             '상용 버전으로 업그레이드하면 웹사이트의 실시간 상태, 방문자 추세, 유입 경로, 요청 로그 등을 확인할 수 있습니다.',
         alert: '상용 버전으로 업그레이드하면 SMS 알림을 받고 알림 로그를 확인할 수 있습니다.',
+        vm: '상용 버전으로 업그레이드하면 1Panel에서 가상 머신, 이미지와 템플릿, 가상 네트워크 및 스토리지 리소스를 통합 관리할 수 있습니다.',
         node: '상용 버전으로 업그레이드하면 1Panel에서 여러 Linux 서버를 관리할 수 있습니다.',
         nodeApp:
             '상용 버전으로 업그레이드하면 노드를 수동으로 전환하지 않고도 다중 노드 애플리케이션 버전을 일괄 업그레이드할 수 있습니다.',
@@ -3827,6 +3850,14 @@ const message = {
         gzipMinLengthHelper: '최소 압축 파일 크기',
         gzipCompLevelHelper: '압축률',
         gzipHelper: '전송을 위한 압축 활성화',
+        brotliHelper: 'brotli 압축 활성화, 일반적으로 gzip보다 작습니다',
+        brotliCompLevelHelper: 'brotli 압축률, 0에서 11까지',
+        brotliManagedExternallyHelper:
+            'brotli가 nginx.conf에 수동으로 구성되어 있습니다. 패널은 적용 중인 값만 표시하며 덮어쓰지 않습니다.',
+        brotliManagedUnavailableHelper:
+            '패널이 관리되는 brotli 구성을 nginx.conf에 자동으로 추가할 수 없습니다. 아래 설정은 적용되지 않습니다.',
+        brotliMinLengthHelper: 'brotli로 압축할 최소 응답 크기',
+        brotliSaveFailed: 'brotli 설정 저장에 실패했습니다. 위의 gzip 설정은 적용되었습니다',
         connections: '활성 연결',
         accepts: '수락',
         handled: '처리됨',
@@ -3961,6 +3992,8 @@ const message = {
     firewall: {
         create: '규칙 만들기',
         edit: '규칙 수정',
+        quickJump: '빠른 이동',
+
         used: '사용됨',
         unUsed: '사용 안 함',
         managed: '패널 생성',
@@ -3974,33 +4007,22 @@ const message = {
         protectedHelper: '접속 장애를 방지하기 위해 편집하거나 삭제할 수 없는 중요한 시스템 규칙입니다.',
         stateShort: { managed: '패널', adopted: '관리', external: '외부', protected: '보호', drifted: '불일치' },
         ruleTargetRequired: 'IP 주소 또는 포트를 하나 이상 입력하세요',
-        batchRuleLimit: '한 번에 최대 {0}개의 규칙을 생성할 수 있습니다',
         resolution_adopt: '관리 대상으로 전환',
+        plan_duplicate_rules:
+            '조건과 동작이 동일한 중복 규칙은 관리 대상으로 추가할 수 없습니다. 중복 규칙을 수동으로 삭제한 후 다시 시도하세요.',
         adoptRuleConfirm:
             '관리 대상으로 전환하면 1Panel이 이 기존 규칙을 유지하고 삭제할 수 있습니다. 계속하시겠습니까?',
-        plan_equivalent_external_rule:
-            '동일한 외부 규칙이 이미 있습니다. 중복 생성 대신 관리 대상으로 전환할 수 있습니다.',
-        plan_multiple_equivalent_external_rules: '동일한 외부 규칙이 여러 개 있습니다. 관리할 규칙을 선택하세요.',
-        plan_equivalent_managed_rule: '동일한 규칙을 1Panel이 이미 관리하고 있습니다. 중복 생성할 필요가 없습니다.',
+        plan_exact_rule_conflict: '일치 조건이 같지만 허용 또는 거부 동작이 반대인 규칙이 이미 있습니다.',
         allRulesAlreadyExist: '확인한 규칙 {0}개가 모두 이미 존재합니다. 새로 생성할 규칙이 없습니다.',
-        ruleCheckResult: '규칙 검사 결과',
-        ruleCheckStatus_creatable: '생성 가능',
-        ruleCheckStatus_existing: '이미 존재함',
-        ruleCheckStatus_error: '오류',
-        ruleCheckExistingHelper: '동일한 규칙이 이미 존재하므로 이번 작업에서는 건너뜁니다.',
-        ruleCheckReadyHelper: '검사를 통과했습니다. 이 규칙을 생성할 수 있습니다.',
-        ruleCheckExternalExists: '동일한 외부 규칙이 이미 존재하며 자동으로 건너뜁니다.',
-        ruleCheckBlockedHelper: '오류가 있는 규칙은 제출할 수 없습니다. 돌아가서 수정한 후 다시 검사하세요.',
         plan_managed_rule_drifted: '관리 규칙이 실제 방화벽과 일치하지 않습니다. 먼저 불일치를 해결하세요.',
         plan_opaque_rule_in_target_scope: '대상 범위에 안전하게 분석할 수 없는 규칙이 있어 작업을 중지했습니다.',
         plan_runtime_permanent_mismatch: '실행 중 구성과 영구 방화벽 구성이 다릅니다. 먼저 동기화하세요.',
         plan_protected_rule: '이 규칙은 보호되어 관리 전환, 변경 또는 삭제할 수 없습니다.',
         plan_blocked: '이 규칙을 안전하게 적용할 수 없습니다. 목록을 새로 고친 후 다시 시도하세요.',
         scopeDefaultMismatch: '시스템 기본 zone은 {0}이며 이 페이지는 public zone만 관리합니다.',
-        scopeInactive: '관리 범위가 비활성 상태입니다. 새 규칙이 현재 트래픽에 적용되지 않을 수 있습니다.',
         scopeMissing: '관리 범위 {0}이(가) 없으며 첫 규칙을 적용할 때 안전하게 생성됩니다.',
         scopeUnmanagedActive: '다른 활성 범위가 감지되었습니다: {0}. 1Panel은 해당 규칙을 변경하지 않습니다.',
-        scopeRuntimeMismatch: '실행 중 구성과 영구 구성의 다음 항목이 다릅니다: {0}.',
+        scopeRuntimeMismatch: 'firewalld의 실행 중 구성과 영구 구성이 다릅니다. 방화벽을 재시작하세요.',
         dockerRestart: '방화벽 작업에는 Docker 서비스 재시작이 필요합니다',
         firewallHelper: '{0} 시스템 방화벽',
         firewallNotStart: '현재 시스템 방화벽이 활성화되지 않았습니다. 먼저 활성화하세요.',
@@ -4029,27 +4051,9 @@ const message = {
         configuredRules: '{0}개 규칙 설정됨',
         addressFamily: 'IP 버전',
         portOrRange: '포트 / 범위',
-        exportAllRules: '모든 규칙 내보내기',
         importBackendHelper: '가져온 규칙은 현재 {0} 백엔드에 맞게 변환됩니다. 원본 백엔드의 규칙은 변경되지 않습니다.',
-        resetDirectRulesHelper:
-            '{0}에서 1Panel 시스템 방화벽 체인, 실행 규칙 및 영구 파일을 삭제하고 데이터베이스 정책은 유지합니다',
-        resetWhitelistRulesHelper:
-            '{0}의 활성 사용자 설정을 재설정하고 설치 기본값으로 복원한 후 비활성화합니다. 데이터베이스 정책은 유지되며 나중에 다시 동기화할 수 있습니다.',
-        cleanupForwardingBackendHelper:
-            '{0}의 1Panel 포트 전달 런타임 규칙을 재설정합니다. 관련 규칙과 체인을 모두 삭제하고 데이터베이스 데이터는 유지합니다',
-        cleanupDockerBackendHelper:
-            '{0}의 1Panel Docker 포트 보호 런타임 규칙을 재설정합니다. 관련 규칙과 체인을 모두 삭제하고 데이터베이스 데이터는 유지합니다',
-        cleanupBeforeBackendSwitch:
-            '현재 {0} 백엔드에 1Panel 런타임 규칙이 남아 있습니다. {1}(으)로 전환하기 전에 먼저 재설정하세요.',
-        cleanupAction: '재설정',
-        backendSwitchNotice:
-            '시스템 방화벽, 포트 전달 또는 Docker 보호를 전환하기 전에 현재 백엔드를 재설정하세요. 데이터베이스 정책은 유지되며 전환 후 다시 초기화하거나 동기화할 수 있습니다.',
-        switchBackendHelper: '{0}(으)로 전환하시겠습니까?',
-        switchDockerBackendHelper: '{0}(으)로 전환하시겠습니까? Docker 설정을 업데이트하고 Docker를 재시작합니다.',
         ruleSyncTitle: '규칙 동기화',
         ruleSyncAction: '규칙 동기화',
-        ruleSyncHelper:
-            '선택한 방화벽의 1Panel 관리 규칙을 현재 방화벽에 동기화합니다. 원본 규칙은 삭제되지 않으며 외부 규칙은 동기화되지 않습니다.',
         ruleSyncDatabase: '1Panel 데이터베이스',
         ruleSyncDatabaseHelper:
             '1Panel 데이터베이스 규칙을 기준으로 현재 방화벽의 관리 규칙을 동기화하고 조정합니다. 누락된 규칙은 추가되고 불필요한 규칙은 삭제됩니다.',
@@ -4058,7 +4062,6 @@ const message = {
             '데이터베이스 규칙 {0}개와 정확히 일치하도록 {1}을 동기화하시겠습니까? 대상 규칙 {2}개가 삭제되고 누락된 규칙이 추가됩니다.',
         ruleSyncSource: '구성 소스',
         ruleSyncTarget: '현재 백엔드',
-        ruleSyncTotal: '변환된 규칙',
         ruleSyncReady: '동기화 가능',
         ruleSyncExisting: '이미 존재',
         ruleSyncRemove: '삭제 예정',
@@ -4069,23 +4072,16 @@ const message = {
             managedOrderDiffers: '관리 규칙 순서가 데이터베이스 순서와 다릅니다.',
             managedOnlyInTarget: '관리 규칙이 대상 방화벽에만 존재합니다.',
             managedRuntimeCannotRemove: '관리 중인 런타임 규칙을 안전하게 삭제할 수 없습니다.',
-            managedOrderBlocked: '외부, 인식할 수 없거나 보호된 규칙을 넘어 관리 규칙의 순서를 변경할 수 없습니다.',
-            mayBlockManagement: '이 규칙은 현재 관리 연결을 차단할 수 있습니다.',
             missingFromTarget: '대상 방화벽에 이 규칙이 없습니다.',
             targetDiffers: '대상 규칙이 데이터베이스 정책과 다릅니다.',
             alreadyExistsInTarget: '대상 방화벽에 이 규칙이 이미 존재합니다.',
             onlyInTarget: '이 규칙은 대상 방화벽에만 존재합니다.',
             stale: '방화벽 규칙 상태가 오래되었습니다. 새로 고친 후 다시 시도하세요.',
-            lockoutRisk: '이 방화벽 변경으로 관리 접근이 차단될 수 있습니다.',
             protectedRule: '보호된 방화벽 규칙은 수정할 수 없습니다.',
+            dockerAcceptReadOnly:
+                '이 ACCEPT 규칙은 읽기 전용이며 다른 규칙을 동기화할 때 그대로 유지됩니다. 제거하려면 호스트에서 수동으로 삭제하세요.',
             cannotReconcile: '대상 규칙을 동기화할 수 없습니다: {0}',
         },
-        ruleSyncConfirm: '{0}개 규칙을 {1}에서 {2}(으)로 동기화하시겠습니까? 원본 백엔드는 변경되지 않습니다.',
-        ruleSyncResetSource: '동기화 성공 후 원본 방화벽 {0} 재설정 및 비활성화',
-        ruleSyncResetSourceHelper: '모든 규칙이 성공적으로 동기화된 경우에만 원본 방화벽을 재설정합니다.',
-        ruleSyncResetSourceBlocked: '동기화할 수 없는 규칙이 있습니다. 먼저 해결한 후 원본을 재설정하십시오.',
-        ruleSyncResetSourceConfirm:
-            '{0}개 규칙을 {1}에서 {2}(으)로 동기화한 후 {1}을(를) 재설정하고 비활성화하시겠습니까? 모든 설정이 삭제되며 되돌릴 수 없습니다.',
         ruleSyncPartial: '동기화 완료: 성공 {0}개, 이미 존재 {1}개, 실패 {2}개.',
         ruleSyncSuccess: '동기화 완료: 성공 {0}개, 이미 존재 {1}개, 삭제 {2}개.',
         ruleSyncStatus: {
@@ -4094,6 +4090,21 @@ const message = {
             remove: '삭제 예정',
             blocked: '동기화 불가',
         },
+        resetDirectRulesHelper:
+            '{0}에서 1Panel 시스템 방화벽 체인, 실행 규칙 및 영구 파일을 삭제하고 데이터베이스 정책은 유지합니다',
+        resetWhitelistRulesHelper:
+            '{0}의 활성 사용자 설정을 재설정하고 설치 기본값으로 복원한 후 비활성화합니다. 데이터베이스 정책은 유지되며 나중에 다시 동기화할 수 있습니다.',
+        cleanupForwardingBackendHelper:
+            '{0}의 1Panel 포트 전달 런타임 규칙을 재설정합니다. 관련 규칙과 체인을 모두 삭제하고 데이터베이스 데이터는 유지합니다',
+        cleanupDockerBackendHelper:
+            '{0}의 1Panel Docker 포트 보호 런타임 규칙을 재설정합니다. 관련 규칙과 체인을 모두 삭제하고 데이터베이스 데이터는 유지합니다',
+        cleanupBeforeBackendSwitch:
+            '현재 {0} 백엔드에 1Panel 런타임 규칙이 남아 있습니다. {1}(으)로 전환하기 전에 먼저 재설정하세요. 재설정은 런타임 규칙만 정리하며 데이터베이스 정책은 유지됩니다. 전환 후 다시 초기화하거나 동기화할 수 있습니다.',
+        cleanupAction: '재설정',
+        backendSwitchNotice:
+            '하나의 방화벽 관리 방식만 활성화하는 것이 좋습니다. 여러 방화벽을 동시에 실행하면 규칙 충돌, 상태 불일치 또는 컨테이너 포트 접근 오류가 발생할 수 있습니다.',
+        switchBackendHelper: '{0}(으)로 전환하시겠습니까?',
+        switchDockerBackendHelper: '{0}(으)로 전환하시겠습니까? Docker 설정을 업데이트하고 Docker를 재시작합니다.',
         uninstalledStatus: '설치되지 않음',
         selectedBackendNotInstalled:
             '{backend} 서비스를 감지하지 못했습니다. {library}에서 수동으로 설치하거나 {settings}에서 방화벽 백엔드를 전환하세요.',
@@ -4101,6 +4112,22 @@ const message = {
         partiallyInitialized: '일부 초기화됨',
         dockerGuardHelper:
             'Docker 컨테이너가 호스트에 게시한 포트의 접근 제한을 설정합니다. 보호되지 않은 포트는 Docker 기본 접근 방식을 유지합니다.',
+        dockerTrafficPathMixed: '선택한 포트가 서로 다른 접근 경로를 사용합니다. 각각 설정하세요.',
+        dockerTrafficPathUnknown:
+            '이 포트의 접근 경로를 확인할 수 없습니다. Docker 네트워크 설정을 확인한 후 다시 시도하세요.',
+        dockerTrafficPathReason: {
+            nat_inspect_failed:
+                'Docker NAT 규칙을 읽을 수 없습니다. 방화벽 명령과 실행 권한을 확인한 후 새로 고침하세요.',
+            proxy_inspect_failed:
+                'docker-proxy 프로세스를 확인할 수 없습니다. 시스템 프로세스 정보에 대한 접근 권한을 확인한 후 새로 고침하세요.',
+            nat_chain_unreachable:
+                '이 포트의 Docker 전달 규칙은 있지만 NAT 진입 체인이 활성화되지 않았습니다. Docker 방화벽 규칙을 확인하거나 Docker를 다시 시작한 후 새로 고침하세요.',
+            no_matching_path:
+                '이 포트에 활성 Docker 전달 규칙이나 프록시 프로세스가 없습니다. 해당 컨테이너를 시작하거나 다시 시작한 후 새로 고침하세요. 문제가 계속되면 Docker 네트워크 설정을 확인하세요.',
+        },
+        dockerInputPolicyNotEffective:
+            '이 포트는 호스트가 직접 수신하므로 기존 컨테이너 포트 보호 규칙이 적용되지 않습니다. 호스트 방화벽에서 설정하세요.',
+        dockerInputUseHostFirewall: '이 포트의 접근 규칙은 호스트 방화벽에서 설정하세요.',
         dockerInputNotProtected:
             '호스트 INPUT 규칙은 이 Docker 게시 포트를 직접 보호하지 않습니다. 클릭하여 컨테이너 포트 보호를 여세요.',
         notInitialized: '초기화되지 않음',
@@ -4131,9 +4158,7 @@ const message = {
             '선택한 규칙의 설정이 서로 다릅니다. 다시 설정하면 모두 동일하게 덮어쓰며, 설명이 비어 있으면 모든 설명을 지웁니다.',
         effective: '적용됨',
         forwardUnsynced: '미동기화',
-        notEnabled: '활성화되지 않음',
         notEffective: '적용되지 않음',
-        dockerGuardStatusEffective: '{0} 컨테이너 포트 보호가 정상적으로 작동 중입니다',
         dockerGuardStatusReason: {
             command_missing:
                 '{0} 방화벽 구성 요소를 사용할 수 없어 해당 보호를 활성화할 수 없습니다. 시스템 방화벽 환경을 확인하세요',
@@ -4155,11 +4180,7 @@ const message = {
         forwardPortHelper: '포트 범위를 지원합니다, 예: 8080-8089',
         forwardInboundInterface: '포워딩 인바운드 네트워크 인터페이스',
         exportHelper: '{0}개의 방화벽 규칙을 내보내려고 합니다. 계속하시겠습니까?',
-        importSuccess: '{0}개의 규칙을 성공적으로 가져왔습니다',
-        importPartialSuccess: '가져오기 완료: 성공 {0}건, 실패 {1}건',
         basicStatus: '현재 방화벽이 바인딩되지 않았습니다. 먼저 바인딩하세요!',
-        baseIptables: 'iptables 서비스',
-        forwardIptables: 'iptables 포트 포워딩 서비스',
         initMsg: '{0}을(를) 초기화하려고 합니다. 계속하시겠습니까?',
         initDirectBackendConflictMsg:
             '{1}이(가) 아직 바인딩되어 있습니다. {0}을(를) 초기화하면 두 방화벽 규칙 세트가 모두 적용되어 예기치 않게 접근이 차단될 수 있습니다. 계속하시겠습니까?',
@@ -4171,7 +4192,7 @@ const message = {
             '바인딩 해제 - 바인딩 해제 시 추가된 모든 방화벽 규칙이 무효화됩니다. 주의하여 진행하세요. 확인하시겠습니까?',
         portWhiteList: '포트 화이트리스트',
         portWhiteListAlter:
-            '저장해도 현재 방화벽 규칙은 즉시 변경되지 않습니다. 새 포트는 다음 초기화 또는 시작 시 허용됩니다. 제거한 포트를 닫으려면 규칙 목록에서 기존 규칙을 수동으로 삭제하세요.',
+            '변경 사항은 저장 즉시 적용됩니다. 추가한 포트는 자동으로 허용됩니다. 포트를 제거하면 보호만 해제됩니다. 포트를 닫으려면 규칙 목록에서 허용 규칙을 삭제하세요.',
         portWhiteListHelper: 'IPv4/IPv6, TCP/UDP, 단일 포트 및 8000-8100과 같은 포트 범위를 지원합니다.',
         chain: '체인',
         sourceIP: '소스 IP',
@@ -4191,10 +4212,14 @@ const message = {
             '이 규칙은 {0}에서 {1}에 접근하도록 허용합니다. 삭제하면 여러 서비스에 대한 접근에 영향을 줄 수 있습니다. 계속하시겠습니까?',
         deleteRiskRulesConfirm:
             '{0}개의 규칙을 삭제합니다. 그중 {1}개의 허용 규칙이 서비스 접근에 영향을 줄 수 있습니다. 계속하시겠습니까?',
-        editRuleConfirm: '다음 필드가 변경됩니다: {0}. 규칙이 즉시 적용되고 다시 검증됩니다. 계속하시겠습니까?',
-        quickJump: '빠른 이동',
+        editRuleConfirm: '이 규칙을 수정하시겠습니까?',
     },
     runtime: {
+        importEnv: '환경 변수 가져오기',
+        envImportError: '{0}행: {1}',
+        envInvalidAssignment: '유효한 NAME=value 형식이 필요합니다',
+        envUnclosedQuote: '따옴표가 닫히지 않았습니다',
+        envUnexpectedText: '닫는 따옴표 뒤에 불필요한 텍스트가 있습니다',
         runtime: '실행 환경',
         workDir: '작업 디렉토리',
         localHelper: '로컬 환경 설치 및 오프라인 환경 사용 관련 문제는 다음을 참조하세요 ',
@@ -6139,6 +6164,14 @@ const message = {
             nodeDashContent3: '다중 노드 데이터베이스의 통합 관리, 주요 상태 한눈에 확인, 원클릭 백업 지원',
             nodeDashTitle4: '예약 작업 관리',
             nodeDashContent4: '다중 노드 예약 작업의 통합 관리, 상태 모니터링, 빠른 시작/중지 및 수동 트리거 실행 지원',
+            vmTitle1: '가상 머신 관리',
+            vmContent1: '가상 머신을 생성하고 관리하며 실행 상태를 확인하고 리소스 할당을 조정합니다.',
+            vmTitle2: '이미지 및 템플릿',
+            vmContent2: 'ISO 이미지와 가상 머신 템플릿을 관리하여 가상 머신을 간편하게 생성합니다.',
+            vmTitle3: '가상 네트워크',
+            vmContent3: '가상 네트워크를 통합 관리하고 가상 머신의 네트워크 연결을 구성합니다.',
+            vmTitle4: '스토리지 풀',
+            vmContent4: '스토리지 풀을 관리하고 가상 머신에 스토리지 리소스를 할당합니다.',
             nodeTitle1: '원클릭 노드 추가',
             nodeContent1: '여러 서버 노드를 빠르게 통합',
             nodeTitle2: '일괄 업그레이드',
@@ -6567,7 +6600,57 @@ const message = {
             barkConfigHelper: 'Bark 알림 구성',
             webhookName: '봇 이름',
             webhookUrl: 'Webhook URL',
-            alertConfigProHelper: '상용 버전에서는 WeCom, DingTalk, Feishu, SMS 알림도 지원합니다.',
+            custom: 'Webhook',
+            webhookPreset: '프리셋',
+            genericJsonPreset: '일반 JSON',
+            customPreset: '사용자 지정',
+            webhookUrlSecretHelper: 'Webhook URL은 암호화되어 저장되며 여기에서 확인하고 편집할 수 있습니다',
+            webhookPublicAddressHelper:
+                '공개 네트워크에서 접근 가능한 HTTP/HTTPS 주소만 지원하며 로컬, 사설 및 예약 주소는 차단됩니다',
+            customWebhookRecoveryRequired:
+                '이 설정은 유효하지 않거나 이전 버전에서 생성되었습니다. Webhook URL과 필요한 비밀 Header를 다시 입력한 후 저장하세요.',
+            clearSecret: '지우기',
+            keepSecret: '변경하지 않음',
+            secretCleared: '저장하면 이 비밀 값이 지워집니다',
+            bodyType: 'Body 유형',
+            bodyTemplate: 'Body 템플릿',
+            formFieldName: '필드 이름',
+            formFieldValue: '필드 값',
+            addFormField: '필드 추가',
+            webhookAdvanced: '고급 설정',
+            headers: 'Headers',
+            headerName: 'Header 이름',
+            headerValue: 'Header 값',
+            secretValue: '비밀 값',
+            addHeader: 'Header 추가',
+            templateVariables: '템플릿 변수',
+            templateVariableTitle: '알림 제목',
+            templateVariableMessage: '알림 내용',
+            templateVariableType: '알림 유형',
+            templateVariableNodeName: '노드 이름',
+            templateVariableTimestamp: '발생 시간',
+            templateVariablesHelper:
+                'title=알림 제목, message=알림 내용, type=알림 유형, nodeName=노드 이름, timestamp=발생 시간. 변수를 클릭하면 Body에 삽입됩니다.',
+            testResultStale: '설정이 변경되어 이전 테스트 결과가 더 이상 유효하지 않습니다',
+            alertConfigChanged: '구성이 업데이트되었습니다. 새로 고친 후 다시 시도하세요.',
+            presetOverwriteHelper: '프리셋을 전환하면 현재 Body 설정을 덮어씁니다. 계속하시겠습니까?',
+            customWebhookValidation: {
+                displayNameRequired: '표시 이름을 입력하세요',
+                urlRequired: 'Webhook URL을 입력하세요',
+                urlInvalid: 'Webhook URL은 유효한 HTTP 또는 HTTPS URL이어야 합니다',
+                bodyRequired: '요청 Body를 설정하세요',
+                jsonInvalid: 'JSON Body 템플릿이 올바르지 않습니다',
+                formFieldRequired: 'Form 필드 이름은 필수입니다',
+                formFieldDuplicate: 'Form 필드 이름은 중복될 수 없습니다',
+                headerRequired: 'Header 이름은 필수입니다',
+                headerInvalid: 'Header 이름이 올바르지 않습니다',
+                headerDuplicate: 'Header 이름은 중복될 수 없습니다',
+                headerReserved: '이 Header는 시스템에서 관리하므로 사용자 지정할 수 없습니다',
+                headerMustBeSecret: '인증 또는 자격 증명 Header는 비밀 값으로 설정해야 합니다',
+                templateVariableInvalid: 'Body에 지원되지 않는 템플릿 변수가 있습니다',
+                secretRequired: '비밀 값을 입력하거나 변경하지 않음/지우기를 선택하세요',
+            },
+            alertConfigProHelper: '상용 버전에서는 더 많은 알림 채널을 지원합니다.',
         },
         theme: {
             lingXiaGold: 'LXware Gold',
@@ -6617,6 +6700,8 @@ const message = {
             submitSuccess: '동기화 작업이 제출되었습니다.',
         },
         vm: {
+            countLimitHelper:
+                'Professional 버전에서는 가상 머신을 최대 {0}대까지 생성할 수 있습니다. Enterprise 버전은 대수 제한이 없습니다.',
             vm: '가상 머신',
             title: '가상 머신 관리',
             healthCheck: '상태 점검',
@@ -6697,6 +6782,8 @@ const message = {
                 },
             },
             dependencies: '종속성',
+            architectureUnsupported:
+                '현재 시스템 아키텍처 {0}은(는) 지원되지 않습니다. VM 기능은 현재 AMD64 및 ARM64만 지원합니다.',
             dependencyPurpose: '용도',
             dependencyPurposeMap: {
                 libvirt: '가상 머신 관리 서비스를 제공하며 수명 주기와 리소스 스케줄링을 담당합니다.',

@@ -20,6 +20,8 @@ import (
 	"github.com/1Panel-dev/1Panel/core/init/session/psession"
 	"github.com/1Panel-dev/1Panel/core/utils/encrypt"
 	"github.com/1Panel-dev/1Panel/core/utils/passkey"
+	terminalsession "github.com/1Panel-dev/1Panel/core/utils/terminal_session"
+	"github.com/1Panel-dev/1Panel/core/utils/xpack"
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -48,6 +50,7 @@ func NewIAuthService() IAuthService {
 }
 
 func (u *AuthService) LogOut(c *gin.Context) error {
+	identity, _ := terminalsession.FromContext(c)
 	httpsSetting, err := settingRepo.Get(repo.WithByKey("SSL"))
 	if err != nil {
 		return err
@@ -61,7 +64,14 @@ func (u *AuthService) LogOut(c *gin.Context) error {
 			return err
 		}
 	}
+	CloseTerminalSessions("auth_session", identity.UserID, identity.AuthSessionID)
 	return nil
+}
+
+func CloseTerminalSessions(scope, userID, authSessionID string) {
+	if err := xpack.AuthProvider.RevokeTerminalSessions(scope, userID, authSessionID); err != nil {
+		global.LOG.Warnf("revoke terminal sessions failed, scope=%s, err: %v", scope, err)
+	}
 }
 
 func (u *AuthService) VerifyCode(code string) (bool, error) {

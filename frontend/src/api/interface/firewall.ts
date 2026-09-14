@@ -61,6 +61,7 @@ export namespace Firewall {
         ipv6: BackendFamilyStatus;
     }
     export interface ForwardRuleSearch extends ReqPage {
+        all?: boolean;
         strategy: string;
         info: string;
     }
@@ -154,26 +155,28 @@ export namespace Firewall {
         ruleKey: string;
         origin: RuleOrigin;
         protected?: boolean;
+        expanded?: boolean;
         marker?: string;
         observedInstanceKey?: string;
     }
 
-    export interface RuntimeUsage {
-        used: boolean;
-        usedBy?: string[];
-        reason?: string;
+    export interface PositionRange {
+        min: number;
+        max: number;
     }
 
     export interface InventoryItem {
+        incompatible?: boolean;
+        error?: string;
         rule: Rule;
         observed?: ObservedRule;
         desired?: DesiredRule;
         state: InventoryState;
         match: InventoryMatch;
-        usage?: RuntimeUsage;
     }
 
     export type ScopeNoticeCode =
+        | 'family_unavailable'
         | 'default_scope_mismatch'
         | 'managed_scope_inactive'
         | 'unmanaged_active_scopes'
@@ -187,6 +190,8 @@ export namespace Firewall {
     }
 
     export interface Inventory {
+        ipv4Range: PositionRange;
+        ipv6Range: PositionRange;
         total: number;
         allTotal: number;
         managedTotal: number;
@@ -202,24 +207,6 @@ export namespace Firewall {
     export interface ResetRequest {
         provider?: Provider;
         withDockerRestart?: boolean;
-    }
-
-    export type CheckDecision = 'ready' | 'confirmation_required' | 'blocked' | 'no_change';
-    export type CheckClassification =
-        'none' | 'exact_managed' | 'exact_external' | 'conflict' | 'unsupported' | 'protected';
-    export type CheckAction = 'create' | 'adopt' | 'select_adopt' | 'cancel';
-    export type ApplicableCheckAction = Exclude<CheckAction, 'cancel'>;
-
-    export interface RuleCheckResult {
-        decision: CheckDecision;
-        classification: CheckClassification;
-        reason: string;
-        requestedRule: Rule;
-        requestedRuleKey: string;
-        existingRuleUUID?: string;
-        candidates?: ObservedRule[];
-        allowedActions?: CheckAction[];
-        checkFlag: string;
     }
 
     export interface InventoryRequest extends ReqPage {
@@ -239,24 +226,13 @@ export namespace Firewall {
         permanent: boolean;
     }
 
-    export interface CheckItem {
-        uuid?: string;
-        rule: Rule;
-    }
-
-    export interface CheckRequest {
-        items: CheckItem[];
-    }
-
-    export interface CheckResponse {
-        items: RuleCheckResult[];
+    export interface AdoptRequest {
+        scope: Scope;
+        instanceKey: string;
     }
 
     export interface CreateItem {
         rule: Rule;
-        checkFlag: string;
-        action: ApplicableCheckAction;
-        adoptInstanceKey?: string;
         sourceKind?: 'user' | 'panel' | 'security' | 'imported';
         sourceID?: string;
     }
@@ -266,6 +242,8 @@ export namespace Firewall {
     }
 
     export interface CreateResponse {
+        taskID?: string;
+        queued?: boolean;
         succeeded: number;
         failed: number;
         skipped: number;
@@ -354,14 +332,11 @@ export namespace Firewall {
         error: string;
     }
 
-    export interface UpdateRequest {
-        rule: Rule;
-    }
-
-    export interface ReorderRequest {
-        targetPosition?: number;
-        priority?: number;
-    }
+    export type UpdateRequest =
+        | { rule: Rule; description?: never; orderIndex?: never; priority?: never }
+        | { rule?: never; description: string; orderIndex?: never; priority?: never }
+        | { rule?: never; description?: string; orderIndex: number; priority?: never }
+        | { rule?: never; description?: string; orderIndex?: never; priority: number };
 
     export interface DockerGuardBase {
         name: string;
@@ -395,14 +370,20 @@ export namespace Firewall {
         protocol: 'tcp' | 'udp';
         containerID?: string;
         containerName?: string;
+        containerState?: 'created' | 'running' | 'paused' | 'restarting' | 'removing' | 'exited' | 'dead';
         containerPort?: number;
         compose?: string;
         application?: string;
         policyUUID?: string;
         mode?: 'deny_sources' | 'allow_sources' | 'deny_all';
+        nativeAction?: string;
+        readOnly?: boolean;
         sources: string[];
         effective: boolean;
         description?: string;
+        trafficPath: 'forward' | 'input' | 'unknown';
+        managementTarget?: 'container_guard' | 'host_firewall' | 'needs_diagnosis';
+        managementReason?: 'nat_inspect_failed' | 'nat_chain_unreachable' | 'proxy_inspect_failed' | 'no_matching_path';
     }
     export interface DockerGuardPortGroup {
         key: string;
@@ -435,10 +416,7 @@ export namespace Firewall {
         description: string;
     }
     export interface DockerGuardPolicyBatch {
-        endpoints: DockerGuardEndpointIdentity[];
-        mode: 'deny_sources' | 'allow_sources' | 'deny_all';
-        sources: string[];
-        description: string;
+        policies: DockerGuardPolicy[];
     }
     export interface DockerGuardPolicyBatchDelete {
         uuids: string[];

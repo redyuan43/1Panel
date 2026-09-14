@@ -150,8 +150,12 @@ export const wgetFile = (params: File.FileWget) => {
     return http.post<File.FileWgetRes>('files/wget', params);
 };
 
-export const stopWgetFile = (key: string) => {
-    return http.post('files/wget/stop', { key });
+export const stopWgetFile = (key: string, currentNode?: string) => {
+    return http.post('files/wget/stop', { key }, undefined, currentNode ? { CurrentNode: currentNode } : undefined);
+};
+
+export const removeWgetRecords = (keys: string[], currentNode: string) => {
+    return http.post<File.FileKeys>('files/wget/process/remove', { keys }, undefined, { CurrentNode: currentNode });
 };
 
 export const moveFile = (params: File.FileMove) => {

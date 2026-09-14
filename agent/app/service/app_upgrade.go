@@ -107,6 +107,9 @@ func upgradeInstall(req request.AppInstallUpgrade) error {
 	if err != nil {
 		return err
 	}
+	if err = checkVllmVersionAccess(install.App.Key, detail.Version); err != nil {
+		return err
+	}
 	if install.App.Key == vllmAppKeyForUpgrade && !isVllmUpgradeVersionAllowed(install.Version, detail.Version, loadVllmImageFromEnv(install.Env)) {
 		return errors.New("vLLM can only upgrade within the same image type")
 	}
@@ -459,6 +462,13 @@ func (u *appUpgradeContext) cutover(t *task.Task) error {
 		}); err != nil {
 			return err
 		}
+		// Upgrades deliberately keep the user's nginx.conf, so corrected gzip
+		// defaults shipped with a new version would never reach existing
+		// installations. Rewrite only an untouched factory configuration, and
+		// never fail the upgrade over it.
+		if gzipErr := upgradeStockNginxGzipConfig(u.candidate); gzipErr != nil {
+			t.Logf("WARNING: update stock gzip configuration failed, keeping the current one: %v", gzipErr)
+		}
 	} else if err = appInstallRepo.Save(context.Background(), &u.candidate); err != nil {
 		return err
 	}
@@ -715,6 +725,20 @@ func renderUpgradeEnv(install *model.AppInstall, original []byte) ([]byte, error
 		return nil, err
 	}
 	handleMap(envs, params)
+	if install.App.Key == "openlist" {
+		// The upgrade script updates this too late for the pre-pull phase.
+		image := "openlistteam/openlist:v" + strings.TrimPrefix(install.Version, "v")
+		if preInstalled := params["PRE_INSTALLED"]; preInstalled != "" {
+			image += "-" + preInstalled
+		}
+		params["OPENLIST_IMAGE"] = image
+		envs["OPENLIST_IMAGE"] = image
+		content, err := json.Marshal(envs)
+		if err != nil {
+			return nil, err
+		}
+		install.Env = string(content)
+	}
 	if install.App.Key == constant.AppOpenresty {
 		for _, key := range []string{"CONTAINER_PACKAGE_URL", "RESTY_ADD_PACKAGE_BUILDDEPS", "RESTY_CONFIG_OPTIONS_MORE"} {
 			if value, ok := originalEnv[key]; ok {

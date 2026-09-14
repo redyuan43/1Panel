@@ -1,20 +1,22 @@
 package providers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/1Panel-dev/1Panel/agent/constant"
 	"github.com/1Panel-dev/1Panel/agent/global"
 	"github.com/1Panel-dev/1Panel/agent/utils/cmd"
 	firewallutil "github.com/1Panel-dev/1Panel/agent/utils/firewall"
 	"github.com/1Panel-dev/1Panel/agent/utils/firewall/forwarding"
 	"github.com/1Panel-dev/1Panel/agent/utils/firewall/iptables_helper"
 	"github.com/1Panel-dev/1Panel/agent/utils/firewall/lifecycle"
+	"github.com/mattn/go-shellwords"
 )
 
 type iptablesBackend interface {
@@ -40,6 +42,9 @@ func (systemIptablesBackend) Run(table string, args ...string) error {
 }
 
 func (systemIptablesBackend) RunWithStd(table string, args ...string) (string, error) {
+	if len(args) == 1 && args[0] == "-S" {
+		return iptables_helper.ReadTable(context.Background(), table, false)
+	}
 	return iptables_helper.RunWithStd(table, args...)
 }
 
@@ -48,6 +53,9 @@ func (systemIptablesBackend) RunIPv6(table string, args ...string) error {
 }
 
 func (systemIptablesBackend) RunIPv6WithStd(table string, args ...string) (string, error) {
+	if len(args) == 1 && args[0] == "-S" {
+		return iptables_helper.ReadTable(context.Background(), table, true)
+	}
 	return iptables_helper.RunIPv6WithStd(table, args...)
 }
 
@@ -115,7 +123,7 @@ func (l *iptablesNATAdapter) Name() string {
 }
 
 func (l *iptablesNATAdapter) List() ([]forwarding.Rule, error) {
-	stdout, err := l.backend.RunWithStd(iptables_helper.NatTab, "-nvL", forwarding.ChainPreRouting, "--line-numbers")
+	stdout, err := l.backend.RunWithStd(iptables_helper.NatTab, "-S")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list NAT rules: %w", err)
 	}
@@ -123,7 +131,7 @@ func (l *iptablesNATAdapter) List() ([]forwarding.Rule, error) {
 	if !l.backend.IPv6Available() {
 		return rules, nil
 	}
-	stdout, err = l.backend.RunIPv6WithStd(iptables_helper.NatTab, "-nvL", forwarding.ChainPreRouting, "--line-numbers")
+	stdout, err = l.backend.RunIPv6WithStd(iptables_helper.NatTab, "-S")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list IPv6 NAT rules: %w", err)
 	}
@@ -148,6 +156,9 @@ func (l *iptablesNATAdapter) Reconcile(rules []forwarding.Rule) error {
 	for _, family := range []string{forwarding.FamilyIPv4, forwarding.FamilyIPv6} {
 		if family == forwarding.FamilyIPv6 && !l.backend.IPv6Available() {
 			continue
+		}
+		if err := l.batchEnsureChains(family); err != nil {
+			return err
 		}
 		script, err := buildIptablesForwardRestoreScript(byFamily[family])
 		if err != nil {
@@ -224,24 +235,8 @@ func isRemoteTarget(family, target string) bool {
 }
 
 func (l *iptablesNATAdapter) Enable() error {
-	if err := l.system.WriteFile("/proc/sys/net/ipv4/ip_forward", []byte("1"), constant.FilePerm); err != nil {
-		return fmt.Errorf("failed to enable IP forwarding: %w", err)
-	}
-	if l.backend.IPv6Available() {
-		if err := l.system.WriteFile("/proc/sys/net/ipv6/conf/all/forwarding", []byte("1"), constant.FilePerm); err != nil {
-			return fmt.Errorf("failed to enable IPv6 forwarding: %w", err)
-		}
-	}
-	data, err := l.system.ReadFile("/etc/sysctl.conf")
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("failed to read /etc/sysctl.conf: %w", err)
-	}
-	content := enableForwardingSysctls(string(data), l.backend.IPv6Available())
-	if err := l.system.WriteFile("/etc/sysctl.conf", []byte(content), constant.FilePerm); err != nil {
-		return fmt.Errorf("failed to persist IP forwarding: %w", err)
-	}
-	if err := l.system.RunWithOptionalSudo("sysctl", "-p"); err != nil {
-		return fmt.Errorf("failed to apply IP forwarding: %w", err)
+	if err := ensureForwardingSysctls(l.system, l.backend.IPv6Available()); err != nil {
+		return err
 	}
 
 	for _, family := range []string{forwarding.FamilyIPv4, forwarding.FamilyIPv6} {
@@ -315,27 +310,50 @@ func buildIptablesForwardLifecycleScript(outputs map[string]string, create bool)
 	items := []struct{ table, parent, chain string }{
 		{iptables_helper.NatTab, "PREROUTING", forwarding.ChainPreRouting},
 		{iptables_helper.NatTab, "POSTROUTING", forwarding.ChainPostRouting},
-		{iptables_helper.FilterTab, "FORWARD", forwarding.ChainForward},
 	}
 	byTable := make(map[string][]string, 2)
 	for _, item := range items {
 		output := outputs[item.table]
 		chainExists := containsExactLine(output, "-N "+item.chain)
-		bindingExists := containsExactLine(output, "-A "+item.parent+" -j "+item.chain)
+		binding := "-A " + item.parent + " -j " + item.chain
+		bindingCount := countExactLines(output, binding)
 		if create {
 			if !chainExists {
 				byTable[item.table] = append(byTable[item.table], "-N "+item.chain)
 			}
-			if !bindingExists {
+			if bindingCount == 0 {
 				byTable[item.table] = append(byTable[item.table], "-A "+item.parent+" -j "+item.chain)
 			}
 			continue
 		}
-		if bindingExists {
+		for range bindingCount {
 			byTable[item.table] = append(byTable[item.table], "-D "+item.parent+" -j "+item.chain)
 		}
 		if chainExists {
 			byTable[item.table] = append(byTable[item.table], "-F "+item.chain, "-X "+item.chain)
+		}
+	}
+
+	filterOutput := outputs[iptables_helper.FilterTab]
+	filterChainExists := containsExactLine(filterOutput, "-N "+forwarding.ChainForward)
+	filterBinding := "-A FORWARD -j " + forwarding.ChainForward
+	filterBindingCount := countExactLines(filterOutput, filterBinding)
+	if create {
+		if !filterChainExists {
+			byTable[iptables_helper.FilterTab] = append(byTable[iptables_helper.FilterTab], "-N "+forwarding.ChainForward)
+		}
+		if !forwardBindingEffective(filterOutput) {
+			for range filterBindingCount {
+				byTable[iptables_helper.FilterTab] = append(byTable[iptables_helper.FilterTab], "-D FORWARD -j "+forwarding.ChainForward)
+			}
+			byTable[iptables_helper.FilterTab] = append(byTable[iptables_helper.FilterTab], canonicalForwardBindingRule(filterOutput))
+		}
+	} else {
+		for range filterBindingCount {
+			byTable[iptables_helper.FilterTab] = append(byTable[iptables_helper.FilterTab], "-D FORWARD -j "+forwarding.ChainForward)
+		}
+		if filterChainExists {
+			byTable[iptables_helper.FilterTab] = append(byTable[iptables_helper.FilterTab], "-F "+forwarding.ChainForward, "-X "+forwarding.ChainForward)
 		}
 	}
 	var script strings.Builder
@@ -353,6 +371,68 @@ func buildIptablesForwardLifecycleScript(outputs map[string]string, create bool)
 	return script.String()
 }
 
+func countExactLines(output, want string) int {
+	count := 0
+	for _, line := range strings.Split(output, "\n") {
+		if strings.TrimSpace(line) == want {
+			count++
+		}
+	}
+	return count
+}
+
+func forwardBindingEffective(output string) bool {
+	binding := "-A FORWARD -j " + forwarding.ChainForward
+	bindingPosition := 0
+	terminalPosition := 0
+	position := 0
+	bindings := 0
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "-A FORWARD ") {
+			continue
+		}
+		position++
+		if line == binding {
+			bindings++
+			bindingPosition = position
+		}
+		if terminalPosition == 0 && isUnconditionalForwardTerminal(line) {
+			terminalPosition = position
+		}
+	}
+	return bindings == 1 && (terminalPosition == 0 || bindingPosition < terminalPosition)
+}
+
+func canonicalForwardBindingRule(output string) string {
+	binding := "-A FORWARD -j " + forwarding.ChainForward
+	position := 1
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "-A FORWARD ") || line == binding {
+			continue
+		}
+		if isUnconditionalForwardTerminal(line) {
+			return fmt.Sprintf("-I FORWARD %d -j %s", position, forwarding.ChainForward)
+		}
+		position++
+	}
+	return "-A FORWARD -j " + forwarding.ChainForward
+}
+
+func isUnconditionalForwardTerminal(line string) bool {
+	fields := strings.Fields(line)
+	if len(fields) < 4 || fields[0] != "-A" || fields[1] != "FORWARD" || fields[2] != "-j" {
+		return false
+	}
+	switch fields[3] {
+	case "ACCEPT", "DROP", "REJECT", "RETURN":
+		return true
+	default:
+		return false
+	}
+}
+
 func containsExactLine(output, want string) bool {
 	for _, line := range strings.Split(output, "\n") {
 		if strings.TrimSpace(line) == want {
@@ -360,43 +440,6 @@ func containsExactLine(output, want string) bool {
 		}
 	}
 	return false
-}
-
-func enableIPv4Forwarding(content string) string {
-	return enableForwardingSysctls(content, false)
-}
-
-func enableForwardingSysctls(content string, withIPv6 bool) string {
-	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
-	wanted := map[string]string{"net.ipv4.ip_forward": "net.ipv4.ip_forward = 1"}
-	if withIPv6 {
-		wanted["net.ipv6.conf.all.forwarding"] = "net.ipv6.conf.all.forwarding = 1"
-	}
-	found := make(map[string]bool, len(wanted))
-	for index, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-		parts := strings.SplitN(trimmed, "=", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		key := strings.TrimSpace(parts[0])
-		if replacement, ok := wanted[key]; ok {
-			lines[index] = replacement
-			found[key] = true
-		}
-	}
-	for _, key := range []string{"net.ipv4.ip_forward", "net.ipv6.conf.all.forwarding"} {
-		if replacement, ok := wanted[key]; ok && !found[key] {
-			lines = append(lines, replacement)
-		}
-	}
-	if len(lines) > 0 && lines[0] == "" {
-		lines = lines[1:]
-	}
-	return strings.Join(lines, "\n") + "\n"
 }
 
 func (l *iptablesNATAdapter) InitStatus() (bool, bool, error) {
@@ -444,12 +487,13 @@ func (l *iptablesNATAdapter) familyInitStatus(family string) (bool, bool, error)
 	if err != nil {
 		return false, false, fmt.Errorf("list %s filter initialization rules: %w", label, err)
 	}
-	filterInit, filterBind := checkInitAndBind(
+	filterInit, _ := checkInitAndBind(
 		[]string{"-N " + forwarding.ChainForward},
-		[]string{"-A FORWARD -j " + forwarding.ChainForward},
+		nil,
 		strings.Split(filterRules, "\n"),
 	)
-	return natInit && filterInit, forwardingEnabled && natBind && filterBind, nil
+	filterBind := forwardBindingEffective(filterRules)
+	return natInit && filterInit, forwardingEnabled && natBind && filterInit && filterBind, nil
 }
 
 func (l *iptablesNATAdapter) FamilyStatus(family string) (bool, bool, error) {
@@ -483,6 +527,14 @@ func containsExactRule(lines []string, rule string) bool {
 }
 
 func (l *iptablesNATAdapter) Replay() error {
+	for _, family := range []string{forwarding.FamilyIPv4, forwarding.FamilyIPv6} {
+		if family == forwarding.FamilyIPv6 && !l.backend.IPv6Available() {
+			continue
+		}
+		if err := l.batchEnsureChains(family); err != nil {
+			return err
+		}
+	}
 	for _, item := range []struct {
 		table string
 		chain string
@@ -506,40 +558,70 @@ func (l *iptablesNATAdapter) Replay() error {
 
 func parseIptablesRules(stdout, family string) []forwarding.Rule {
 	var rules []forwarding.Rule
+	num := 0
+lines:
 	for _, line := range strings.Split(stdout, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 11 {
+		fields, err := shellwords.Parse(line)
+		if err != nil || len(fields) < 2 || fields[0] != "-A" || fields[1] != forwarding.ChainPreRouting {
 			continue
 		}
-		rule := forwarding.Rule{
-			Num:       fields[0],
-			Family:    family,
-			Protocol:  loadProtocol(fields[4]),
-			Interface: fields[6],
-		}
-		for index := 10; index < len(fields); index++ {
-			field := fields[index]
-			if strings.HasPrefix(field, "dpt:") || strings.HasPrefix(field, "dpts:") {
-				rule.Port = loadSourcePort(field)
+		num++
+		rule := forwarding.Rule{Num: strconv.Itoa(num), Family: family}
+		target := ""
+		for index := 2; index < len(fields); index++ {
+			var value *string
+			switch fields[index] {
+			case "!":
+				continue lines
+			case "-p", "--protocol":
+				value = &rule.Protocol
+			case "-i", "--in-interface":
+				value = &rule.Interface
+			case "--dport", "--destination-port":
+				value = &rule.Port
+			case "-j", "--jump":
+				value = &target
+			case "--to-destination":
+				if index+1 >= len(fields) {
+					continue lines
+				}
+				index++
+				rule.TargetIP, rule.TargetPort = parseIptablesTarget(fields[index])
+			case "--to-ports", "--to-port":
+				value = &rule.TargetPort
+			case "-m", "--match", "--comment":
+				if index+1 >= len(fields) {
+					continue lines
+				}
+				index++
 			}
-			if strings.HasPrefix(field, "to:") {
-				rule.TargetIP, rule.TargetPort = parseIptablesTarget(strings.TrimPrefix(field, "to:"))
-			}
-			if field == "redir" && index+2 < len(fields) && fields[index+1] == "ports" {
-				rule.TargetPort = fields[index+2]
+			if value != nil {
+				if index+1 >= len(fields) {
+					continue lines
+				}
+				index++
+				*value = fields[index]
 			}
 		}
 		if rule.Protocol == "" || rule.Port == "" || rule.TargetPort == "" {
 			continue
 		}
-		if rule.TargetIP == "" {
+		switch target {
+		case "REDIRECT":
+			rule.TargetIP = "127.0.0.1"
 			if family == forwarding.FamilyIPv6 {
 				rule.TargetIP = "::1"
-			} else {
-				rule.TargetIP = "127.0.0.1"
 			}
+		case "DNAT":
+			if rule.TargetIP == "" {
+				continue
+			}
+		default:
+			continue
 		}
-		rule.TargetPort = strings.TrimPrefix(rule.TargetPort, ":")
+		rule.Protocol = loadProtocol(rule.Protocol)
+		rule.Port = strings.ReplaceAll(rule.Port, ":", "-")
+		rule.TargetPort = strings.ReplaceAll(rule.TargetPort, ":", "-")
 		rules = append(rules, rule)
 	}
 	return rules
@@ -573,15 +655,4 @@ func loadProtocol(protocol string) string {
 	default:
 		return protocol
 	}
-}
-
-func loadSourcePort(value string) string {
-	port := ""
-	if strings.Contains(value, "dpt:") {
-		port = strings.ReplaceAll(value, "dpt:", "")
-	}
-	if strings.Contains(value, "dpts:") {
-		port = strings.ReplaceAll(value, "dpts:", "")
-	}
-	return strings.ReplaceAll(port, ":", "-")
 }

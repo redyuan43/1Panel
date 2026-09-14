@@ -1,6 +1,7 @@
 import http from '@/api';
 import { ResPage } from '../interface';
 import { Host } from '../interface/host';
+import { TerminalSession } from '../interface/terminal';
 import { encodeBase64Fields } from '@/utils/base64';
 import { deepCopy } from '@/utils/misc';
 export const searchHosts = (params: Host.SearchWithPage) => {
@@ -15,19 +16,24 @@ export const getHostTree = (params: Host.ReqSearch) => {
 export const updateLocalConn = (param: { withReset: boolean; defaultConn: string }) => {
     return http.post(`/settings/ssh/default`, param);
 };
-export const addHost = (params: Host.HostOperate) => {
+export const addHost = (params: Host.HostOperate, nodeName?: string) => {
     let request = deepCopy(params) as Host.HostOperate;
     encodeBase64Fields(request, ['password', 'privateKey']);
     if (params.isLocal) {
-        return http.post(`/settings/ssh`, request);
+        return http.post(`/settings/ssh`, request, undefined, nodeName ? { CurrentNode: nodeName } : undefined);
     }
     return http.postLocalNode<Host.HostOperate>(`/hosts`, request);
 };
-export const testByInfo = (params: Host.HostConnTest) => {
+export const testByInfo = (params: Host.HostConnTest | Host.HostOperate, nodeName?: string) => {
     let request = deepCopy(params) as Host.HostOperate;
     encodeBase64Fields(request, ['password', 'privateKey']);
     if (params.isLocal) {
-        return http.post<boolean>(`/settings/ssh/check/info`, request);
+        return http.post<boolean>(
+            `/settings/ssh/check/info`,
+            request,
+            undefined,
+            nodeName ? { CurrentNode: nodeName } : undefined,
+        );
     }
     return http.postLocalNode<boolean>(`/hosts/test/byinfo`, request);
 };
@@ -46,10 +52,20 @@ export const deleteHost = (params: { ids: number[] }) => {
     return http.postLocalNode(`/hosts/del`, params);
 };
 
-// agent
 export const loadLocalConn = () => {
     return http.get<Host.HostConnTest>(`/settings/ssh/conn`);
 };
-export const testLocalConn = () => {
-    return http.post<boolean>(`/settings/ssh/check`);
+export const testLocalConn = (nodeName?: string) => {
+    return http.post<boolean>(
+        `/settings/ssh/check`,
+        undefined,
+        undefined,
+        nodeName ? { CurrentNode: nodeName } : undefined,
+    );
+};
+
+export const searchTerminalSessions = (localNode: boolean) => {
+    return localNode
+        ? http.postLocalNode<TerminalSession[]>(`/hosts/terminal/sessions/search`)
+        : http.post<TerminalSession[]>(`/hosts/terminal/sessions/search`);
 };

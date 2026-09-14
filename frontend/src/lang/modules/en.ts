@@ -508,6 +508,8 @@ const message = {
         closeCurrent: 'Close current',
         closeOther: 'Close other',
         closeAll: 'Close All',
+        keepAlive: 'Keep page session',
+        cancelKeepAlive: 'Stop keeping page session',
     },
     header: {
         logout: 'Logout',
@@ -946,7 +948,9 @@ const message = {
             from_remote: 'This model was not downloaded via 1Panel, no related pull logs.',
             no_logs: 'The pull logs for this model have been deleted and cannot be viewed.',
             vllmVersionHelper: 'For FusionXpark GB 10 servers, please select the -cu130 version.',
-            ascendVisibleDevices: 'Ascend Visible Devices',
+            vllmDeployProfile: 'Deployment model',
+            vllmProfileFlash0731: 'DeepSeek V4 Flash 0731',
+            vllmProfileVisionExp: 'DeepSeek V4 Flash Vision Exp',
             vllmCommandPortHelper:
                 'The startup command must use port {0}; otherwise, the service will be inaccessible.',
             ascendVisibleDevices: 'Ascend visible devices (ASCEND_RT_VISIBLE_DEVICES)',
@@ -1140,7 +1144,6 @@ const message = {
             cachedToken: 'Cached Tokens',
             cacheHitRate: 'Cache Hit Rate',
             activeUsers: 'Active Users',
-            activeStreamingRequests: 'Active Streaming Requests',
             activeModels: 'Active Models',
             failedRequests: 'Failed Requests',
             averageTokenPerRequest: 'Avg Tokens/Request',
@@ -2065,6 +2068,9 @@ const message = {
         profileBlockDesc: 'Measures blocking on channels, select statements, and synchronization primitives.',
     },
     terminal: {
+        showTerminalButton: 'Terminal Shortcut',
+        showTerminalButtonHelper:
+            'When enabled, a terminal shortcut button appears in the bottom-right corner of the page.',
         local: 'Local',
         defaultConn: 'Default Connection',
         defaultConnHelper:
@@ -2105,6 +2111,18 @@ const message = {
         key: 'Private key',
         keyPassword: 'Private key password',
         emptyTerminal: 'No terminal is currently connected.',
+        sessionReconnecting: 'Connection lost, reconnecting...',
+        sessionExpired: 'Session is no longer available, press Enter or click reconnect to open a new one',
+        sessionKicked: 'This session was opened in another window',
+        sessionCount: '{0} sessions',
+        sessionRules: 'Terminal session rules',
+        sessionRuleClose: 'Closing a terminal ends its session immediately.',
+        sessionRuleDisconnect: 'Recover within 30 minutes after a refresh, browser closure, or network loss.',
+        sessionRuleRevalidate: 'Sessions end if login is invalid or verification times out.',
+        sessionRuleResources: 'More terminals use more resources. Close terminals you no longer need.',
+        minimize: 'Minimize',
+        closeAllSessions: 'Close all sessions',
+        closeAllConfirm: 'All terminal sessions will be disconnected and cannot be recovered. Continue?',
         lineHeight: 'Line Height',
         letterSpacing: 'Letter Spacing',
         fontSize: 'Font Size',
@@ -2479,6 +2497,7 @@ const message = {
         downloadProcess: 'Download progress',
         downloading: 'Downloading...',
         stopWgetConfirm: 'Are you sure you want to stop this download task?',
+        downloadRecordsNotRemoved: 'Some records were not removed. Refresh and try again.',
         infoDetail: 'File properties',
         root: 'Root directory',
         list: 'File list',
@@ -2765,6 +2784,7 @@ const message = {
         portChangeHelper: 'Modify the service port and restart the service. Continue?',
         theme: 'Theme',
         menuTabs: 'Menu tabs',
+        menuTabsHelper: 'After enabling, click the lock button on a tab to keep its page session.',
         menuAccordion: 'Multiple menu expansion',
         menuAccordionHelper: 'After enabling, multiple sidebar menu groups can stay expanded at the same time.',
         componentSize: 'Component Size',
@@ -3169,6 +3189,8 @@ const message = {
         upgradeNow: 'Upgrade now',
         source: 'Download source',
         versionNotSame: 'Node version mismatch with the main node. Please upgrade in Node Management before retrying.',
+        currentNodeVersionNotSame:
+            'The current node version does not match the main node. Contact the administrator to upgrade the current node.',
         versionCompare:
             'Detected that node {0} is already at the latest upgradable version. Please check the primary node version and try again!',
         about: 'About',
@@ -3246,14 +3268,15 @@ const message = {
         restoreCommunity: 'Restore Community Edition',
         restoreCommunityOnline: 'Online restore',
         restoreCommunityOffline: 'Offline restore',
-        restoreCommunityPackageFound:
-            'A usable offline Community Edition package was detected. Offline restore is available.',
-        restoreCommunityPackageMissing:
-            'No usable offline Community Edition package was detected. Offline restore is currently unavailable.',
+        restoreCommunityPackageFound: 'Package is ready',
+        restoreCommunityPackageMissing: 'Waiting for package',
+        restoreCommunityPackageChecking: 'Checking package',
+        restoreCommunityPackageReadyHelper: 'You can proceed with the offline restore.',
         restoreCommunityOnlineHelper:
             'The Community Edition package for the current version will be downloaded automatically, and Enterprise-only data will be cleaned up.',
         restoreCommunityOfflineHelper:
             'Place an official package no older than the current Enterprise version in {path}. Switching is enabled after a usable package is detected.',
+        restoreCommunityCopyDownloadLink: 'Copy download link',
         restoreCommunityConfirm:
             'After switching versions, you can sign in to Community Edition with the current Enterprise super administrator account. Enterprise-only data will be removed during the switch. Proceed with caution.',
         restoreCommunityStarting: 'Preparing Community Edition. The panel will restart automatically when ready.',
@@ -3278,6 +3301,7 @@ const message = {
         monitor:
             'Upgrade to Commercial Edition to view real-time website status, visitor trends, traffic sources, request logs, and more.',
         alert: 'Upgrade to Commercial Edition to receive SMS alerts, review alert logs, and stay on top of key events.',
+        vm: 'Upgrade to the commercial edition to manage virtual machines, images, templates, virtual networks, and storage resources in 1Panel.',
         node: 'Upgrade to Commercial Edition to manage multiple Linux servers in 1Panel.',
         nodeApp: 'Upgrade to Commercial Edition to upgrade multi-node app versions without switching nodes manually.',
         nodeDashboard:
@@ -3909,6 +3933,14 @@ const message = {
         gzipMinLengthHelper: 'Minimum Compressed File',
         gzipCompLevelHelper: 'Compression Rate',
         gzipHelper: 'Enable compression for transmission',
+        brotliHelper: 'Enable brotli compression, usually smaller than gzip',
+        brotliCompLevelHelper: 'Brotli compression rate, 0 to 11',
+        brotliManagedExternallyHelper:
+            'Brotli is configured manually in nginx.conf; the panel shows the values in effect and will not overwrite them.',
+        brotliManagedUnavailableHelper:
+            'The panel could not add the managed brotli configuration to nginx.conf automatically; the values below will not take effect.',
+        brotliMinLengthHelper: 'Minimum response size to brotli-compress',
+        brotliSaveFailed: 'Brotli settings failed to save; the gzip settings above were applied',
         connections: 'Active connections',
         accepts: 'Accepts',
         handled: 'Handled',
@@ -4066,22 +4098,12 @@ const message = {
             drifted: 'Abnormal',
         },
         ruleTargetRequired: 'Enter at least one IP address or port',
-        batchRuleLimit: 'A maximum of {0} rules can be created at a time',
         resolution_adopt: 'Take over management',
+        plan_duplicate_rules:
+            'Rules with identical conditions and actions cannot be adopted. Manually delete duplicate rules and retry.',
         adoptRuleConfirm: 'After takeover, 1Panel can maintain and delete this existing rule. Continue?',
-        plan_equivalent_external_rule:
-            'An identical external rule already exists. Take it over instead of creating a duplicate.',
-        plan_multiple_equivalent_external_rules: 'Multiple identical external rules exist. Select one to take over.',
-        plan_equivalent_managed_rule: 'An identical rule is already managed by 1Panel. No duplicate is needed.',
+        plan_exact_rule_conflict: 'A rule with identical matching conditions has an opposing allow or deny action.',
         allRulesAlreadyExist: 'All {0} checked rules already exist. There are no new rules to create.',
-        ruleCheckResult: 'Rule check results',
-        ruleCheckStatus_creatable: 'Creatable',
-        ruleCheckStatus_existing: 'Exists',
-        ruleCheckStatus_error: 'Error',
-        ruleCheckExistingHelper: 'An identical rule already exists and will be skipped.',
-        ruleCheckReadyHelper: 'The check passed. This rule can be created.',
-        ruleCheckExternalExists: 'An identical external rule already exists and will be skipped automatically.',
-        ruleCheckBlockedHelper: 'Rules with errors cannot be submitted. Go back, edit them, and check again.',
         plan_managed_rule_drifted:
             'The 1Panel management record differs from the live firewall rule. Check the system rule.',
         plan_opaque_rule_in_target_scope:
@@ -4091,10 +4113,9 @@ const message = {
         plan_protected_rule: 'This rule is protected and cannot be taken over, changed, or deleted.',
         plan_blocked: 'This rule cannot be applied safely. Refresh the rules and try again.',
         scopeDefaultMismatch: 'The system default zone is {0}; this page manages only the public zone.',
-        scopeInactive: 'The managed scope is inactive. New rules may not affect current traffic.',
         scopeMissing: 'Managed scope {0} is missing and will be created safely when the first rule is applied.',
         scopeUnmanagedActive: 'Other active scopes were detected: {0}. 1Panel will not modify their rules.',
-        scopeRuntimeMismatch: 'The runtime and permanent configurations differ for: {0}.',
+        scopeRuntimeMismatch: 'The active and permanent firewalld configurations differ. Restart the firewall.',
         dockerRestart: 'Firewall operations require restarting the Docker service',
         firewallHelper: '{0} system firewall',
         firewallNotStart: 'The system firewall is not enabled at present. Enable it first.',
@@ -4123,12 +4144,9 @@ const message = {
         configuredRules: '{0} rules configured',
         addressFamily: 'IP version',
         portOrRange: 'Port / range',
-        exportAllRules: 'Export all rules',
         importBackendHelper: 'Imported rules are converted for the current {0} backend. Source rules are not changed.',
         ruleSyncTitle: 'Synchronize rules',
         ruleSyncAction: 'Sync rules',
-        ruleSyncHelper:
-            'Sync 1Panel-managed rules from the selected firewall to the current firewall. Source rules stay unchanged, and external rules are not included.',
         ruleSyncDatabase: '1Panel database',
         ruleSyncDatabaseHelper:
             'Synchronize and reconcile the managed rules in the current firewall based on the 1Panel database rules. Missing rules will be added and extra rules will be removed.',
@@ -4137,7 +4155,6 @@ const message = {
             'Synchronize {1} to exactly match the {0} database rules? {2} target rule(s) will be removed and missing rules will be added.',
         ruleSyncSource: 'Configuration source',
         ruleSyncTarget: 'Current backend',
-        ruleSyncTotal: 'Converted rules',
         ruleSyncReady: 'Ready',
         ruleSyncExisting: 'Existing',
         ruleSyncRemove: 'To remove',
@@ -4148,25 +4165,16 @@ const message = {
             managedOrderDiffers: 'The managed rule order differs from the database sequence.',
             managedOnlyInTarget: 'The managed rule exists only in the target firewall.',
             managedRuntimeCannotRemove: 'The managed runtime rule cannot be removed safely.',
-            managedOrderBlocked: 'Managed rules cannot be reordered across external, unrecognized, or protected rules.',
-            mayBlockManagement: 'The rule may block the current management connection.',
             missingFromTarget: 'The rule is missing from the target firewall.',
             targetDiffers: 'The target rule differs from the database policy.',
             alreadyExistsInTarget: 'The rule already exists in the target firewall.',
             onlyInTarget: 'The rule exists only in the target firewall.',
             stale: 'The firewall rule state is outdated. Refresh and try again.',
-            lockoutRisk: 'This firewall change may block management access.',
             protectedRule: 'This protected firewall rule cannot be modified.',
+            dockerAcceptReadOnly:
+                'This ACCEPT rule is read-only and will be preserved while other rules are synchronized. To remove it, delete it manually on the host.',
             cannotReconcile: 'The target rule cannot be reconciled: {0}',
         },
-        ruleSyncConfirm: 'Synchronize {0} rules from {1} to {2}? The source backend will not be modified.',
-        ruleSyncResetSource: 'Reset and disable source firewall {0} after synchronization succeeds',
-        ruleSyncResetSourceHelper:
-            'The source firewall is reset only after every rule is synchronized successfully. This operation cannot be undone.',
-        ruleSyncResetSourceBlocked:
-            'Some rules cannot be synchronized. Resolve them before automatically resetting the source firewall.',
-        ruleSyncResetSourceConfirm:
-            'Synchronize {0} rules from {1} to {2}, then reset and disable {1}? This deletes all {1} firewall configuration and cannot be undone.',
         ruleSyncPartial: 'Synchronization completed: {0} succeeded, {1} already existed, and {2} failed.',
         ruleSyncSuccess: 'Synchronization completed: {0} succeeded, {1} already existed, and {2} were removed.',
         ruleSyncStatus: {
@@ -4184,10 +4192,10 @@ const message = {
         cleanupDockerBackendHelper:
             'Reset the 1Panel Docker port protection runtime rules in {0}: delete all related rules and chains while retaining database data',
         cleanupBeforeBackendSwitch:
-            'The current {0} backend still contains 1Panel runtime rules. Reset it before switching to {1}.',
+            'The current {0} backend still contains 1Panel runtime rules. Reset it before switching to {1}. Resetting only removes runtime rules; saved database policies are retained and can be initialized or synchronized after switching.',
         cleanupAction: 'Reset',
         backendSwitchNotice:
-            'Reset the current backend before switching the system firewall, port forwarding, or Docker protection. Saved database policies are retained and can be initialized or synchronized after switching.',
+            'Use only one firewall management method at a time. Running multiple firewalls simultaneously may cause rule conflicts, inconsistent status, or container port access failures.',
         switchBackendHelper: 'Switch to {0}?',
         switchDockerBackendHelper: 'Switch to {0}? This will update the Docker configuration and restart Docker.',
         uninstalledStatus: 'Not installed',
@@ -4197,6 +4205,22 @@ const message = {
         partiallyInitialized: 'Partially initialized',
         dockerGuardHelper:
             'Set access restrictions for ports published from Docker containers to the host. Unprotected ports retain Docker default access behavior.',
+        dockerTrafficPathMixed: 'The selected ports use different access paths. Configure them separately.',
+        dockerTrafficPathUnknown:
+            'The access path for this port could not be determined. Check the Docker network configuration and try again.',
+        dockerTrafficPathReason: {
+            nat_inspect_failed:
+                'Docker NAT rules could not be read. Check the firewall commands and permissions, then refresh.',
+            proxy_inspect_failed:
+                'docker-proxy processes could not be inspected. Check access to system process information, then refresh.',
+            nat_chain_unreachable:
+                'A Docker forwarding rule exists for this port, but the NAT ingress chain is inactive. Check the Docker firewall rules or restart Docker, then refresh.',
+            no_matching_path:
+                'No active Docker forwarding rule or proxy process was found for this port. Start or restart the container, then refresh. If the issue persists, check the Docker network configuration.',
+        },
+        dockerInputPolicyNotEffective:
+            'The host receives this port directly, so the existing container port protection rule does not apply. Configure it in the host firewall instead.',
+        dockerInputUseHostFirewall: 'Configure access for this port in the host firewall.',
         dockerInputNotProtected:
             'Host INPUT rules do not directly protect this Docker published port. Click to open Container Port Guard.',
         notInitialized: 'Not initialized',
@@ -4228,9 +4252,7 @@ const message = {
             'The selected rules have different configurations. Configure them again to overwrite all selected rules; an empty description clears all descriptions.',
         effective: 'Effective',
         forwardUnsynced: 'Unsynced',
-        notEnabled: 'Not enabled',
         notEffective: 'Not effective',
-        dockerGuardStatusEffective: '{0} container port protection is working normally',
         dockerGuardStatusReason: {
             command_missing:
                 'The {0} firewall component is unavailable, so the corresponding container port protection cannot be enabled. Check the system firewall environment',
@@ -4253,11 +4275,7 @@ const message = {
         forwardPortHelper: 'Supports port ranges, e.g. 8080-8089',
         forwardInboundInterface: 'Forward Inbound Network Interface',
         exportHelper: 'About to export {0} firewall rules. Continue?',
-        importSuccess: 'Successfully imported {0} rules',
-        importPartialSuccess: 'Import completed: {0} succeeded, {1} failed',
         basicStatus: 'The current firewall is unbound. Bind it first.',
-        baseIptables: 'iptables Service',
-        forwardIptables: 'iptables Port Forwarding Service',
         initMsg: 'About to initialize {0}, continue?',
         initDirectBackendConflictMsg:
             '{1} is still bound. If {0} is initialized, both firewall rule sets will be active and may unexpectedly block access. Continue?',
@@ -4270,7 +4288,7 @@ const message = {
             'Unbind - When unbound, all added firewall rules will become invalid. Proceed with caution. Confirm?',
         portWhiteList: 'Port allowlist',
         portWhiteListAlter:
-            'Saving does not change the current firewall rules immediately. New ports are opened the next time the firewall is initialized or started. To close a removed port, delete its existing rule manually from the rule list.',
+            'Whitelist changes take effect immediately when saved. Added ports are allowed automatically; removing a port only removes whitelist protection. To close it, delete its allow rule from the rule list.',
         portWhiteListHelper: 'Supports IPv4/IPv6, TCP/UDP, single ports, and port ranges such as 8000-8100.',
         chain: 'Chain',
         sourceIP: 'Source IP',
@@ -4289,10 +4307,14 @@ const message = {
         deleteWildcardRuleConfirm:
             'This rule allows {0} to access {1}. Deleting it may affect access to multiple services. Continue?',
         deleteRiskRulesConfirm: 'Will delete {0} rules. {1} allow rules may affect service access. Continue?',
-        editRuleConfirm:
-            'The following fields will change: {0}. The rule will be applied and verified immediately. Continue?',
+        editRuleConfirm: 'Are you sure you want to modify this rule?',
     },
     runtime: {
+        importEnv: 'Import Environment Variables',
+        envImportError: 'Line {0}: {1}',
+        envInvalidAssignment: 'Expected a valid NAME=value assignment',
+        envUnclosedQuote: 'Unclosed quote',
+        envUnexpectedText: 'Unexpected text after the closing quote',
         runtime: 'Runtime',
         default: 'Default',
         workDir: 'Working directory',
@@ -6281,6 +6303,14 @@ const message = {
             nodeDashTitle4: 'Scheduled Task Management',
             nodeDashContent4:
                 'Unified management of multi-node scheduled tasks, supports status monitoring, quick start/stop, and manual trigger execution',
+            vmTitle1: 'Virtual machines',
+            vmContent1: 'Create and manage virtual machines, monitor their status, and adjust resource allocation.',
+            vmTitle2: 'Images and templates',
+            vmContent2: 'Manage ISO images and virtual machine templates to simplify virtual machine creation.',
+            vmTitle3: 'Virtual networks',
+            vmContent3: 'Manage virtual networks and configure virtual machine network connections.',
+            vmTitle4: 'Storage pools',
+            vmContent4: 'Manage storage pools and allocate storage resources to virtual machines.',
             nodeTitle1: 'One-Click Node Addition',
             nodeContent1: 'Quickly integrate multiple server nodes',
             nodeTitle2: 'Batch Upgrade',
@@ -6710,7 +6740,57 @@ const message = {
             feiShuConfigHelper: 'Feishu alert notification configuration',
             webhookName: 'Bot name',
             webhookUrl: 'Webhook URL',
-            alertConfigProHelper: 'Commercial Edition also supports WeCom, DingTalk, Feishu, and SMS alerts.',
+            custom: 'Webhook',
+            webhookPreset: 'Preset',
+            genericJsonPreset: 'Generic JSON',
+            customPreset: 'Custom',
+            webhookUrlSecretHelper: 'The Webhook URL is encrypted at rest and can be viewed and edited here',
+            webhookPublicAddressHelper:
+                'Only publicly reachable HTTP/HTTPS addresses are supported; local, private, and reserved addresses are blocked',
+            customWebhookRecoveryRequired:
+                'This configuration is invalid or from an older version. Re-enter the Webhook URL and any required secret headers, then save.',
+            clearSecret: 'Clear',
+            keepSecret: 'Keep unchanged',
+            secretCleared: 'This secret will be cleared when you save',
+            bodyType: 'Body Type',
+            bodyTemplate: 'Body Template',
+            formFieldName: 'Field name',
+            formFieldValue: 'Field value',
+            addFormField: 'Add Field',
+            webhookAdvanced: 'Advanced',
+            headers: 'Headers',
+            headerName: 'Header name',
+            headerValue: 'Header value',
+            secretValue: 'Secret value',
+            addHeader: 'Add Header',
+            templateVariables: 'Template Variables',
+            templateVariableTitle: 'Alert title',
+            templateVariableMessage: 'Alert content',
+            templateVariableType: 'Alert type',
+            templateVariableNodeName: 'Node name',
+            templateVariableTimestamp: 'Event time',
+            templateVariablesHelper:
+                'title=alert title, message=alert content, type=alert type, nodeName=node name, timestamp=event time. Click a variable to insert it into the body.',
+            testResultStale: 'The configuration changed, so the previous test result is no longer valid',
+            alertConfigChanged: 'The configuration was updated. Refresh and try again.',
+            presetOverwriteHelper: 'Switching presets will replace the current body configuration. Continue?',
+            customWebhookValidation: {
+                displayNameRequired: 'Enter a display name',
+                urlRequired: 'Enter a Webhook URL',
+                urlInvalid: 'The Webhook URL must be a valid HTTP or HTTPS URL',
+                bodyRequired: 'Configure the request body',
+                jsonInvalid: 'The JSON body template is invalid',
+                formFieldRequired: 'Form field names are required',
+                formFieldDuplicate: 'Form field names must be unique',
+                headerRequired: 'Header names are required',
+                headerInvalid: 'The header name is invalid',
+                headerDuplicate: 'Header names must be unique',
+                headerReserved: 'This header is managed by the system and cannot be customized',
+                headerMustBeSecret: 'Authentication or credential headers must be marked as secret values',
+                templateVariableInvalid: 'The body contains an unsupported template variable',
+                secretRequired: 'Enter a secret value, or choose Keep unchanged or Clear',
+            },
+            alertConfigProHelper: 'Commercial Edition adds more notification channels.',
             recipientPlaceholder: 'Please enter recipient email address',
             addRecipient: 'Add Recipient',
             webhookItem: 'Webhook',
@@ -6766,6 +6846,8 @@ const message = {
             submitSuccess: 'Sync task submitted.',
         },
         vm: {
+            countLimitHelper:
+                'The Professional edition supports up to {0} virtual machines. Enterprise has no VM count limit.',
             vm: 'VM',
             title: 'Virtual Machines',
             healthCheck: 'Health Check',
@@ -6848,6 +6930,8 @@ const message = {
             },
             overview: 'Overview',
             dependencies: 'Dependencies',
+            architectureUnsupported:
+                'The current system architecture {0} is not supported. VM features currently support AMD64 and ARM64 only.',
             dependencyPurpose: 'Purpose',
             dependencyPurposeMap: {
                 libvirt: 'Provides VM management services for lifecycle control and resource scheduling.',

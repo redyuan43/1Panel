@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/1Panel-dev/1Panel/agent/app/dto"
+	"github.com/1Panel-dev/1Panel/agent/app/model"
 	"github.com/1Panel-dev/1Panel/agent/app/repo"
 	"github.com/1Panel-dev/1Panel/agent/app/task"
 	"github.com/1Panel-dev/1Panel/agent/buserr"
@@ -79,7 +81,7 @@ type IContainerService interface {
 	ContainerUpgrade(req dto.ContainerUpgrade) error
 	ContainerInfo(req dto.OperationWithName) (*dto.ContainerOperate, error)
 	ContainerListStats() ([]dto.ContainerListStats, error)
-	ContainerItemStats(req dto.OperationWithName) (dto.ContainerItemStats, error)
+	ContainerItemStats(ctx context.Context, req dto.OperationWithName) (dto.ContainerItemStats, error)
 	LoadResourceLimit() (*dto.ResourceLimit, error)
 	ContainerRename(req dto.ContainerRename) error
 	ContainerCommit(req dto.ContainerCommit) error
@@ -246,15 +248,15 @@ func (u *ContainerService) LoadStatus() (dto.ContainerStatus, error) {
 	}
 	return data, nil
 }
-func (u *ContainerService) ContainerItemStats(req dto.OperationWithName) (dto.ContainerItemStats, error) {
+func (u *ContainerService) ContainerItemStats(ctx context.Context, req dto.OperationWithName) (dto.ContainerItemStats, error) {
 	var data dto.ContainerItemStats
 	client, err := docker.NewDockerClient()
 	if err != nil {
 		return data, err
 	}
+	defer client.Close()
 	if req.Name != "system" {
-		defer client.Close()
-		containerInfo, _, err := client.ContainerInspectWithRaw(context.Background(), req.Name, true)
+		containerInfo, _, err := client.ContainerInspectWithRaw(ctx, req.Name, true)
 		if err != nil {
 			return data, err
 		}
@@ -263,7 +265,7 @@ func (u *ContainerService) ContainerItemStats(req dto.OperationWithName) (dto.Co
 		return data, nil
 	}
 
-	usage, err := client.DiskUsage(context.Background(), types.DiskUsageOptions{})
+	usage, err := client.DiskUsage(ctx, types.DiskUsageOptions{})
 	if err != nil {
 		return data, err
 	}
@@ -534,7 +536,9 @@ func (u *ContainerService) ContainerCreate(req dto.ContainerOperate, inThread bo
 		if err != nil {
 			return err
 		}
-		normalizeContainerEndpointSettings(ctx, client, networkConf, nil)
+		if err := normalizeContainerEndpointSettings(ctx, client, networkConf, nil); err != nil {
+			return err
+		}
 		con, err := client.ContainerCreate(ctx, config, hostConf, networkConf, &v1.Platform{}, req.Name)
 		if err != nil {
 			taskItem.Log(i18n.GetMsgByKey("ContainerCreateFailed"))
@@ -644,14 +648,9 @@ func loadContainerNetworkInfo(name string, endpoint *network.EndpointSettings) d
 	if endpoint.IPAMConfig != nil {
 		item.LinkLocalIPs = append([]string(nil), endpoint.IPAMConfig.LinkLocalIPs...)
 	}
-	if name != "bridge" {
-		if endpoint.IPAMConfig != nil {
-			item.Ipv4 = endpoint.IPAMConfig.IPv4Address
-			item.Ipv6 = endpoint.IPAMConfig.IPv6Address
-		} else {
-			item.Ipv4 = endpoint.IPAddress
-			item.Ipv6 = endpoint.GlobalIPv6Address
-		}
+	if name != "bridge" && endpoint.IPAMConfig != nil {
+		item.Ipv4 = endpoint.IPAMConfig.IPv4Address
+		item.Ipv6 = endpoint.IPAMConfig.IPv6Address
 	}
 	return item
 }
@@ -1678,30 +1677,42 @@ func checkImageLike(client *client.Client, imageName string) bool {
 
 func pullImages(task *task.Task, client *client.Client, imageName string) error {
 	dockerCli := docker.NewClientWithExist(client)
+	repos, err := imageRepoRepo.List()
+	if err != nil {
+		return err
+	}
+	imageRepo := selectImageRepo(imageName, repos)
+	if imageRepo == nil || !imageRepo.Auth {
+		return dockerCli.PullImageWithProcess(task, imageName)
+	}
+
 	options := image.PullOptions{}
-	repos, _ := imageRepoRepo.List()
-	if len(repos) != 0 {
-		for _, repo := range repos {
-			if strings.HasPrefix(imageName, repo.DownloadUrl) && repo.Auth {
-				authConfig := registry.AuthConfig{
-					Username: repo.Username,
-					Password: repo.Password,
-				}
-				encodedJSON, err := json.Marshal(authConfig)
-				if err != nil {
-					return err
-				}
-				authStr := base64.URLEncoding.EncodeToString(encodedJSON)
-				options.RegistryAuth = authStr
-			}
+	authConfig := registry.AuthConfig{
+		Username: imageRepo.Username,
+		Password: imageRepo.Password,
+	}
+	encodedJSON, err := json.Marshal(authConfig)
+	if err != nil {
+		return err
+	}
+	options.RegistryAuth = base64.URLEncoding.EncodeToString(encodedJSON)
+	return dockerCli.PullImageWithProcessAndOptions(task, imageName, options)
+}
+
+func selectImageRepo(imageName string, repos []model.ImageRepo) *model.ImageRepo {
+	var selected *model.ImageRepo
+	selectedURLLength := 0
+	for i := range repos {
+		downloadURL := strings.TrimRight(strings.TrimSpace(repos[i].DownloadUrl), "/")
+		if downloadURL == "" || !strings.HasPrefix(imageName, downloadURL+"/") {
+			continue
 		}
-	} else {
-		hasAuth, authStr := loadAuthInfo(imageName)
-		if hasAuth {
-			options.RegistryAuth = authStr
+		if len(downloadURL) > selectedURLLength {
+			selected = &repos[i]
+			selectedURLLength = len(downloadURL)
 		}
 	}
-	return dockerCli.PullImageWithProcessAndOptions(task, imageName, options)
+	return selected
 }
 
 func loadCpuAndMem(client *client.Client, containerItem string) dto.ContainerListStats {
@@ -1758,7 +1769,10 @@ func checkPortStats(ports []dto.PortHelper, checkInUse bool) (nat.PortMap, error
 			}
 			for i := 0; i <= hostEnd-hostStart; i++ {
 				bindItem := nat.PortBinding{HostPort: strconv.Itoa(hostStart + i), HostIP: port.HostIP}
-				portMap[nat.Port(fmt.Sprintf("%d/%s", containerStart+i, port.Protocol))] = []nat.PortBinding{bindItem}
+				portKey := nat.Port(fmt.Sprintf("%d/%s", containerStart+i, port.Protocol))
+				if !slices.Contains(portMap[portKey], bindItem) {
+					portMap[portKey] = append(portMap[portKey], bindItem)
+				}
 			}
 			for i := hostStart; i <= hostEnd; i++ {
 				if checkInUse && common.ScanPortWithIP(port.HostIP, i) {
@@ -1776,7 +1790,10 @@ func checkPortStats(ports []dto.PortHelper, checkInUse bool) (nat.PortMap, error
 				return portMap, buserr.WithDetail("ErrPortInUsed", portItem, nil)
 			}
 			bindItem := nat.PortBinding{HostPort: strconv.Itoa(portItem), HostIP: port.HostIP}
-			portMap[nat.Port(fmt.Sprintf("%s/%s", port.ContainerPort, port.Protocol))] = []nat.PortBinding{bindItem}
+			portKey := nat.Port(fmt.Sprintf("%s/%s", port.ContainerPort, port.Protocol))
+			if !slices.Contains(portMap[portKey], bindItem) {
+				portMap[portKey] = append(portMap[portKey], bindItem)
+			}
 		}
 	}
 	return portMap, nil
@@ -1955,7 +1972,7 @@ func loadComposeCount(client *client.Client) int {
 }
 func loadContainerPortForInfo(itemPorts []container.Port) []dto.PortHelper {
 	var exposedPorts []dto.PortHelper
-	samePortMap := make(map[string]dto.PortHelper)
+	seenPorts := make(map[dto.PortHelper]struct{})
 	ports := transPortToStr(itemPorts)
 	for _, item := range ports {
 		itemStr := strings.Split(item, "->")
@@ -1976,16 +1993,11 @@ func loadContainerPortForInfo(itemPorts []container.Port) []dto.PortHelper {
 		}
 		itemPort.ContainerPort = itemContainer[0]
 		itemPort.Protocol = itemContainer[1]
-		keyItem := fmt.Sprintf("%s->%s/%s", itemPort.HostPort, itemPort.ContainerPort, itemPort.Protocol)
-		if val, ok := samePortMap[keyItem]; ok {
-			val.HostIP = ""
-			samePortMap[keyItem] = val
-		} else {
-			samePortMap[keyItem] = itemPort
+		if _, exists := seenPorts[itemPort]; exists {
+			continue
 		}
-	}
-	for _, val := range samePortMap {
-		exposedPorts = append(exposedPorts, val)
+		seenPorts[itemPort] = struct{}{}
+		exposedPorts = append(exposedPorts, itemPort)
 	}
 	return exposedPorts
 }

@@ -17,7 +17,7 @@
 </template>
 
 <script lang="ts" setup>
-import { ref, shallowRef, watch, onBeforeUnmount, nextTick, computed, onMounted } from 'vue';
+import { ref, shallowRef, watch, onActivated, onBeforeUnmount, nextTick, computed, onMounted } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { FitAddon } from '@xterm/addon-fit';
@@ -26,7 +26,17 @@ import { TerminalStore } from '@/store';
 import { MsgError } from '@/utils/message';
 import { checkStreamAuth } from '@/utils/stream-auth';
 import { useGlobalStore } from '@/composables/useGlobalStore';
+import i18n from '@/lang';
 const { currentNode } = useGlobalStore();
+
+// session: agent side session id known (fresh or reattached)
+// expired: the agent no longer has the session; a reconnect must open a new one
+const emit = defineEmits(['session', 'expired']);
+
+// Close codes of the agent's session protocol (agent/utils/terminal/session.go).
+const CLOSE_SESSION_NOT_FOUND = 4404;
+const CLOSE_ATTACHED_ELSEWHERE = 4409;
+const CLOSE_REVALIDATE = 4410;
 
 const terminalElement = ref<HTMLDivElement | null>(null);
 const fitAddon = new FitAddon();
@@ -37,6 +47,20 @@ const terminalSocket = ref<WebSocket>();
 const heartbeatTimer = ref<NodeJS.Timer>();
 let initWebSocketToken = 0;
 const latency = ref(0);
+// Reconnect state. Only terminals that received a session hello reconnect;
+// the agent keeps a dirty-disconnected session alive for a short grace period.
+const sessionId = ref('');
+let wsEndpoint = '';
+let wsArgs = '';
+let closing = false;
+let reconnecting = false;
+let reconnectNoticeShown = false;
+let revalidating = false;
+let reconnectStartedAt = 0;
+let reconnectDelay = 1000;
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+// Must match graceTimeout in agent/utils/terminal/session.go: past it the agent has dropped the shell.
+const reconnectWindow = 30 * 60 * 1000;
 const initCmd = ref('');
 const hideInitCmdEcho = ref(false);
 const initCmdEchoBuffer = ref('');
@@ -49,6 +73,9 @@ const aiNotice = ref({
     message: '',
 });
 let aiNoticeTimer: ReturnType<typeof setTimeout> | null = null;
+let resizeFrame: number | undefined;
+let lastResizeColumns = 0;
+let lastResizeRows = 0;
 
 const readyWatcher = watch(
     () => webSocketReady.value && termReady.value,
@@ -114,6 +141,7 @@ interface WsProps {
     error: string;
     initCmd: string;
     waitForPrompt?: string;
+    sessionId?: string;
 }
 
 interface TerminalBufferLine {
@@ -128,6 +156,7 @@ const acceptParams = (props: WsProps) => {
             initCmd.value = props.initCmd || '';
             waitForPrompt.value = props.waitForPrompt || '';
             waitForPromptBuffer.value = '';
+            sessionId.value = props.sessionId || '';
             init(props.endpoint, props.args);
         }
     });
@@ -186,11 +215,20 @@ const initError = (errorInfo: string) => {
 
 function onClose(isKeepShow: boolean = false) {
     initWebSocketToken++;
+    closing = true;
+    stopReconnect();
     window.removeEventListener('resize', changeTerminalSize);
+    if (resizeFrame !== undefined) {
+        cancelAnimationFrame(resizeFrame);
+        resizeFrame = undefined;
+    }
+    lastResizeColumns = 0;
+    lastResizeRows = 0;
     clearAINotice();
     webSocketReady.value = false;
     try {
-        terminalSocket.value?.close();
+        // 1000 tells the agent this is deliberate: close the shell now, no grace period
+        terminalSocket.value?.close(1000);
     } catch {}
     if (heartbeatTimer.value) {
         clearInterval(Number(heartbeatTimer.value));
@@ -211,6 +249,8 @@ function onClose(isKeepShow: boolean = false) {
 
 const initTerminal = (online: boolean = false): boolean => {
     newTerm();
+    lastResizeColumns = 0;
+    lastResizeRows = 0;
     if (terminalElement.value) {
         term.value.open(terminalElement.value);
         applyTerminalBackground(terminalStore.backgroundColor);
@@ -225,6 +265,16 @@ const initTerminal = (online: boolean = false): boolean => {
 };
 
 function changeTerminalSize() {
+    if (resizeFrame !== undefined) {
+        return;
+    }
+    resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = undefined;
+        resizeTerminal();
+    });
+}
+
+function resizeTerminal() {
     if (!terminalElement.value || !term.value) return;
     if (terminalElement.value.clientWidth <= 0 || terminalElement.value.clientHeight <= 0) {
         return;
@@ -233,6 +283,11 @@ function changeTerminalSize() {
     fitAddon.fit();
     if (isWsOpen()) {
         const { cols, rows } = term.value;
+        if (cols === lastResizeColumns && rows === lastResizeRows) {
+            return;
+        }
+        lastResizeColumns = cols;
+        lastResizeRows = rows;
         terminalSocket.value!.send(
             JSON.stringify({
                 type: 'resize',
@@ -249,6 +304,9 @@ function changeTerminalSize() {
 
 const initWebSocket = async (endpoint_: string, args: string = '') => {
     const token = ++initWebSocketToken;
+    closing = false;
+    wsEndpoint = endpoint_;
+    wsArgs = args;
     const href = window.location.href;
     const protocol = href.split('//')[0] === 'http:' ? 'ws' : 'wss';
     const host = href.split('//')[1].split('/')[0];
@@ -258,12 +316,22 @@ const initWebSocket = async (endpoint_: string, args: string = '') => {
     if (args.indexOf('operateNode=') !== -1) {
         conn = `${protocol}://${host}/${endpoint}?cols=${term.value.cols}&rows=${term.value.rows}&${args}`;
     }
+    if (sessionId.value) {
+        conn += `&session=${encodeURIComponent(sessionId.value)}`;
+    }
+    if (revalidating) {
+        conn += '&terminalRevalidate=1';
+    }
     const authError = await checkStreamAuth(conn);
     if (token !== initWebSocketToken || !termReady.value) {
         return;
     }
     if (authError) {
+        reconnecting = false;
+        revalidating = false;
+        sessionId.value = '';
         showWebSocketAuthError(authError);
+        emit('expired');
         return;
     }
     if (heartbeatTimer.value) {
@@ -294,8 +362,10 @@ const showWebSocketAuthError = (message: string) => {
 
 const runRealTerminal = () => {
     webSocketReady.value = true;
+    changeTerminalSize();
     term.value?.focus();
-    if (initCmd.value !== '') {
+    // a reattached shell already ran its init command
+    if (initCmd.value !== '' && !sessionId.value) {
         hideInitCmdEcho.value = true;
         initCmdEchoBuffer.value = '';
         sendMsg(initCmd.value);
@@ -359,6 +429,20 @@ const onWSReceive = (message: MessageEvent) => {
             latency.value = new Date().getTime() - wsMsg.timestamp;
             break;
         }
+        case 'session': {
+            const wasReconnect = reconnecting;
+            const wasRevalidate = revalidating;
+            reconnecting = false;
+            revalidating = false;
+            reconnectDelay = 1000;
+            sessionId.value = wsMsg.id || '';
+            if (wasReconnect && !wasRevalidate) {
+                // replay is a tail of recent output, start from a clean screen
+                term.value?.reset();
+            }
+            emit('session', sessionId.value);
+            break;
+        }
         case 'ai_notice': {
             const message = wsMsg.message?.trim();
             if (!message) {
@@ -372,6 +456,7 @@ const onWSReceive = (message: MessageEvent) => {
 
 const errorRealTerminal = (ex: any) => {
     clearAINotice();
+    if (reconnecting) return;
     let message = ex.message;
     if (!message) message = 'disconnected';
     term.value.write(`\x1b[31m${message}\x1b[m\r\n`);
@@ -385,8 +470,78 @@ const closeRealTerminal = (ev: CloseEvent) => {
         heartbeatTimer.value = undefined;
     }
     terminalSocket.value = undefined;
-    term.value?.write('The connection has been disconnected.');
-    term.value?.write(ev.reason);
+    if (closing || !sessionId.value) {
+        term.value?.write('The connection has been disconnected.');
+        term.value?.write(ev.reason);
+        return;
+    }
+    switch (ev.code) {
+        case 1000: // the shell exited or the agent closed it
+        case CLOSE_SESSION_NOT_FOUND:
+            sessionId.value = '';
+            reconnecting = false;
+            writeNotice(
+                '31',
+                ev.code === 1000 ? 'The connection has been disconnected.' : i18n.global.t('terminal.sessionExpired'),
+            );
+            emit('expired');
+            return;
+        case CLOSE_ATTACHED_ELSEWHERE:
+            reconnecting = false;
+            writeNotice('31', i18n.global.t('terminal.sessionKicked'));
+            return;
+        case CLOSE_REVALIDATE:
+            revalidating = true;
+            scheduleReconnect(true);
+            return;
+        default:
+            scheduleReconnect();
+    }
+};
+
+const writeNotice = (color: string, message: string) => {
+    term.value?.write(`\r\n\x1b[${color}m${message}\x1b[m\r\n`);
+};
+
+// scheduleReconnect retries with backoff for as long as the agent keeps a detached session.
+const scheduleReconnect = (forRevalidation = false) => {
+    const now = Date.now();
+    if (!reconnecting) {
+        reconnecting = true;
+        reconnectStartedAt = now;
+        reconnectDelay = 1000;
+        reconnectNoticeShown = false;
+    } else if (now - reconnectStartedAt > reconnectWindow) {
+        reconnecting = false;
+        sessionId.value = '';
+        writeNotice('31', i18n.global.t('terminal.sessionExpired'));
+        emit('expired');
+        return;
+    }
+    if (!forRevalidation && !reconnectNoticeShown) {
+        writeNotice('33', i18n.global.t('terminal.sessionReconnecting'));
+        reconnectNoticeShown = true;
+    }
+    reconnectTimer = setTimeout(
+        () => {
+            reconnectTimer = null;
+            if (closing || !sessionId.value) return;
+            initWebSocket(wsEndpoint, wsArgs);
+        },
+        forRevalidation ? 0 : reconnectDelay,
+    );
+    if (!forRevalidation) {
+        reconnectDelay = Math.min(reconnectDelay * 2, 8000);
+    }
+};
+
+const stopReconnect = () => {
+    reconnecting = false;
+    revalidating = false;
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
 };
 
 const isWsOpen = () => {
@@ -510,11 +665,17 @@ defineExpose({
     isWsOpen,
     sendMsg,
     getLatency: () => latency.value,
+    // re-fit after the element was moved back into a visible container
+    refit: () => changeTerminalSize(),
 });
 
 onBeforeUnmount(() => {
     onClose();
     resizeObserver.value?.disconnect();
+});
+
+onActivated(() => {
+    nextTick(changeTerminalSize);
 });
 </script>
 

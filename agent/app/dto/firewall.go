@@ -62,6 +62,10 @@ type FirewallSettings struct {
 	PortWhitelist string               `json:"portWhiteList"`
 }
 
+type FirewallPortWhitelistUpdate struct {
+	Value string `json:"value" validate:"required"`
+}
+
 type FirewallBackendOperation struct {
 	Subsystem string `json:"subsystem" validate:"required,oneof=system forwarding docker"`
 	Backend   string `json:"backend" validate:"required,oneof=firewalld ufw iptables nftables"`
@@ -90,6 +94,8 @@ type FirewallSystemPort struct {
 }
 
 type FirewallRuleInventoryResponse struct {
+	IPv4Range    filter.PositionRange   `json:"ipv4Range"`
+	IPv6Range    filter.PositionRange   `json:"ipv6Range"`
 	Total        int64                  `json:"total"`
 	AllTotal     int64                  `json:"allTotal"`
 	ManagedTotal int64                  `json:"managedTotal"`
@@ -105,18 +111,6 @@ type FirewallRuleResetResponse struct {
 type FirewallRuleReset struct {
 	Provider          filter.Provider `json:"provider,omitempty" validate:"omitempty,oneof=firewalld ufw iptables nftables"`
 	WithDockerRestart bool            `json:"withDockerRestart"`
-}
-
-type FirewallRuleCheckResult struct {
-	Decision         filter.CheckDecision       `json:"decision"`
-	Classification   filter.CheckClassification `json:"classification"`
-	Reason           string                     `json:"reason"`
-	RequestedRule    filter.FirewallRule        `json:"requestedRule"`
-	RequestedRuleKey string                     `json:"requestedRuleKey"`
-	ExistingRuleUUID string                     `json:"existingRuleUUID,omitempty"`
-	Candidates       []filter.ObservedRule      `json:"candidates,omitempty"`
-	AllowedActions   []filter.CheckAction       `json:"allowedActions,omitempty"`
-	CheckFlag        string                     `json:"checkFlag"`
 }
 
 type FirewallRuleInventory struct {
@@ -159,20 +153,26 @@ type DockerPortGuardFamilyStatus struct {
 }
 
 type DockerPortGuardEndpoint struct {
-	Family        string   `json:"family"`
-	HostIP        string   `json:"hostIP"`
-	HostPort      uint16   `json:"hostPort"`
-	Protocol      string   `json:"protocol"`
-	ContainerID   string   `json:"containerID"`
-	ContainerName string   `json:"containerName"`
-	ContainerPort uint16   `json:"containerPort"`
-	Compose       string   `json:"compose,omitempty"`
-	Application   string   `json:"application,omitempty"`
-	PolicyUUID    string   `json:"policyUUID,omitempty"`
-	Mode          string   `json:"mode,omitempty"`
-	Sources       []string `json:"sources"`
-	Effective     bool     `json:"effective"`
-	Description   string   `json:"description,omitempty"`
+	Family           string   `json:"family"`
+	HostIP           string   `json:"hostIP"`
+	HostPort         uint16   `json:"hostPort"`
+	Protocol         string   `json:"protocol"`
+	ContainerID      string   `json:"containerID"`
+	ContainerName    string   `json:"containerName"`
+	ContainerState   string   `json:"containerState,omitempty"`
+	ContainerPort    uint16   `json:"containerPort"`
+	Compose          string   `json:"compose,omitempty"`
+	Application      string   `json:"application,omitempty"`
+	PolicyUUID       string   `json:"policyUUID,omitempty"`
+	Mode             string   `json:"mode,omitempty"`
+	NativeAction     string   `json:"nativeAction,omitempty"`
+	ReadOnly         bool     `json:"readOnly,omitempty"`
+	Sources          []string `json:"sources"`
+	Effective        bool     `json:"effective"`
+	Description      string   `json:"description,omitempty"`
+	TrafficPath      string   `json:"trafficPath"`
+	ManagementTarget string   `json:"managementTarget"`
+	ManagementReason string   `json:"managementReason,omitempty"`
 }
 
 type DockerPortGuardPortGroup struct {
@@ -205,14 +205,18 @@ type DockerPortGuardEndpointIdentity struct {
 }
 
 type DockerPortGuardPolicyBatch struct {
-	Endpoints   []DockerPortGuardEndpointIdentity `json:"endpoints" validate:"required,min=1,max=256,dive"`
-	Mode        string                            `json:"mode" validate:"required,oneof=deny_sources allow_sources deny_all"`
-	Sources     []string                          `json:"sources" validate:"max=256,dive,required,max=64"`
-	Description string                            `json:"description" validate:"max=256"`
+	Policies []DockerPortGuardPolicy `json:"policies" validate:"required,min=1,dive"`
 }
 
 type DockerPortGuardPolicyBatchDelete struct {
-	UUIDs []string `json:"uuids" validate:"required,min=1,max=256,dive,required,max=64"`
+	UUIDs []string `json:"uuids" validate:"required,min=1,dive,required,max=64"`
+}
+
+type DockerPortGuardPolicy struct {
+	DockerPortGuardEndpointIdentity
+	Mode        string   `json:"mode" validate:"required,oneof=deny_sources allow_sources deny_all"`
+	Sources     []string `json:"sources" validate:"dive,required,max=64"`
+	Description string   `json:"description" validate:"max=256"`
 }
 
 type DockerPortGuardOperation struct {
@@ -220,33 +224,24 @@ type DockerPortGuardOperation struct {
 	TaskID    string `json:"taskID,omitempty" validate:"omitempty,max=64"`
 }
 
-type FirewallRuleCheckItem struct {
-	UUID string              `json:"uuid" validate:"omitempty,max=64"`
-	Rule filter.FirewallRule `json:"rule" validate:"required"`
-}
-
-type FirewallRuleCheck struct {
-	Items []FirewallRuleCheckItem `json:"items" validate:"required,min=1,max=256,dive"`
-}
-
-type FirewallRuleCheckResponse struct {
-	Items []FirewallRuleCheckResult `json:"items"`
+type FirewallRuleAdopt struct {
+	Scope       filter.Scope `json:"scope" validate:"required"`
+	InstanceKey string       `json:"instanceKey" validate:"required,max=128"`
 }
 
 type FirewallRuleCreateItem struct {
-	Rule             filter.FirewallRule `json:"rule" validate:"required"`
-	CheckFlag        string              `json:"checkFlag"`
-	Action           filter.CheckAction  `json:"action"`
-	AdoptInstanceKey string              `json:"adoptInstanceKey"`
-	SourceKind       string              `json:"sourceKind" validate:"omitempty,oneof=user imported"`
-	SourceID         string              `json:"sourceID"`
+	Rule       filter.FirewallRule `json:"rule" validate:"required"`
+	SourceKind string              `json:"sourceKind" validate:"omitempty,oneof=user imported"`
+	SourceID   string              `json:"sourceID"`
 }
 
 type FirewallRuleCreate struct {
-	Items []FirewallRuleCreateItem `json:"items" validate:"required,min=1,max=256,dive"`
+	Items []FirewallRuleCreateItem `json:"items" validate:"required,min=1,dive"`
 }
 
 type FirewallRuleCreateResponse struct {
+	TaskID    string                      `json:"taskID,omitempty"`
+	Queued    bool                        `json:"queued,omitempty"`
 	Succeeded int                         `json:"succeeded"`
 	Failed    int                         `json:"failed"`
 	Skipped   int                         `json:"skipped"`
@@ -318,7 +313,7 @@ type FirewallRuleSyncFailure struct {
 }
 
 type FirewallRuleDelete struct {
-	UUIDs []string `json:"uuids" validate:"required,min=1,max=256,dive,required,max=64"`
+	UUIDs []string `json:"uuids" validate:"required,min=1,dive,required,max=64"`
 }
 
 type FirewallRuleDeleteResponse struct {
@@ -334,12 +329,34 @@ type FirewallRuleDeleteFailure struct {
 }
 
 type FirewallRuleUpdate struct {
-	UUID string              `json:"uuid" validate:"required,max=64"`
-	Rule filter.FirewallRule `json:"rule" validate:"required"`
+	UUID        string               `json:"uuid" validate:"required,max=64"`
+	Rule        *filter.FirewallRule `json:"rule,omitempty" validate:"required_without_all=Description OrderIndex Priority,excluded_with=Description OrderIndex Priority"`
+	Description *string              `json:"description,omitempty" validate:"excluded_with=Rule"`
+	OrderIndex  *int64               `json:"orderIndex,omitempty" validate:"excluded_with=Rule Priority"`
+	Priority    *int                 `json:"priority,omitempty" validate:"excluded_with=Rule OrderIndex"`
 }
 
 type FirewallRuleReorder struct {
 	UUID           string `json:"uuid" validate:"required,max=64"`
 	TargetPosition *int64 `json:"targetPosition"`
 	Priority       *int   `json:"priority"`
+}
+
+func (p *FirewallRuleSyncPreview) Add(item FirewallRuleSyncItem) {
+	p.Items = append(p.Items, item)
+	switch item.Status {
+	case firewallsync.StatusReady:
+		p.Ready++
+		p.Total++
+	case firewallsync.StatusExisting:
+		p.Existing++
+		p.Total++
+	case firewallsync.StatusRemove:
+		p.Removed++
+	case firewallsync.StatusBlocked:
+		p.Blocked++
+		if item.ReasonCode != firewallsync.ReasonReadOnlyRule {
+			p.Total++
+		}
+	}
 }

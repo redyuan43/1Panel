@@ -513,6 +513,8 @@ const message = {
         closeCurrent: 'Tutup semasa',
         closeOther: 'Tutup lain',
         closeAll: 'Tutup Semua',
+        keepAlive: 'Kekalkan sesi halaman',
+        cancelKeepAlive: 'Hentikan pengekalan sesi halaman',
     },
     header: {
         logout: 'Log keluar',
@@ -958,7 +960,9 @@ const message = {
             from_remote: 'Model ini tidak dimuat turun melalui 1Panel; tiada log muat turun berkaitan.',
             no_logs: 'Log muat turun model ini telah dipadam dan tidak boleh dilihat.',
             vllmVersionHelper: 'Untuk pelayan FusionXpark GB 10, sila pilih versi -cu130.',
-            ascendVisibleDevices: 'Peranti Ascend yang kelihatan',
+            vllmDeployProfile: 'Model penggunaan',
+            vllmProfileFlash0731: 'DeepSeek V4 Flash 0731',
+            vllmProfileVisionExp: 'DeepSeek V4 Flash Vision Exp',
             vllmCommandPortHelper:
                 'Perintah permulaan mesti menggunakan port {0}; jika tidak, perkhidmatan tidak dapat diakses.',
             ascendVisibleDevices: 'Peranti Ascend boleh dilihat (ASCEND_RT_VISIBLE_DEVICES)',
@@ -1151,7 +1155,6 @@ const message = {
             cachedToken: 'Token cache',
             cacheHitRate: 'Kadar hit cache',
             activeUsers: 'Pengguna aktif',
-            activeStreamingRequests: 'Permintaan penstriman aktif',
             activeModels: 'Model aktif',
             failedRequests: 'Permintaan gagal',
             averageTokenPerRequest: 'Purata Token/permintaan',
@@ -2092,6 +2095,9 @@ const message = {
         profileBlockDesc: 'Mengukur sekatan pada Channel, Select dan primitif penyegerakan.',
     },
     terminal: {
+        showTerminalButton: 'Pintasan Terminal',
+        showTerminalButtonHelper:
+            'Apabila diaktifkan, butang pintasan terminal akan dipaparkan di sudut kanan bawah halaman.',
         local: 'Tempatan',
         defaultConn: 'Sambungan Lalai',
         defaultConnHelper:
@@ -2132,6 +2138,20 @@ const message = {
         key: 'Kunci peribadi',
         keyPassword: 'Kata laluan kunci peribadi',
         emptyTerminal: 'Tiada terminal yang sedang disambungkan.',
+        sessionReconnecting: 'Sambungan terputus, menyambung semula...',
+        sessionExpired: 'Sesi tidak lagi tersedia, tekan Enter atau klik sambung semula untuk membuka sesi baharu',
+        sessionKicked: 'Sesi ini telah dibuka di tetingkap lain',
+        sessionCount: '{0} sesi',
+        sessionRules: 'Peraturan sesi terminal',
+        sessionRuleClose: 'Menutup terminal menamatkan sesi serta-merta.',
+        sessionRuleDisconnect:
+            'Boleh dipulihkan dalam 30 minit selepas muat semula, pelayar ditutup atau rangkaian terputus.',
+        sessionRuleRevalidate: 'Sesi tamat jika log masuk tidak sah atau pengesahan melebihi had masa.',
+        sessionRuleResources:
+            'Lebih banyak terminal menggunakan lebih banyak sumber. Tutup terminal yang tidak lagi diperlukan.',
+        minimize: 'Minimumkan',
+        closeAllSessions: 'Tutup semua sesi',
+        closeAllConfirm: 'Semua sesi terminal akan diputuskan dan tidak boleh dipulihkan. Teruskan?',
         lineHeight: 'Ketinggian baris',
         letterSpacing: 'Jarak huruf',
         fontSize: 'Saiz fon',
@@ -2678,6 +2698,7 @@ const message = {
         panelInstallDir: 'Direktori pemasangan 1Panel tidak boleh dipadamkan',
         wgetTask: 'Tugas Muat Turun',
         stopWgetConfirm: 'Adakah anda pasti mahu menghentikan tugas muat turun ini?',
+        downloadRecordsNotRemoved: 'Sesetengah rekod tidak dibuang. Muat semula dan cuba lagi.',
         existFileTitle: 'Amaran fail dengan nama yang sama',
         existFileHelper: 'Fail yang dimuat naik mengandungi fail dengan nama yang sama. Adakah anda mahu menimpanya?',
         existFileSize: 'Saiz fail (baru -> lama)',
@@ -2806,6 +2827,7 @@ const message = {
         portChangeHelper: 'Ubah port perkhidmatan dan mulakan semula perkhidmatan. Adakah anda mahu meneruskan?',
         theme: 'Tema',
         menuTabs: 'Tab menu',
+        menuTabsHelper: 'Selepas didayakan, klik butang kunci pada tab untuk mengekalkan sesi halaman.',
         menuAccordion: 'Pengembangan berbilang menu',
         menuAccordionHelper:
             'Selepas diaktifkan, beberapa kumpulan menu bar sisi boleh kekal dikembangkan pada masa yang sama.',
@@ -3200,6 +3222,8 @@ const message = {
         source: 'Sumber muat turun',
         versionNotSame:
             'Versi nod tidak sepadan dengan nod utama. Sila naik taraf di Pengurusan Nod sebelum mencuba semula.',
+        currentNodeVersionNotSame:
+            'Versi nod semasa tidak sepadan dengan nod utama. Hubungi pentadbir untuk menaik taraf nod semasa.',
         versionCompare:
             'Nod {0} telah berada pada versi terkini yang boleh dinaik taraf. Sila periksa versi nod utama dan cuba lagi!',
         about: 'Mengenai',
@@ -3302,14 +3326,15 @@ const message = {
         restoreCommunity: 'Pulihkan Community Edition',
         restoreCommunityOnline: 'Pemulihan dalam talian',
         restoreCommunityOffline: 'Pemulihan luar talian',
-        restoreCommunityPackageFound:
-            'Pakej luar talian Community Edition yang boleh digunakan telah dikesan. Pemulihan luar talian tersedia.',
-        restoreCommunityPackageMissing:
-            'Tiada pakej luar talian Community Edition yang boleh digunakan dikesan. Pemulihan luar talian tidak tersedia pada masa ini.',
+        restoreCommunityPackageFound: 'Pakej sudah sedia',
+        restoreCommunityPackageMissing: 'Menunggu pakej',
+        restoreCommunityPackageChecking: 'Memeriksa pakej',
+        restoreCommunityPackageReadyHelper: 'Anda boleh meneruskan pemulihan luar talian.',
         restoreCommunityOnlineHelper:
             'Pakej Community Edition untuk versi semasa akan dimuat turun secara automatik dan data khusus Enterprise akan dibersihkan.',
         restoreCommunityOfflineHelper:
             'Letakkan pakej rasmi yang tidak lebih lama daripada versi Enterprise semasa dalam {path}. Pertukaran akan didayakan selepas pakej yang boleh digunakan dikesan.',
+        restoreCommunityCopyDownloadLink: 'Salin pautan muat turun',
         restoreCommunityConfirm:
             'Selepas menukar versi, anda boleh log masuk ke Community Edition menggunakan akaun pentadbir super Enterprise semasa. Data khusus Enterprise akan dipadamkan semasa pertukaran. Sila teruskan dengan berhati-hati.',
         restoreCommunityStarting:
@@ -3336,6 +3361,7 @@ const message = {
         monitor:
             'Naik taraf ke Edisi Komersial untuk melihat status laman web masa nyata, trend pelawat, sumber trafik, log permintaan dan lain-lain.',
         alert: 'Naik taraf ke Edisi Komersial untuk menerima amaran SMS dan melihat log amaran.',
+        vm: 'Naik taraf kepada edisi komersial untuk mengurus mesin maya, imej, templat, rangkaian maya dan sumber storan dalam 1Panel.',
         node: 'Naik taraf ke Edisi Komersial untuk mengurus berbilang pelayan Linux dengan 1Panel.',
         nodeApp:
             'Naik taraf ke Edisi Komersial untuk menaik taraf versi aplikasi berbilang nod tanpa menukar nod secara manual.',
@@ -3971,6 +3997,14 @@ const message = {
         gzipMinLengthHelper: 'Saiz minimum fail untuk pemampatan',
         gzipCompLevelHelper: 'Kadar mampatan',
         gzipHelper: 'Aktifkan pemampatan untuk penghantaran',
+        brotliHelper: 'Aktifkan pemampatan brotli, biasanya lebih kecil daripada gzip',
+        brotliCompLevelHelper: 'Kadar pemampatan brotli, 0 hingga 11',
+        brotliManagedExternallyHelper:
+            'Brotli dikonfigurasikan secara manual dalam nginx.conf; panel memaparkan nilai yang berkuat kuasa dan tidak akan menimpanya.',
+        brotliManagedUnavailableHelper:
+            'Panel tidak dapat menambahkan konfigurasi brotli terurus ke nginx.conf secara automatik; nilai di bawah tidak akan berkuat kuasa.',
+        brotliMinLengthHelper: 'Saiz respons minimum untuk dimampatkan dengan brotli',
+        brotliSaveFailed: 'Tetapan brotli gagal disimpan; tetapan gzip di atas telah digunakan',
         connections: 'Sambungan aktif',
         accepts: 'Diterima',
         handled: 'Diuruskan',
@@ -4130,23 +4164,14 @@ const message = {
             drifted: 'Berbeza',
         },
         ruleTargetRequired: 'Masukkan sekurang-kurangnya satu alamat IP atau port',
-        batchRuleLimit: 'Maksimum {0} peraturan boleh dibuat pada satu masa',
         resolution_adopt: 'Ambil alih pengurusan',
+        plan_duplicate_rules:
+            'Peraturan pendua dengan syarat dan tindakan yang sama tidak boleh diambil alih untuk diurus. Padam peraturan pendua secara manual dan cuba lagi.',
         adoptRuleConfirm:
             'Selepas diambil alih, 1Panel boleh menyelenggara dan memadam peraturan sedia ada ini. Teruskan?',
-        plan_equivalent_external_rule: 'Peraturan luaran yang sama sudah wujud. Ambil alih tanpa mencipta pendua.',
-        plan_multiple_equivalent_external_rules:
-            'Terdapat beberapa peraturan luaran yang sama. Pilih satu untuk diurus.',
-        plan_equivalent_managed_rule: 'Peraturan yang sama sudah diurus oleh 1Panel. Pendua tidak diperlukan.',
+        plan_exact_rule_conflict:
+            'Peraturan dengan syarat padanan yang sama mempunyai tindakan benarkan atau sekat yang bertentangan.',
         allRulesAlreadyExist: 'Kesemua {0} peraturan yang diperiksa sudah wujud. Tiada peraturan baharu untuk dicipta.',
-        ruleCheckResult: 'Keputusan semakan peraturan',
-        ruleCheckStatus_creatable: 'Boleh dicipta',
-        ruleCheckStatus_existing: 'Sudah wujud',
-        ruleCheckStatus_error: 'Ralat',
-        ruleCheckExistingHelper: 'Peraturan yang sama sudah wujud dan akan dilangkau.',
-        ruleCheckReadyHelper: 'Semakan lulus. Peraturan ini boleh dicipta.',
-        ruleCheckExternalExists: 'Peraturan luaran yang sama sudah wujud dan akan dilangkau secara automatik.',
-        ruleCheckBlockedHelper: 'Peraturan yang mempunyai ralat tidak boleh dihantar. Kembali, edit dan semak semula.',
         plan_managed_rule_drifted:
             'Peraturan terurus tidak sepadan dengan tembok api aktif. Selesaikan perbezaan dahulu.',
         plan_opaque_rule_in_target_scope:
@@ -4155,10 +4180,9 @@ const message = {
         plan_protected_rule: 'Peraturan ini dilindungi dan tidak boleh diambil alih, diubah atau dipadam.',
         plan_blocked: 'Peraturan ini tidak dapat digunakan dengan selamat. Muat semula senarai dan cuba lagi.',
         scopeDefaultMismatch: 'Zon lalai sistem ialah {0}; halaman ini hanya mengurus zon public.',
-        scopeInactive: 'Skop terurus tidak aktif. Peraturan baharu mungkin tidak mempengaruhi trafik semasa.',
         scopeMissing: 'Skop terurus {0} tiada dan akan dicipta dengan selamat apabila peraturan pertama digunakan.',
         scopeUnmanagedActive: 'Skop aktif lain dikesan: {0}. 1Panel tidak akan mengubah peraturannya.',
-        scopeRuntimeMismatch: 'Konfigurasi aktif dan kekal berbeza bagi: {0}.',
+        scopeRuntimeMismatch: 'Konfigurasi firewalld aktif dan kekal tidak sepadan. Mulakan semula firewall.',
         dockerRestart: 'Operasi firewall memerlukan memulakan semula perkhidmatan Docker',
         firewallHelper: '{0} firewall sistem',
         firewallNotStart: 'Firewall sistem belum diaktifkan. Aktifkannya dahulu.',
@@ -4189,28 +4213,10 @@ const message = {
         configuredRules: '{0} peraturan dikonfigurasi',
         addressFamily: 'Versi IP',
         portOrRange: 'Port / julat',
-        exportAllRules: 'Eksport semua peraturan',
         importBackendHelper:
             'Peraturan yang diimport ditukar untuk bahagian belakang semasa {0}. Peraturan sumber tidak diubah.',
-        resetDirectRulesHelper:
-            'Padam rantaian, peraturan masa jalan dan fail berterusan tembok api sistem 1Panel daripada {0}; dasar pangkalan data yang disimpan dikekalkan',
-        resetWhitelistRulesHelper:
-            'Tetapkan semula konfigurasi tersuai aktif dalam {0}, pulihkan tetapan pemasangan asal dan nyahdayakan {0}; dasar pangkalan data dikekalkan dan boleh disegerakkan semula.',
-        cleanupForwardingBackendHelper:
-            'Tetapkan semula peraturan masa jalan pemajuan port 1Panel dalam {0}: padam semua peraturan dan rantaian berkaitan sambil mengekalkan data pangkalan data',
-        cleanupDockerBackendHelper:
-            'Tetapkan semula peraturan masa jalan perlindungan port Docker 1Panel dalam {0}: padam semua peraturan dan rantaian berkaitan sambil mengekalkan data pangkalan data',
-        cleanupBeforeBackendSwitch:
-            'Bahagian belakang semasa {0} masih mengandungi peraturan masa jalan 1Panel. Tetapkan semula sebelum bertukar kepada {1}.',
-        cleanupAction: 'Tetapkan semula',
-        backendSwitchNotice:
-            'Tetapkan semula bahagian belakang semasa sebelum menukar tembok api sistem, pemajuan port atau perlindungan Docker. Dasar pangkalan data dikekalkan dan boleh dimulakan atau disegerakkan selepas penukaran.',
-        switchBackendHelper: 'Tukar kepada {0}?',
-        switchDockerBackendHelper: 'Tukar kepada {0}? Ini akan mengemas kini konfigurasi dan memulakan semula Docker.',
         ruleSyncTitle: 'Segerakkan peraturan',
         ruleSyncAction: 'Segerakkan peraturan',
-        ruleSyncHelper:
-            'Segerakkan peraturan yang diurus oleh 1Panel daripada tembok api terpilih ke tembok api semasa. Peraturan sumber tidak dipadam dan peraturan luaran tidak disertakan.',
         ruleSyncDatabase: 'Pangkalan data 1Panel',
         ruleSyncDatabaseHelper:
             'Segerakkan dan selaraskan peraturan terurus dalam tembok api semasa berdasarkan peraturan pangkalan data 1Panel. Peraturan yang tiada akan ditambah dan peraturan berlebihan akan dipadam.',
@@ -4219,7 +4225,6 @@ const message = {
             'Segerakkan {1} supaya sepadan tepat dengan {0} peraturan pangkalan data? {2} peraturan sasaran akan dipadam dan peraturan yang tiada akan ditambah.',
         ruleSyncSource: 'Sumber konfigurasi',
         ruleSyncTarget: 'Bahagian belakang semasa',
-        ruleSyncTotal: 'Peraturan ditukar',
         ruleSyncReady: 'Sedia',
         ruleSyncExisting: 'Sedia ada',
         ruleSyncRemove: 'Untuk dipadam',
@@ -4230,25 +4235,16 @@ const message = {
             managedOrderDiffers: 'Susunan peraturan terurus berbeza daripada turutan pangkalan data.',
             managedOnlyInTarget: 'Peraturan terurus hanya wujud dalam tembok api sasaran.',
             managedRuntimeCannotRemove: 'Peraturan aktif terurus tidak dapat dipadam dengan selamat.',
-            managedOrderBlocked:
-                'Peraturan terurus tidak boleh disusun semula merentasi peraturan luaran, tidak dikenali atau dilindungi.',
-            mayBlockManagement: 'Peraturan mungkin menyekat sambungan pengurusan semasa.',
             missingFromTarget: 'Peraturan tiada dalam tembok api sasaran.',
             targetDiffers: 'Peraturan sasaran berbeza daripada dasar pangkalan data.',
             alreadyExistsInTarget: 'Peraturan sudah wujud dalam tembok api sasaran.',
             onlyInTarget: 'Peraturan hanya wujud dalam tembok api sasaran.',
             stale: 'Keadaan peraturan tembok api sudah lapuk. Muat semula dan cuba lagi.',
-            lockoutRisk: 'Perubahan ini mungkin menyekat akses pengurusan.',
             protectedRule: 'Peraturan tembok api yang dilindungi ini tidak boleh diubah.',
+            dockerAcceptReadOnly:
+                'Peraturan ACCEPT ini adalah baca sahaja dan akan dikekalkan semasa peraturan lain disegerakkan. Untuk membuangnya, padam secara manual pada hos.',
             cannotReconcile: 'Peraturan sasaran tidak dapat disegerakkan: {0}',
         },
-        ruleSyncConfirm: 'Segerakkan {0} peraturan daripada {1} ke {2}? Bahagian belakang sumber tidak akan diubah.',
-        ruleSyncResetSource: 'Tetapkan semula dan nyahdayakan tembok api sumber {0} selepas penyegerakan berjaya',
-        ruleSyncResetSourceHelper: 'Sumber hanya ditetapkan semula selepas semua peraturan berjaya disegerakkan.',
-        ruleSyncResetSourceBlocked:
-            'Ada peraturan yang tidak dapat disegerakkan. Selesaikan dahulu sebelum menetapkan semula sumber.',
-        ruleSyncResetSourceConfirm:
-            'Segerakkan {0} peraturan daripada {1} ke {2}, kemudian tetapkan semula dan nyahdayakan {1}? Semua konfigurasinya akan dipadam dan tidak boleh dibuat asal.',
         ruleSyncPartial: 'Penyegerakan selesai: {0} berjaya, {1} sudah wujud dan {2} gagal.',
         ruleSyncSuccess: 'Penyegerakan selesai: {0} berjaya, {1} sudah wujud dan {2} dipadam.',
         ruleSyncStatus: {
@@ -4257,6 +4253,21 @@ const message = {
             remove: 'Untuk dipadam',
             blocked: 'Tidak tersedia',
         },
+        resetDirectRulesHelper:
+            'Padam rantaian, peraturan masa jalan dan fail berterusan tembok api sistem 1Panel daripada {0}; dasar pangkalan data yang disimpan dikekalkan',
+        resetWhitelistRulesHelper:
+            'Tetapkan semula konfigurasi tersuai aktif dalam {0}, pulihkan tetapan pemasangan asal dan nyahdayakan {0}; dasar pangkalan data dikekalkan dan boleh disegerakkan semula.',
+        cleanupForwardingBackendHelper:
+            'Tetapkan semula peraturan masa jalan pemajuan port 1Panel dalam {0}: padam semua peraturan dan rantaian berkaitan sambil mengekalkan data pangkalan data',
+        cleanupDockerBackendHelper:
+            'Tetapkan semula peraturan masa jalan perlindungan port Docker 1Panel dalam {0}: padam semua peraturan dan rantaian berkaitan sambil mengekalkan data pangkalan data',
+        cleanupBeforeBackendSwitch:
+            'Bahagian belakang semasa {0} masih mengandungi peraturan masa jalan 1Panel. Tetapkan semula sebelum bertukar kepada {1}. Penetapan semula hanya membersihkan peraturan masa jalan; dasar pangkalan data dikekalkan dan boleh dimulakan atau disegerakkan selepas penukaran.',
+        cleanupAction: 'Tetapkan semula',
+        backendSwitchNotice:
+            'Disyorkan untuk mengaktifkan hanya satu kaedah pengurusan tembok api. Menjalankan berbilang tembok api serentak boleh menyebabkan konflik peraturan, status tidak konsisten atau masalah akses port kontena.',
+        switchBackendHelper: 'Tukar kepada {0}?',
+        switchDockerBackendHelper: 'Tukar kepada {0}? Ini akan mengemas kini konfigurasi dan memulakan semula Docker.',
         uninstalledStatus: 'Belum dipasang',
         selectedBackendNotInstalled:
             'Perkhidmatan {backend} tidak dikesan. Pasang secara manual daripada {library}, atau tukar backend firewall dalam {settings}.',
@@ -4264,6 +4275,21 @@ const message = {
         partiallyInitialized: 'Dimulakan sebahagian',
         dockerGuardHelper:
             'Tetapkan sekatan akses untuk port yang diterbitkan oleh bekas Docker pada hos. Port tanpa perlindungan mengekalkan tingkah laku akses lalai Docker.',
+        dockerTrafficPathMixed: 'Port yang dipilih menggunakan laluan akses berbeza. Tetapkannya secara berasingan.',
+        dockerTrafficPathUnknown: 'Laluan akses port ini tidak dapat ditentukan. Semak rangkaian Docker dan cuba lagi.',
+        dockerTrafficPathReason: {
+            nat_inspect_failed:
+                'Peraturan NAT Docker tidak dapat dibaca. Semak arahan dan kebenaran tembok api, kemudian muat semula.',
+            proxy_inspect_failed:
+                'Proses docker-proxy tidak dapat diperiksa. Semak akses kepada maklumat proses sistem, kemudian muat semula.',
+            nat_chain_unreachable:
+                'Peraturan pemajuan Docker wujud untuk port ini, tetapi rantaian masuk NAT tidak aktif. Semak peraturan tembok api Docker atau mulakan semula Docker, kemudian muat semula.',
+            no_matching_path:
+                'Tiada peraturan pemajuan Docker aktif atau proses proksi ditemui untuk port ini. Mulakan atau mulakan semula bekas, kemudian muat semula. Jika masalah berterusan, semak konfigurasi rangkaian Docker.',
+        },
+        dockerInputPolicyNotEffective:
+            'Port ini diterima terus oleh hos, jadi peraturan perlindungan port bekas sedia ada tidak digunakan. Tetapkannya dalam firewall hos.',
+        dockerInputUseHostFirewall: 'Konfigurasikan akses port ini dalam tembok api hos.',
         dockerInputNotProtected:
             'Peraturan INPUT hos tidak melindungi port terbitan Docker ini secara langsung. Klik untuk membuka perlindungan port bekas.',
         notInitialized: 'Belum dimulakan',
@@ -4294,9 +4320,7 @@ const message = {
             'Peraturan yang dipilih mempunyai konfigurasi berbeza. Tetapkan semula untuk menulis ganti semuanya; keterangan kosong akan mengosongkan semua keterangan.',
         effective: 'Berkuat kuasa',
         forwardUnsynced: 'Belum disegerak',
-        notEnabled: 'Tidak didayakan',
         notEffective: 'Tidak berkuat kuasa',
-        dockerGuardStatusEffective: 'Perlindungan port bekas {0} berfungsi seperti biasa',
         dockerGuardStatusReason: {
             command_missing:
                 'Komponen firewall {0} tidak tersedia, jadi perlindungan berkaitan tidak boleh didayakan. Semak firewall sistem',
@@ -4319,11 +4343,7 @@ const message = {
         forwardPortHelper: 'Menyokong julat port, cth: 8080-8089',
         forwardInboundInterface: 'Antara Muka Rangkaian Masukan Penerusan',
         exportHelper: 'Akan mengeksport {0} peraturan firewall. Teruskan?',
-        importSuccess: '{0} peraturan berjaya diimport',
-        importPartialSuccess: 'Import selesai: {0} berjaya, {1} gagal',
         basicStatus: 'Firewall semasa tidak terikat. Sila ikat dahulu.',
-        baseIptables: 'Perkhidmatan iptables',
-        forwardIptables: 'Perkhidmatan Penerusan Port iptables',
         initMsg: 'Akan memulakan {0}, teruskan?',
         initDirectBackendConflictMsg:
             '{1} masih terikat. Jika {0} dimulakan, kedua-dua set peraturan firewall akan aktif dan mungkin menyekat akses tanpa dijangka. Teruskan?',
@@ -4335,7 +4355,7 @@ const message = {
             'Nyahikat - Apabila tidak terikat, semua peraturan firewall yang ditambah akan menjadi tidak sah. Teruskan dengan berhati-hati. Sahkan?',
         portWhiteList: 'Senarai putih port',
         portWhiteListAlter:
-            'Menyimpan tidak mengubah peraturan firewall semasa dengan serta-merta. Port baharu akan dibuka pada pemulaan atau pengaktifan seterusnya. Untuk menutup port yang dialih keluar, padam peraturan sedia ada secara manual daripada senarai peraturan.',
+            'Perubahan berkuat kuasa serta-merta apabila disimpan. Port baharu dibenarkan secara automatik; mengalih keluar port hanya membuang perlindungannya. Untuk menutupnya, padam peraturan kebenaran dalam senarai peraturan.',
         portWhiteListHelper: 'Menyokong IPv4/IPv6, TCP/UDP, port tunggal dan julat seperti 8000-8100.',
         chain: 'Rantai',
         sourceIP: 'IP Sumber',
@@ -4355,9 +4375,14 @@ const message = {
             'Peraturan ini membenarkan {0} mengakses {1}. Memadamnya mungkin menjejaskan akses kepada beberapa perkhidmatan. Teruskan?',
         deleteRiskRulesConfirm:
             'Akan memadam {0} peraturan. {1} peraturan benarkan mungkin menjejaskan akses perkhidmatan. Teruskan?',
-        editRuleConfirm: 'Medan berikut akan diubah: {0}. Peraturan akan digunakan dan disahkan serta-merta. Teruskan?',
+        editRuleConfirm: 'Adakah anda pasti mahu mengubah peraturan ini?',
     },
     runtime: {
+        importEnv: 'Import Pemboleh Ubah Persekitaran',
+        envImportError: 'Baris {0}: {1}',
+        envInvalidAssignment: 'Penetapan NAME=value yang sah diperlukan',
+        envUnclosedQuote: 'Tanda petikan tidak ditutup',
+        envUnexpectedText: 'Teks tidak dijangka selepas tanda petikan penutup',
         runtime: 'Runtime',
         workDir: 'Direktori kerja',
         localHelper:
@@ -6373,6 +6398,14 @@ const message = {
             nodeDashTitle4: 'Pengurusan Tugas Berjadual',
             nodeDashContent4:
                 'Pengurusan bersatu tugas berjadual berbilang nod, menyokong pemantauan status, mula/henti pantas dan pelaksanaan pencetus manual',
+            vmTitle1: 'Mesin maya',
+            vmContent1: 'Cipta dan urus mesin maya, pantau statusnya dan laraskan peruntukan sumber.',
+            vmTitle2: 'Imej dan templat',
+            vmContent2: 'Urus imej ISO dan templat untuk memudahkan penciptaan mesin maya.',
+            vmTitle3: 'Rangkaian maya',
+            vmContent3: 'Urus rangkaian maya dan konfigurasikan sambungan rangkaian mesin maya.',
+            vmTitle4: 'Kumpulan storan',
+            vmContent4: 'Urus kumpulan storan dan peruntukkan sumber storan kepada mesin maya.',
             nodeTitle1: 'Satu Klik Tambah Node',
             nodeContent1: 'Mengintegrasikan pelbagai nod pelayan dengan cepat',
             nodeTitle2: 'Kelompok Naik Taraf',
@@ -6816,7 +6849,57 @@ const message = {
             barkConfigHelper: 'Konfigurasi pemberitahuan amaran Bark',
             webhookName: 'Nama bot',
             webhookUrl: 'URL Webhook',
-            alertConfigProHelper: 'Edisi Komersial turut menyokong amaran WeCom, DingTalk, Feishu dan SMS.',
+            custom: 'Webhook',
+            webhookPreset: 'Pratetap',
+            genericJsonPreset: 'JSON umum',
+            customPreset: 'Tersuai',
+            webhookUrlSecretHelper: 'URL Webhook disimpan secara disulitkan dan boleh dilihat serta diedit di sini',
+            webhookPublicAddressHelper:
+                'Hanya alamat HTTP/HTTPS yang boleh dicapai secara awam disokong; alamat setempat, peribadi dan simpanan disekat',
+            customWebhookRecoveryRequired:
+                'Konfigurasi ini tidak sah atau daripada versi lama. Masukkan semula URL Webhook dan Header rahsia yang diperlukan, kemudian simpan.',
+            clearSecret: 'Kosongkan',
+            keepSecret: 'Kekalkan',
+            secretCleared: 'Rahsia ini akan dikosongkan apabila disimpan',
+            bodyType: 'Jenis Body',
+            bodyTemplate: 'Templat Body',
+            formFieldName: 'Nama medan',
+            formFieldValue: 'Nilai medan',
+            addFormField: 'Tambah medan',
+            webhookAdvanced: 'Lanjutan',
+            headers: 'Headers',
+            headerName: 'Nama Header',
+            headerValue: 'Nilai Header',
+            secretValue: 'Nilai rahsia',
+            addHeader: 'Tambah Header',
+            templateVariables: 'Pemboleh ubah templat',
+            templateVariableTitle: 'Tajuk amaran',
+            templateVariableMessage: 'Kandungan amaran',
+            templateVariableType: 'Jenis amaran',
+            templateVariableNodeName: 'Nama nod',
+            templateVariableTimestamp: 'Masa kejadian',
+            templateVariablesHelper:
+                'title=tajuk amaran, message=kandungan, type=jenis, nodeName=nama nod, timestamp=masa kejadian. Klik pemboleh ubah untuk memasukkannya ke dalam Body.',
+            testResultStale: 'Konfigurasi telah berubah; keputusan ujian sebelumnya tidak lagi sah',
+            alertConfigChanged: 'Konfigurasi telah dikemas kini. Muat semula dan cuba lagi.',
+            presetOverwriteHelper: 'Menukar pratetap akan menggantikan konfigurasi Body semasa. Teruskan?',
+            customWebhookValidation: {
+                displayNameRequired: 'Masukkan nama paparan',
+                urlRequired: 'Masukkan URL Webhook',
+                urlInvalid: 'URL Webhook mestilah URL HTTP atau HTTPS yang sah',
+                bodyRequired: 'Konfigurasikan Body permintaan',
+                jsonInvalid: 'Templat JSON Body tidak sah',
+                formFieldRequired: 'Nama medan Form diperlukan',
+                formFieldDuplicate: 'Nama medan Form mestilah unik',
+                headerRequired: 'Nama Headers diperlukan',
+                headerInvalid: 'Nama Header tidak sah',
+                headerDuplicate: 'Nama Headers mestilah unik',
+                headerReserved: 'Header ini diurus oleh sistem dan tidak boleh disesuaikan',
+                headerMustBeSecret: 'Header pengesahan atau kelayakan mesti ditandai sebagai nilai rahsia',
+                templateVariableInvalid: 'Body mengandungi pemboleh ubah templat yang tidak disokong',
+                secretRequired: 'Masukkan nilai rahsia atau pilih Kekalkan atau Kosongkan',
+            },
+            alertConfigProHelper: 'Edisi Komersial menambah lebih banyak saluran pemberitahuan.',
         },
         theme: {
             lingXiaGold: 'LXware Gold',
@@ -6869,6 +6952,8 @@ const message = {
             submitSuccess: 'Tugas penyegerakan berjaya dihantar.',
         },
         vm: {
+            countLimitHelper:
+                'Edisi Professional membenarkan penciptaan sehingga {0} mesin maya. Edisi Enterprise tidak mengehadkan bilangannya.',
             vm: 'Mesin Maya',
             title: 'Pengurusan Mesin Maya',
             healthCheck: 'Pemeriksaan kesihatan',
@@ -6953,6 +7038,8 @@ const message = {
                 },
             },
             dependencies: 'Kebergantungan',
+            architectureUnsupported:
+                'Seni bina sistem semasa {0} tidak disokong. Ciri VM kini hanya menyokong AMD64 dan ARM64.',
             dependencyPurpose: 'Tujuan',
             dependencyPurposeMap: {
                 libvirt: 'Menyediakan perkhidmatan pengurusan VM untuk kitar hayat dan penjadualan sumber.',

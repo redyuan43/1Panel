@@ -76,7 +76,7 @@ func (a *Adapter) CheckRule(ctx context.Context, rule filter.FirewallRule) error
 		return nil
 	}
 	if err := a.checker.CheckMultiport(ctx, rule.Scope.Family); err != nil {
-		return fmt.Errorf("%w: iptables multiport is unavailable for %s: %v", filter.ErrUnsupportedScope, rule.Scope.Family, err)
+		return fmt.Errorf("inspect iptables multiport for %s: %w", rule.Scope.Family, err)
 	}
 	if a.multiportOK == nil {
 		a.multiportOK = make(map[filter.Family]bool, 2)
@@ -87,12 +87,7 @@ func (a *Adapter) CheckRule(ctx context.Context, rule filter.FirewallRule) error
 
 func (a *Adapter) Capabilities(context.Context) (filter.Capabilities, error) {
 	return filter.Capabilities{
-		Scopes: []filter.ScopePattern{{
-			Provider: filter.ProviderIptables, Families: []filter.Family{filter.FamilyIPv4, filter.FamilyIPv6}, Table: "filter",
-			Chains:     native.BasicChains(),
-			Directions: []filter.Direction{filter.DirectionInput},
-		}}, Marker: true, OwnedChains: true, ExplicitPosition: true,
-		AtomicApply: false, TransactionalRollback: false,
+		Marker: true, OwnedChains: true, ExplicitPosition: true,
 	}, nil
 }
 
@@ -163,12 +158,18 @@ func (a *Adapter) Apply(ctx context.Context, plan filter.BackendPlan) (filter.Ap
 		executed := 0
 		for _, command := range rulePlan.Commands {
 			if err := a.writer.Run(ctx, command); err != nil {
+				if plan.CommandOnly {
+					return filter.ApplyResult{}, err
+				}
 				return filter.ApplyResult{}, a.compensate(ctx, plan, ruleIndex, executed, err)
 			}
 			executed++
 		}
 	}
 	if err := a.writer.Save(ctx, plan.Scope); err != nil {
+		if plan.CommandOnly {
+			return filter.ApplyResult{}, err
+		}
 		return filter.ApplyResult{}, a.compensate(ctx, plan, len(plan.Rules)-1, -1, err)
 	}
 	applied := make([]filter.ObservedRule, 0, len(plan.Rules))
@@ -368,6 +369,11 @@ func (a *Adapter) Rollback(ctx context.Context, plan filter.BackendPlan) error {
 }
 
 func (a *Adapter) compensate(ctx context.Context, plan filter.BackendPlan, lastRule, lastCommandCount int, cause error) error {
+	if plan.CreatesOnly() {
+		return cause
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	rollbackErr := a.rollback(ctx, plan, lastRule, lastCommandCount)
 	if rollbackErr != nil {
 		return fmt.Errorf("iptables apply failed: %w; compensation failed: %v", cause, rollbackErr)
@@ -434,9 +440,6 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 		(normalized.Scope.Family == filter.FamilyIPv6 && normalized.Protocol == "icmp") {
 		return filter.NativeRulePlan{}, fmt.Errorf("%w: protocol %q does not match %s", filter.ErrInvalidRule, normalized.Protocol, normalized.Scope.Family)
 	}
-	if (change.Operation == filter.ChangeCreate || change.Operation == filter.ChangeUpdate) && isBroadDeny(normalized) {
-		return filter.NativeRulePlan{}, filter.ErrLockoutRisk
-	}
 	marker := "1panel-rule:" + normalized.UUID
 	position := len(snapshot.Rules) + 1
 	verb := "-I"
@@ -465,9 +468,6 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 			}
 			targetPosition = int(*normalized.OrderIndex)
 		}
-		if err := validateReorderPath(snapshot, position, targetPosition); err != nil {
-			return filter.NativeRulePlan{}, err
-		}
 		if position != targetPosition {
 			return positionalMutationPlan(snapshot, normalized, target, marker, position, targetPosition, change.Operation), nil
 		}
@@ -487,9 +487,6 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 			return filter.NativeRulePlan{}, fmt.Errorf("%w: reorder target is out of range", filter.ErrInvalidRule)
 		}
 		targetPosition := int(*normalized.OrderIndex)
-		if err := validateReorderPath(snapshot, position, targetPosition); err != nil {
-			return filter.NativeRulePlan{}, err
-		}
 		return positionalMutationPlan(snapshot, normalized, target, marker, position, targetPosition, change.Operation), nil
 	default:
 		return filter.NativeRulePlan{}, fmt.Errorf("%w: unsupported operation %s", filter.ErrInvalidRule, change.Operation)
@@ -566,26 +563,6 @@ func pointerToObserved(rule filter.ObservedRule, include bool) *filter.ObservedR
 		return nil
 	}
 	return &rule
-}
-
-func validateReorderPath(snapshot filter.Snapshot, from, to int) error {
-	start, end := from, to
-	if start > end {
-		start, end = end, start
-	}
-	for position := start; position <= end; position++ {
-		if position == from {
-			continue
-		}
-		observed := snapshot.Rules[position-1]
-		if observed.Protected {
-			return filter.ErrProtectedRule
-		}
-		if observed.ParseStatus == filter.ParseStatusOpaque || observed.Marker == "" {
-			return fmt.Errorf("%w: reorder cannot cross external or opaque rules", filter.ErrUnsupportedScope)
-		}
-	}
-	return nil
 }
 
 func compileRuleArgs(rule filter.FirewallRule, marker string) []string {
@@ -675,7 +652,8 @@ func validateMutationTarget(snapshot filter.Snapshot, change filter.DesiredChang
 	if wantErr != nil || observedErr != nil || wantKey != observedKey {
 		return 0, filter.ObservedRule{}, filter.ErrRuleStale
 	}
-	if change.Operation != filter.ChangeAdopt && observed.Marker != marker {
+	if change.Operation != filter.ChangeAdopt && observed.Marker != marker &&
+		!(change.Operation == filter.ChangeDelete && change.UnmarkedAdopted && observed.Marker == "") {
 		return 0, filter.ObservedRule{}, filter.ErrRuleStale
 	}
 	return position, observed, nil
@@ -697,12 +675,6 @@ func insertionPosition(snapshot filter.Snapshot, rule filter.FirewallRule) int {
 	return len(snapshot.Rules) + 1
 }
 
-func isBroadDeny(rule filter.FirewallRule) bool {
-	return (rule.Action == filter.ActionDrop || rule.Action == filter.ActionReject) &&
-		rule.SourceAddress == "" && rule.DestinationAddress == "" && rule.SourcePort == "" &&
-		rule.DestinationPort == ""
-}
-
 type systemBackend struct{}
 
 func (systemBackend) CheckMultiport(ctx context.Context, family filter.Family) error {
@@ -714,13 +686,7 @@ func (systemBackend) CheckMultiport(ctx context.Context, family filter.Family) e
 }
 
 func (systemBackend) ListChain(ctx context.Context, scope filter.Scope) (string, error) {
-	var output string
-	var err error
-	if scope.Family == filter.FamilyIPv6 {
-		output, err = native.RunIPv6WithStdContext(ctx, scope.Table, "-S", scope.Chain)
-	} else {
-		output, err = native.RunWithStdContext(ctx, scope.Table, "-S", scope.Chain)
-	}
+	output, err := native.ReadTable(ctx, scope.Table, scope.Family == filter.FamilyIPv6)
 	if err != nil {
 		return "", err
 	}
@@ -798,14 +764,14 @@ func runtimeExecutable(logical string) (string, error) {
 	switch logical {
 	case "ip6tables":
 		if !commands.IPv6Available() {
-			return "", fmt.Errorf("ip6tables command family is unavailable")
+			return "", fmt.Errorf("%w: ip6tables command family is unavailable", filter.ErrFamilyUnavailable)
 		}
 		return commands.IPv6, nil
 	case "iptables-restore":
 		return commands.Restore4, nil
 	case "ip6tables-restore":
 		if commands.Restore6 == "" {
-			return "", fmt.Errorf("ip6tables-restore command family is unavailable")
+			return "", fmt.Errorf("%w: ip6tables-restore command family is unavailable", filter.ErrFamilyUnavailable)
 		}
 		return commands.Restore6, nil
 	}

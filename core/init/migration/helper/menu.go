@@ -131,7 +131,7 @@ func LoadMenus() string {
 				{ID: "111", Disabled: false, Title: "xpack.node.nodeManagement", IsShow: true, Label: "NodeDashboard", Path: "/xpack/node/dashboard", Sort: 300},
 				{ID: "113", Disabled: false, Title: "xpack.monitor.name", IsShow: true, Label: "MonitorDashboard", Path: "/xpack/monitor/dashboard", Sort: 600},
 				{ID: "115", Disabled: false, Title: "xpack.sync.menu", IsShow: true, Label: "Sync", Path: "/xpack/sync", Sort: 700},
-				{ID: "119", Disabled: false, Title: "xpack.upage", IsShow: true, Label: "Upage", Path: "/xpack/upage", Sort: 800},
+				{ID: "123", Disabled: false, Title: "xpack.vm.title", IsShow: true, Label: "VirtualMachine", Path: "/xpack/vm", Sort: 900},
 				{ID: "114", Disabled: false, Title: "xpack.tamper.tamper", IsShow: true, Label: "Tamper", Path: "/xpack/tamper", Sort: 1000},
 				{ID: "120", Disabled: false, Title: "xpack.cluster.cluster", IsShow: true, Label: "Cluster", Path: "/xpack/cluster", Sort: 1100},
 				{ID: "117", Disabled: false, Title: "xpack.setting.setting", IsShow: true, Label: "XSetting", Path: "/xpack/setting", Sort: 1200},
@@ -192,15 +192,6 @@ func LoadMenus() string {
 				Path:     "/enterprise/ops-report",
 				Sort:     500,
 			}, "UserManagement")
-			item[i].Children = UpsertMenuByLabel(item[i].Children, dto.ShowMenu{
-				ID:       "123",
-				Disabled: false,
-				Title:    "xpack.vm.title",
-				IsShow:   true,
-				Label:    "VirtualMachine",
-				Path:     "/enterprise/vm",
-				Sort:     900,
-			}, "Upage")
 			break
 		}
 	}
@@ -255,7 +246,6 @@ func XpackMenuSort() []dto.MenuLabelSort {
 		{Label: "OpsReport", Sort: 500},
 		{Label: "MonitorDashboard", Sort: 600},
 		{Label: "Sync", Sort: 700},
-		{Label: "Upage", Sort: 800},
 		{Label: "VirtualMachine", Sort: 900},
 		{Label: "Tamper", Sort: 1000},
 		{Label: "Cluster", Sort: 1100},

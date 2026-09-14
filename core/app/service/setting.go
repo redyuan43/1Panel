@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/1Panel-dev/1Panel/core/app/dto"
@@ -31,7 +32,6 @@ import (
 	"github.com/1Panel-dev/1Panel/core/utils/common"
 	"github.com/1Panel-dev/1Panel/core/utils/controller"
 	"github.com/1Panel-dev/1Panel/core/utils/encrypt"
-	"github.com/1Panel-dev/1Panel/core/utils/firewall"
 	"github.com/1Panel-dev/1Panel/core/utils/menutree"
 	"github.com/1Panel-dev/1Panel/core/utils/passkey"
 	"github.com/1Panel-dev/1Panel/core/utils/req_helper/proxy_local"
@@ -41,6 +41,8 @@ import (
 )
 
 type SettingService struct{}
+
+var panelPortChangeMu sync.Mutex
 
 type ISettingService interface {
 	GetSettingInfo() (*dto.SettingInfo, error)
@@ -55,7 +57,7 @@ type ISettingService interface {
 	UpdateProxy(req dto.ProxyUpdate) error
 
 	GetTerminalInfo() (*dto.TerminalInfo, error)
-	UpdateTerminal(req dto.TerminalInfo) error
+	UpdateTerminal(req dto.TerminalUpdate) error
 
 	UpdateSystemSSL() error
 	GenerateRSAKey() error
@@ -147,7 +149,7 @@ func repairAndSortHideMenu(settingMap map[string]string) {
 		return
 	}
 
-	menus, changed := menutree.EnsureXpackAppMenus(menus, nil)
+	menus, changed := menutree.ReconcileHideMenuIntegrity(menus, nil)
 	if changed {
 		repairedBytes, err := json.Marshal(menus)
 		if err != nil {
@@ -213,7 +215,7 @@ func (u *SettingService) Update(c *gin.Context, key, value string) error {
 		if len(menus) == 0 {
 			return fmt.Errorf("hide menu cannot be empty")
 		}
-		menus, _ = menutree.EnsureXpackAppMenus(menus, previousMenus)
+		menus, _ = menutree.ReconcileHideMenuIntegrity(menus, previousMenus)
 		for i := 0; i < len(menus); i++ {
 			if menus[i].Label == "Home-Menu" || menus[i].Label == "App-Menu" || menus[i].Label == "Setting-Menu" {
 				menus[i].IsShow = true
@@ -245,6 +247,7 @@ func (u *SettingService) Update(c *gin.Context, key, value string) error {
 	case "BindDomain":
 		if len(value) != 0 {
 			_ = global.SESSION.Clean()
+			CloseTerminalSessions("all", "", "")
 		}
 		if err := u.clearPasskeySettings(); err != nil {
 			return err
@@ -345,9 +348,9 @@ func (u *SettingService) UpdateProxy(req dto.ProxyUpdate) error {
 }
 
 func (u *SettingService) UpdatePort(port uint) error {
-	if common.ScanPort(int(port)) {
-		return buserr.WithDetail("ErrPortInUsed", port, nil)
-	}
+	panelPortChangeMu.Lock()
+	defer panelPortChangeMu.Unlock()
+
 	oldPort, err := settingRepo.Get(repo.WithByKey("ServerPort"))
 	if err != nil {
 		return err
@@ -355,7 +358,10 @@ func (u *SettingService) UpdatePort(port uint) error {
 	if oldPort.Value == fmt.Sprintf("%v", port) {
 		return nil
 	}
-	if err := firewall.UpdatePort(oldPort.Value, fmt.Sprintf("%v", port)); err != nil {
+	if common.ScanPort(int(port)) {
+		return buserr.WithDetail("ErrPortInUsed", port, nil)
+	}
+	if err := proxy_local.UpdatePanelPort(oldPort.Value, port); err != nil {
 		return err
 	}
 
@@ -553,7 +559,7 @@ func (u *SettingService) GetTerminalInfo() (*dto.TerminalInfo, error) {
 	for _, set := range setting {
 		settingMap[set.Key] = set.Value
 	}
-	var info dto.TerminalInfo
+	info := dto.TerminalInfo{ShowTerminalButton: "Enable"}
 	arr, err := json.Marshal(settingMap)
 	if err != nil {
 		return nil, err
@@ -563,39 +569,30 @@ func (u *SettingService) GetTerminalInfo() (*dto.TerminalInfo, error) {
 	}
 	return &info, err
 }
-func (u *SettingService) UpdateTerminal(req dto.TerminalInfo) error {
-	if err := settingRepo.UpdateOrCreate("LineHeight", req.LineHeight); err != nil {
-		return err
+func (u *SettingService) UpdateTerminal(req dto.TerminalUpdate) error {
+	settings := []struct {
+		key   string
+		value *string
+	}{
+		{"ShowTerminalButton", req.ShowTerminalButton},
+		{"LineHeight", req.LineHeight},
+		{"LetterSpacing", req.LetterSpacing},
+		{"FontSize", req.FontSize},
+		{"FontFamily", req.FontFamily},
+		{"CursorBlink", req.CursorBlink},
+		{"BackgroundColor", req.BackgroundColor},
+		{"ForegroundColor", req.ForegroundColor},
+		{"CursorStyle", req.CursorStyle},
+		{"Scrollback", req.Scrollback},
+		{"ScrollSensitivity", req.ScrollSensitivity},
 	}
-	if err := settingRepo.UpdateOrCreate("LetterSpacing", req.LetterSpacing); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("FontSize", req.FontSize); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("FontFamily", req.FontFamily); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("CursorBlink", req.CursorBlink); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("BackgroundColor", req.BackgroundColor); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("ForegroundColor", req.ForegroundColor); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("CursorBlink", req.CursorBlink); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("CursorStyle", req.CursorStyle); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("Scrollback", req.Scrollback); err != nil {
-		return err
-	}
-	if err := settingRepo.UpdateOrCreate("ScrollSensitivity", req.ScrollSensitivity); err != nil {
-		return err
+	for _, setting := range settings {
+		if setting.value == nil {
+			continue
+		}
+		if err := settingRepo.UpdateOrCreate(setting.key, *setting.value); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -609,6 +606,7 @@ func (u *SettingService) deleteCurrentSession(c *gin.Context) {
 		return
 	}
 	_ = global.SESSION.DeleteByID(sessionUser.ID)
+	CloseTerminalSessions("user", sessionUser.ID, "")
 }
 
 func (u *SettingService) clearPasskeySettings() error {

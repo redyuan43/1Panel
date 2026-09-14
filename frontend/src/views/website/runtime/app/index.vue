@@ -1,22 +1,25 @@
 <template>
-    <el-form-item :label="$t('app.app')" prop="appID">
-        <el-row :gutter="20">
-            <el-col :span="12">
+    <el-form-item  ref="appFormItem"  :label="$t('app.app')" prop="appDetailID" :rules="Rules.requiredSelect">
+        <el-row :gutter="20" class="w-[calc(100%+20px)] gap-y-3 lg:w-auto lg:gap-y-0">
+            <el-col :span="12" :xs="24" :sm="24" :md="12" class="min-w-0">
                 <el-select
                     v-model="runtime.appID"
-                    :disabled="mode === 'edit'"
+                    :validate-event="false"
+                    :disabled="mode === 'edit' || loadingVersion"
                     @change="changeApp(runtime.appID)"
-                    class="p-w-200"
+                    class="w-full min-w-0 lg:!w-[200px]"
                 >
                     <el-option v-for="(app, index) in apps" :key="index" :label="app.name" :value="app.id"></el-option>
                 </el-select>
             </el-col>
-            <el-col :span="12">
+            <el-col :span="12" :xs="24" :sm="24" :md="12" class="min-w-0">
                 <el-select
                     v-model="runtime.version"
-                    :disabled="mode === 'edit'"
+                    :validate-event="false"
+                    :disabled="loadingVersion"
+                    :loading="loadingVersion"
                     @change="changeVersion()"
-                    class="p-w-200"
+                    class="w-full min-w-0 lg:!w-[200px]"
                 >
                     <el-option
                         v-for="(version, index) in appVersions"
@@ -36,6 +39,8 @@ import { getAppByKey, getAppDetail, getCurrentNodeCustomAppConfig, searchApp } f
 import { useVModel } from '@vueuse/core';
 import { useGlobalStore } from '@/composables/useGlobalStore';
 import { resolveRuntimeAppResource } from '@/utils/runtime-app-resource';
+import { Rules } from '@/global/form-rules';
+import type { FormItemInstance } from 'element-plus';
 const { isOffline, isXpackOrEE } = useGlobalStore();
 
 const props = defineProps({
@@ -54,6 +59,8 @@ const props = defineProps({
 });
 const apps = ref<App.AppItem[]>([]);
 const appVersions = ref<string[]>([]);
+const loadingVersion = ref(false);
+const appFormItem = ref<FormItemInstance>();
 const emit = defineEmits(['update:modelValue']);
 const runtime = useVModel(props, 'modelValue', emit);
 const appReq = reactive({
@@ -73,10 +80,16 @@ const changeApp = (appID: number) => {
 };
 
 const changeVersion = async () => {
+    runtime.value.appDetailID = undefined;
+    loadingVersion.value = true;
     try {
         const res = await getAppDetail(runtime.value.appID, runtime.value.version, 'runtime');
         runtime.value.appDetailID = res.data.id;
-    } catch (error) {}
+        appFormItem.value?.clearValidate();
+    } catch (error) {
+    } finally {
+        loadingVersion.value = false;
+    }
 };
 
 const getApp = async (appkey: string, mode: string) => {

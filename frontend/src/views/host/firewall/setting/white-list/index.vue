@@ -1,9 +1,7 @@
 <template>
     <DrawerPro v-model="drawerVisible" :header="$t('firewall.portWhiteList')" @close="handleClose" size="large">
         <template #content>
-            <el-alert type="info" :closable="false" :title="$t('firewall.portWhiteListAlter')" />
-
-            <el-button class="mt-5" type="primary" @click="openCreate">
+            <el-button type="primary" @click="openCreate">
                 {{ $t('commons.button.add') }}
             </el-button>
             <ComplexTable :data="data" v-loading="loading">
@@ -61,9 +59,10 @@
 
 <script lang="ts" setup>
 import { ref } from 'vue';
-import { getAgentSettingInfo, updateAgentSetting } from '@/api/modules/setting';
+import { getAgentSettingInfo } from '@/api/modules/setting';
+import { updateFirewallPortWhitelist } from '@/api/modules/firewall';
 import i18n from '@/lang';
-import { MsgError, MsgSuccess } from '@/utils/message';
+import { MsgError } from '@/utils/message';
 import {
     normalizeWhiteListRule,
     parseWhiteList,
@@ -71,7 +70,7 @@ import {
     WhiteListFamily,
     WhiteListProtocol,
     WhiteListRule,
-    whiteListRulesOverlap,
+    whiteListRuleKey,
 } from './model';
 
 interface WhiteListItem extends WhiteListRule {
@@ -79,7 +78,7 @@ interface WhiteListItem extends WhiteListRule {
     edit: boolean;
     isNew: boolean;
 }
-const emit = defineEmits<{ (e: 'search'): void }>();
+const emit = defineEmits<{ (e: 'created', taskID: string): void }>();
 
 const drawerVisible = ref(false);
 const loading = ref(false);
@@ -127,7 +126,7 @@ const editRow = (row: WhiteListItem) => {
 const saveRow = (row: WhiteListItem) => {
     const rule = validateRule(row);
     if (!rule) return;
-    if (hasOverlap(rule, row)) {
+    if (hasDuplicate(rule, row)) {
         MsgError(i18n.global.t('commons.rule.duplicate'));
         return;
     }
@@ -163,8 +162,10 @@ const validateRule = (row: Pick<WhiteListItem, 'family' | 'protocol' | 'port'>):
     }
 };
 
-const hasOverlap = (rule: WhiteListRule, row?: WhiteListItem): boolean => {
-    return data.value.some((item) => item !== row && item.port !== '' && whiteListRulesOverlap(rule, item));
+const hasDuplicate = (rule: WhiteListRule, row?: WhiteListItem): boolean => {
+    return data.value.some(
+        (item) => item !== row && item.port !== '' && whiteListRuleKey(rule) === whiteListRuleKey(item),
+    );
 };
 
 const validateRules = (): WhiteListRule[] | undefined => {
@@ -173,7 +174,7 @@ const validateRules = (): WhiteListRule[] | undefined => {
         if (!item.port) continue;
         const rule = validateRule(item);
         if (!rule) return undefined;
-        if (rules.some((existing) => whiteListRulesOverlap(existing, rule))) {
+        if (rules.some((existing) => whiteListRuleKey(existing) === whiteListRuleKey(rule))) {
             MsgError(i18n.global.t('commons.rule.duplicate'));
             return undefined;
         }
@@ -184,20 +185,16 @@ const validateRules = (): WhiteListRule[] | undefined => {
 
 const onSubmit = async () => {
     const rules = validateRules();
-    if (!rules) return;
+    if (!rules || loading.value) return;
     loading.value = true;
-    await updateAgentSetting({
-        key: 'FirewallPortWhiteList',
-        value: serializeWhiteList(rules),
-    })
-        .then(() => {
-            MsgSuccess(i18n.global.t('commons.msg.operationSuccess'));
-            emit('search');
-            drawerVisible.value = false;
-        })
-        .finally(() => {
-            loading.value = false;
-        });
+    try {
+        const { data: result } = await updateFirewallPortWhitelist(serializeWhiteList(rules));
+        if (!result.taskID || !result.queued) return;
+        drawerVisible.value = false;
+        emit('created', result.taskID);
+    } finally {
+        loading.value = false;
+    }
 };
 
 const handleClose = () => {

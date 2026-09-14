@@ -1,21 +1,37 @@
 <template>
-    <DialogPro v-model="visible" :title="$t('commons.button.import')" size="large">
+    <DialogPro v-model="visible" :title="$t('commons.button.import')" size="w-70">
         <el-alert class="mb-3" type="info" :closable="false" :title="$t('commons.msg.importHelper')" />
-        <el-upload
-            ref="uploadRef"
-            v-model:file-list="uploaderFiles"
-            action="#"
-            :auto-upload="false"
-            :show-file-list="false"
-            :limit="1"
-            accept=".json"
-            :on-change="fileOnChange"
-            :on-exceed="handleExceed"
-        >
-            <el-button type="primary">{{ $t('commons.button.upload') }}</el-button>
-        </el-upload>
-        <el-card class="mt-3 w-full" v-loading="loading">
-            <ComplexTable v-model:selects="selects" :data="policies" :height="420">
+        <el-alert v-if="submitError" class="mb-3" type="error" :closable="false" :title="submitError" />
+        <div class="import-file-bar mt-3">
+            <el-upload
+                ref="uploadRef"
+                v-model:file-list="uploaderFiles"
+                action="#"
+                :auto-upload="false"
+                :show-file-list="false"
+                :limit="1"
+                accept=".json"
+                :on-change="fileOnChange"
+                :on-exceed="handleExceed"
+            >
+                <el-button type="primary" icon="Upload">{{ $t('commons.button.upload') }}</el-button>
+            </el-upload>
+            <div v-if="uploaderFiles.length" class="import-file-info">
+                <el-icon><Document /></el-icon>
+                <span class="import-file-name">{{ uploaderFiles[0].name }}</span>
+            </div>
+            <el-text v-else type="info">.json</el-text>
+        </div>
+        <el-card class="mt-3 w-full" shadow="never" v-loading="loading">
+            <template #header>
+                <div class="import-preview-header">
+                    <span>{{ $t('commons.button.preview') }}</span>
+                    <el-tag v-if="policies.length" type="info" effect="plain">
+                        {{ $t('commons.table.total', [policies.length]) }}
+                    </el-tag>
+                </div>
+            </template>
+            <ComplexTable v-model:selects="selects" :data="policies" :height="300">
                 <el-table-column type="selection" fix />
                 <el-table-column label="IP" prop="family" min-width="65">
                     <template #default="{ row }">{{ row.family === 'ipv6' ? 'IPv6' : 'IPv4' }}</template>
@@ -45,24 +61,31 @@
 import { Firewall } from '@/api/interface/firewall';
 import { upsertDockerPortGuardPolicies } from '@/api/modules/firewall';
 import i18n from '@/lang';
-import { MsgError, MsgSuccess } from '@/utils/message';
+import { MsgError } from '@/utils/message';
+import { getErrorMessage } from '@/utils/misc';
+import { isAxiosError } from 'axios';
 import { genFileId, type UploadFile, type UploadFiles, type UploadProps, type UploadRawFile } from 'element-plus';
 import { ref } from 'vue';
 import { dockerGuardEndpointKey, normalizeDockerGuardPolicy } from '@/views/host/firewall/docker/model';
 import { formatHostAddressList } from '@/views/host/firewall/utils/validation';
+import { Document } from '@element-plus/icons-vue';
 
-const emit = defineEmits<{ (event: 'search'): void }>();
+const emit = defineEmits<{ (event: 'created', taskID: string): void }>();
 const visible = ref(false);
 const loading = ref(false);
 const policies = ref<Firewall.DockerGuardPolicy[]>([]);
 const selects = ref<Firewall.DockerGuardPolicy[]>([]);
 const uploadRef = ref();
 const uploaderFiles = ref<UploadFile[]>([]);
+const submitError = ref('');
 const displaySources = (policy: Firewall.DockerGuardPolicy) => formatHostAddressList(policy.sources, policy.family);
 
 const fileOnChange = (uploadFile: UploadFile, uploadFiles: UploadFiles) => {
     if (!uploadFile.raw) return;
     loading.value = true;
+    policies.value = [];
+    selects.value = [];
+    submitError.value = '';
     uploaderFiles.value = uploadFiles;
     const reader = new FileReader();
     reader.onload = (event) => {
@@ -96,41 +119,25 @@ const handleExceed: UploadProps['onExceed'] = (files) => {
 };
 
 const onImport = async () => {
+    if (loading.value || selects.value.length === 0) return;
     loading.value = true;
-    let success = 0;
-    let failed = 0;
-    const groups = new Map<string, Firewall.DockerGuardPolicy[]>();
-    for (const policy of selects.value) {
-        const key = JSON.stringify([policy.mode, policy.sources, policy.description]);
-        groups.set(key, [...(groups.get(key) || []), policy]);
-    }
-    for (const group of groups.values()) {
-        const policy = group[0];
-        try {
-            await upsertDockerPortGuardPolicies({
-                endpoints: group.map(({ family, hostIP, hostPort, protocol }) => ({
-                    family,
-                    hostIP,
-                    hostPort,
-                    protocol,
-                })),
-                mode: policy.mode,
-                sources: policy.sources,
-                description: policy.description,
-            });
-            success += group.length;
-        } catch {
-            failed += group.length;
+    submitError.value = '';
+    try {
+        const result = (await upsertDockerPortGuardPolicies({ policies: selects.value })).data;
+        if (!result.taskID || !result.queued) {
+            submitError.value = i18n.global.t('commons.msg.operationFailed');
+            return;
         }
-    }
-    loading.value = false;
-    if (failed === 0) {
-        MsgSuccess(i18n.global.t('firewall.importSuccess', [success]));
         visible.value = false;
-    } else {
-        MsgError(i18n.global.t('firewall.importPartialSuccess', [success, failed]));
+        emit('created', result.taskID);
+    } catch (error) {
+        submitError.value =
+            (isAxiosError(error) && error.response?.data?.message) ||
+            (error && getErrorMessage(error)) ||
+            i18n.global.t('commons.res.commonError');
+    } finally {
+        loading.value = false;
     }
-    emit('search');
 };
 
 const modeLabel = (mode: Firewall.DockerGuardPolicy['mode']) => {
@@ -140,11 +147,44 @@ const modeLabel = (mode: Firewall.DockerGuardPolicy['mode']) => {
 };
 
 const acceptParams = () => {
+    loading.value = false;
     policies.value = [];
     selects.value = [];
     uploaderFiles.value = [];
+    submitError.value = '';
+    uploadRef.value?.clearFiles();
     visible.value = true;
 };
 
 defineExpose({ acceptParams });
 </script>
+
+<style scoped lang="scss">
+.import-file-bar {
+    display: flex;
+    min-height: 32px;
+    align-items: center;
+    gap: 12px;
+}
+
+.import-file-info {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 6px;
+    color: var(--el-text-color-regular);
+}
+
+.import-file-name {
+    overflow: hidden;
+    max-width: 420px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.import-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+</style>

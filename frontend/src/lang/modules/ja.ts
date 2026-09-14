@@ -508,6 +508,8 @@ const message = {
         closeCurrent: '電流を閉じます',
         closeOther: '他を閉じます',
         closeAll: 'すべてを閉じます',
+        keepAlive: 'ページセッションを保持',
+        cancelKeepAlive: 'ページセッションの保持を解除',
     },
     header: {
         logout: 'ログアウト',
@@ -937,7 +939,9 @@ const message = {
             from_remote: 'このモデルは1Panelを介してダウンロードされておらず、関連するプルログはありません。',
             no_logs: 'このモデルのプルログは削除されており、関連するログを表示できません。',
             vllmVersionHelper: 'FusionXpark GB 10 サーバーでは -cu130 バージョンを選択してください。',
-            ascendVisibleDevices: 'Ascend 可視デバイス',
+            vllmDeployProfile: 'デプロイモデル',
+            vllmProfileFlash0731: 'DeepSeek V4 Flash 0731',
+            vllmProfileVisionExp: 'DeepSeek V4 Flash Vision Exp',
             vllmCommandPortHelper:
                 '起動コマンドではポート {0} を使用する必要があります。使用しない場合、サービスにアクセスできません。',
             ascendVisibleDevices: 'Ascend 可視デバイス（ASCEND_RT_VISIBLE_DEVICES）',
@@ -1129,7 +1133,6 @@ const message = {
             cachedToken: 'キャッシュ Token',
             cacheHitRate: 'キャッシュヒット率',
             activeUsers: 'アクティブユーザー',
-            activeStreamingRequests: 'アクティブなストリーミングリクエスト',
             activeModels: 'アクティブモデル',
             failedRequests: '失敗リクエスト',
             averageTokenPerRequest: '平均 Token/リクエスト',
@@ -2054,6 +2057,8 @@ const message = {
         profileBlockDesc: 'Channel、Select、同期プリミティブでのブロック待機時間を測定します。',
     },
     terminal: {
+        showTerminalButton: 'ターミナルへのショートカット',
+        showTerminalButtonHelper: '有効にすると、ページの右下にターミナルへのショートカットボタンが表示されます。',
         local: 'ローカル',
         defaultConn: 'デフォルト接続',
         defaultConnHelper:
@@ -2095,6 +2100,19 @@ const message = {
         key: '秘密鍵',
         keyPassword: '秘密キーパスワード',
         emptyTerminal: '現在接続されている端子はありません。',
+        sessionReconnecting: '接続が切断されました。再接続しています...',
+        sessionExpired:
+            'セッションは無効になりました。Enter キーまたは再接続をクリックして新しいセッションを開いてください',
+        sessionKicked: 'このセッションは別のウィンドウで開かれました',
+        sessionCount: '{0} セッション',
+        sessionRules: 'ターミナルセッションのルール',
+        sessionRuleClose: 'ターミナルを閉じると、セッションは即座に終了します。',
+        sessionRuleDisconnect: '再読み込み、ブラウザー終了、通信切断後は30分以内に復元できます。',
+        sessionRuleRevalidate: 'ログインが無効、または認証がタイムアウトするとセッションは終了します。',
+        sessionRuleResources: '端末が増えるほどリソース消費も増えます。不要な端末は閉じてください。',
+        minimize: '最小化',
+        closeAllSessions: 'すべてのセッションを閉じる',
+        closeAllConfirm: 'すべてのターミナルセッションが切断され、復元できません。続行しますか？',
         lineHeight: '行の高さ',
         letterSpacing: '文字間隔',
         fontSize: 'フォントサイズ',
@@ -2620,6 +2638,7 @@ const message = {
         panelInstallDir: '1Panelインストールディレクトリは削除できません',
         wgetTask: 'ダウンロードタスク',
         stopWgetConfirm: 'このダウンロードタスクを停止しますか？',
+        downloadRecordsNotRemoved: '一部の記録を削除できませんでした。更新して再試行してください。',
         existFileTitle: '同名ファイルの警告',
         existFileHelper: 'アップロードしたファイルに同じ名前のファイルが含まれています。上書きしますか？',
         existFileSize: 'ファイルサイズ（新しい -> 古い）',
@@ -2742,6 +2761,7 @@ const message = {
         portChangeHelper: 'サービスポートを変更し、サービスを再起動します。続けたいですか？',
         theme: 'テーマ',
         menuTabs: 'タブメニュー',
+        menuTabsHelper: '有効にすると、タブのロックボタンをクリックしてページセッションを保持できます。',
         menuAccordion: 'メニューの複数展開',
         menuAccordionHelper: '有効にすると、サイドバーの複数のメニューグループを同時に展開したままにできます。',
         dark: '暗い',
@@ -3125,6 +3145,8 @@ const message = {
         source: 'ソースをダウンロードします',
         versionNotSame:
             'ノードのバージョンがメインノードと一致していません。ノード管理でアップグレードしてから再試行してください。',
+        currentNodeVersionNotSame:
+            '現在のノードのバージョンがメインノードと一致していません。管理者に連絡して、現在のノードをアップグレードしてください。',
         versionCompare:
             'ノード {0} は既にアップグレード可能な最新バージョンです。マスターノードのバージョンを確認後、再試行してください！',
         about: 'について',
@@ -3229,14 +3251,15 @@ const message = {
         restoreCommunity: 'コミュニティ版に戻す',
         restoreCommunityOnline: 'オンライン復元',
         restoreCommunityOffline: 'オフライン復元',
-        restoreCommunityPackageFound:
-            '使用可能なコミュニティ版オフラインパッケージが検出されました。オフライン復元を実行できます。',
-        restoreCommunityPackageMissing:
-            '使用可能なコミュニティ版オフラインパッケージが検出されていないため、現在オフライン復元を実行できません。',
+        restoreCommunityPackageFound: 'パッケージの準備ができました',
+        restoreCommunityPackageMissing: 'パッケージの配置待ち',
+        restoreCommunityPackageChecking: 'パッケージを確認しています',
+        restoreCommunityPackageReadyHelper: 'オフライン復元を実行できます。',
         restoreCommunityOnlineHelper:
             '現在のバージョンのコミュニティ版パッケージを自動的にダウンロードし、Enterprise 専用データを削除します。',
         restoreCommunityOfflineHelper:
             '現在の Enterprise バージョン以上の公式パッケージを {path} に配置してください。使用可能なパッケージが検出されると切り替えが有効になります。',
+        restoreCommunityCopyDownloadLink: 'ダウンロードリンクをコピー',
         restoreCommunityConfirm:
             'バージョン切り替え後は、現在の Enterprise スーパー管理者アカウントでコミュニティ版にログインできます。切り替え中に Enterprise 専用データが消去されるため、慎重に操作してください。',
         restoreCommunityStarting: 'コミュニティ版を準備しています。完了後、パネルは自動的に再起動します。',
@@ -3263,6 +3286,7 @@ const message = {
             '商用版にアップグレードすると、Web サイトのリアルタイム状態、訪問者トレンド、流入元、リクエストログなどを確認できます。',
         alert: '商用版にアップグレードすると、SMS アラートの受信やアラートログの確認が可能になります。',
         app: '商用版にアップグレードすると、モバイルアプリでサービス情報や異常監視を確認できます。',
+        vm: '商用版にアップグレードすると、1Panel で仮想マシン、イメージとテンプレート、仮想ネットワーク、ストレージリソースを一元管理できます。',
         node: '商用版にアップグレードすると、1Panel で複数の Linux サーバーを管理できます。',
         nodeApp:
             '商用版にアップグレードすると、ノードを手動で切り替えずにマルチノードアプリのバージョンを一括アップグレードできます。',
@@ -3898,6 +3922,14 @@ const message = {
         gzipMinLengthHelper: '最小圧縮ファイル',
         gzipCompLevelHelper: '圧縮率',
         gzipHelper: '伝送の圧縮を有効にします',
+        brotliHelper: 'brotli 圧縮を有効にします。通常 gzip より小さくなります',
+        brotliCompLevelHelper: 'brotli 圧縮率、0 から 11',
+        brotliManagedExternallyHelper:
+            'brotli は nginx.conf で手動設定されています。パネルは現在の有効な値を表示するだけで、上書きしません。',
+        brotliManagedUnavailableHelper:
+            'パネルは管理対象の brotli 設定を nginx.conf に自動で追加できませんでした。以下の設定は有効になりません。',
+        brotliMinLengthHelper: 'brotli で圧縮する最小レスポンスサイズ',
+        brotliSaveFailed: 'brotli 設定の保存に失敗しました。上記の gzip 設定は適用されました',
         connections: 'アクティブな接続',
         accepts: '受け入れます',
         handled: '処理',
@@ -4049,22 +4081,12 @@ const message = {
         protectedHelper: 'アクセスへの影響を防ぐため、編集や削除ができない重要なシステムルールです。',
         stateShort: { managed: 'パネル', adopted: '管理済', external: '外部', protected: '保護', drifted: '差異' },
         ruleTargetRequired: 'IP アドレスまたはポートを1つ以上入力してください',
-        batchRuleLimit: '一度に作成できるルールは最大 {0} 件です',
         resolution_adopt: '管理対象にする',
+        plan_duplicate_rules:
+            '条件とアクションが同じルールが重複しているため、管理対象に追加できません。重複ルールを手動で削除してから再試行してください。',
         adoptRuleConfirm: '管理対象にすると、1Panel がこの既存ルールの保守と削除を行えるようになります。続行しますか？',
-        plan_equivalent_external_rule: '同じ外部ルールが既にあります。重複作成せず管理対象にできます。',
-        plan_multiple_equivalent_external_rules:
-            '同じ外部ルールが複数あります。管理対象にするルールを選択してください。',
-        plan_equivalent_managed_rule: '同じルールは既に 1Panel の管理対象です。重複作成は不要です。',
+        plan_exact_rule_conflict: '一致条件が同じで、許可・拒否の動作が逆のルールが存在します。',
         allRulesAlreadyExist: '確認した {0} 件のルールはすべて既に存在します。新しく作成するルールはありません。',
-        ruleCheckResult: 'ルール確認結果',
-        ruleCheckStatus_creatable: '作成可能',
-        ruleCheckStatus_existing: '既存',
-        ruleCheckStatus_error: 'エラー',
-        ruleCheckExistingHelper: '同じルールが既に存在するため、今回はスキップします。',
-        ruleCheckReadyHelper: '確認に合格しました。このルールは作成できます。',
-        ruleCheckExternalExists: '同じ外部ルールが既に存在するため、自動的にスキップされます。',
-        ruleCheckBlockedHelper: 'エラーのあるルールは送信できません。戻って修正し、もう一度確認してください。',
         plan_managed_rule_drifted:
             '管理対象ルールが実際のファイアウォールと一致しません。先に不整合を解消してください。',
         plan_opaque_rule_in_target_scope: '対象範囲に安全に解析できないルールがあります。操作を停止しました。',
@@ -4072,10 +4094,10 @@ const message = {
         plan_protected_rule: 'このルールは保護されており、管理対象化、変更、削除はできません。',
         plan_blocked: 'このルールは安全に適用できません。ルールを更新して再試行してください。',
         scopeDefaultMismatch: 'システムの既定 zone は {0} です。このページでは public zone のみ管理します。',
-        scopeInactive: '管理対象の範囲が有効ではありません。新しいルールが現在の通信に適用されない場合があります。',
         scopeMissing: '管理対象スコープ {0} がありません。最初のルール適用時に安全に作成されます。',
         scopeUnmanagedActive: '他の有効な範囲が見つかりました：{0}。1Panel はそのルールを変更しません。',
-        scopeRuntimeMismatch: '実行中と永続設定で次の項目が一致しません：{0}。',
+        scopeRuntimeMismatch:
+            'firewalld の実行中の設定と永続設定が一致しません。ファイアウォールを再起動してください。',
         dockerRestart: 'ファイアウォール操作にはDockerサービスの再起動が必要です',
         firewallHelper: '{0}システムファイアウォール',
         firewallNotStart: '現在、システムファイアウォールは有効になっていません。最初に有効にします。',
@@ -4105,28 +4127,10 @@ const message = {
         configuredRules: '{0} 件設定済み',
         addressFamily: 'IP バージョン',
         portOrRange: 'ポート / 範囲',
-        exportAllRules: 'すべてのルールをエクスポート',
         importBackendHelper:
             'インポートしたルールは現在の {0} バックエンド向けに変換されます。移行元のルールは変更されません。',
-        resetDirectRulesHelper:
-            '{0} から 1Panel システムファイアウォールのチェーン、実行ルール、永続化ファイルを削除し、データベースポリシーは保持します',
-        resetWhitelistRulesHelper:
-            '{0} の有効なカスタム設定をリセットし、インストール時の既定値に戻して無効化します。データベースポリシーは保持され、後で再同期できます。',
-        cleanupForwardingBackendHelper:
-            '{0} の 1Panel ポート転送ランタイムルールをリセットします。関連するルールとチェーンをすべて削除し、データベースデータを保持します',
-        cleanupDockerBackendHelper:
-            '{0} の 1Panel Docker ポート保護ランタイムルールをリセットします。関連するルールとチェーンをすべて削除し、データベースデータを保持します',
-        cleanupBeforeBackendSwitch:
-            '現在の {0} バックエンドには 1Panel の実行時ルールが残っています。{1} に切り替える前にリセットしてください。',
-        cleanupAction: 'リセット',
-        backendSwitchNotice:
-            'システムファイアウォール、ポート転送、Docker 保護を切り替える前に現在のバックエンドをリセットしてください。データベースポリシーは保持され、切り替え後に再初期化または同期できます。',
-        switchBackendHelper: '{0} に切り替えますか？',
-        switchDockerBackendHelper: '{0} に切り替えますか？Docker の設定を更新し、Docker を再起動します。',
         ruleSyncTitle: 'ルールを同期',
         ruleSyncAction: 'ルールを同期',
-        ruleSyncHelper:
-            '選択したファイアウォールの 1Panel 管理ルールを現在のファイアウォールへ同期します。元のルールは削除されず、外部ルールは同期されません。',
         ruleSyncDatabase: '1Panel データベース',
         ruleSyncDatabaseHelper:
             '1Panel データベースのルールを基準に、現在のファイアウォールの管理対象ルールを同期・調整します。不足しているルールは追加され、余分なルールは削除されます。',
@@ -4135,7 +4139,6 @@ const message = {
             'データベースの {0} 件のルールに完全一致するよう {1} を同期しますか？対象側の {2} 件のルールを削除し、不足ルールを追加します。',
         ruleSyncSource: '設定ソース',
         ruleSyncTarget: '現在のバックエンド',
-        ruleSyncTotal: '変換後のルール',
         ruleSyncReady: '同期可能',
         ruleSyncExisting: '存在済み',
         ruleSyncRemove: '削除予定',
@@ -4146,24 +4149,16 @@ const message = {
             managedOrderDiffers: '管理対象ルールの順序がデータベースの順序と異なります。',
             managedOnlyInTarget: '管理対象ルールは対象ファイアウォールにのみ存在します。',
             managedRuntimeCannotRemove: '管理対象の実行中ルールを安全に削除できません。',
-            managedOrderBlocked:
-                '外部、認識不能、または保護されたルールを越えて管理対象ルールを並べ替えることはできません。',
-            mayBlockManagement: 'このルールにより現在の管理接続が遮断される可能性があります。',
             missingFromTarget: '対象ファイアウォールにこのルールがありません。',
             targetDiffers: '対象ルールがデータベースポリシーと異なります。',
             alreadyExistsInTarget: '対象ファイアウォールにこのルールは既に存在します。',
             onlyInTarget: 'このルールは対象ファイアウォールにのみ存在します。',
             stale: 'ファイアウォールルールの状態が古くなっています。更新して再試行してください。',
-            lockoutRisk: 'この変更により管理アクセスが遮断される可能性があります。',
             protectedRule: '保護されたファイアウォールルールは変更できません。',
+            dockerAcceptReadOnly:
+                'この ACCEPT ルールは読み取り専用で、他のルールを同期しても保持されます。削除する場合は、ホスト上で手動で削除してください。',
             cannotReconcile: '対象ルールを同期できません：{0}',
         },
-        ruleSyncConfirm: '{0} 件のルールを {1} から {2} へ同期しますか？元バックエンドは変更されません。',
-        ruleSyncResetSource: '同期成功後に移行元ファイアウォール {0} をリセットして無効化する',
-        ruleSyncResetSourceHelper: 'すべてのルールが正常に同期された場合にのみ移行元をリセットします。',
-        ruleSyncResetSourceBlocked: '同期できないルールがあります。解決してから移行元を自動リセットしてください。',
-        ruleSyncResetSourceConfirm:
-            '{0} 件のルールを {1} から {2} へ同期し、その後 {1} をリセットして無効化しますか？すべての設定が削除され、元に戻せません。',
         ruleSyncPartial: '同期完了：成功 {0} 件、存在済み {1} 件、失敗 {2} 件。',
         ruleSyncSuccess: '同期完了：成功 {0} 件、存在済み {1} 件、削除 {2} 件。',
         ruleSyncStatus: {
@@ -4172,6 +4167,21 @@ const message = {
             remove: '削除予定',
             blocked: '同期不可',
         },
+        resetDirectRulesHelper:
+            '{0} から 1Panel システムファイアウォールのチェーン、実行ルール、永続化ファイルを削除し、データベースポリシーは保持します',
+        resetWhitelistRulesHelper:
+            '{0} の有効なカスタム設定をリセットし、インストール時の既定値に戻して無効化します。データベースポリシーは保持され、後で再同期できます。',
+        cleanupForwardingBackendHelper:
+            '{0} の 1Panel ポート転送ランタイムルールをリセットします。関連するルールとチェーンをすべて削除し、データベースデータを保持します',
+        cleanupDockerBackendHelper:
+            '{0} の 1Panel Docker ポート保護ランタイムルールをリセットします。関連するルールとチェーンをすべて削除し、データベースデータを保持します',
+        cleanupBeforeBackendSwitch:
+            '現在の {0} バックエンドには 1Panel の実行時ルールが残っています。{1} に切り替える前にリセットしてください。リセットでは実行時ルールのみが削除され、データベースポリシーは保持されます。切り替え後に再初期化または同期できます。',
+        cleanupAction: 'リセット',
+        backendSwitchNotice:
+            'ファイアウォールの管理方式は 1 つだけ有効にすることを推奨します。複数のファイアウォールを同時に実行すると、ルールの競合、状態の不一致、コンテナーポートへのアクセス異常が発生する可能性があります。',
+        switchBackendHelper: '{0} に切り替えますか？',
+        switchDockerBackendHelper: '{0} に切り替えますか？Docker の設定を更新し、Docker を再起動します。',
         uninstalledStatus: '未インストール',
         selectedBackendNotInstalled:
             '{backend} サービスが検出されませんでした。{library} から手動でインストールするか、{settings} でファイアウォールバックエンドを切り替えてください。',
@@ -4179,6 +4189,22 @@ const message = {
         partiallyInitialized: '一部初期化済み',
         dockerGuardHelper:
             'Docker コンテナがホストに公開するポートのアクセス制限を設定します。未保護のポートは Docker のデフォルトのアクセス動作を維持します。',
+        dockerTrafficPathMixed: '選択したポートは異なるアクセス経路を使用しています。個別に設定してください。',
+        dockerTrafficPathUnknown:
+            'このポートのアクセス経路を確認できません。Docker ネットワーク設定を確認して再試行してください。',
+        dockerTrafficPathReason: {
+            nat_inspect_failed:
+                'Docker の NAT ルールを読み取れません。ファイアウォールコマンドと実行権限を確認してから更新してください。',
+            proxy_inspect_failed:
+                'docker-proxy プロセスを確認できません。システムのプロセス情報を読み取れることを確認してから更新してください。',
+            nat_chain_unreachable:
+                'このポートの Docker 転送ルールは見つかりましたが、NAT 入口チェーンが有効ではありません。Docker のファイアウォールルールを確認するか Docker を再起動してから更新してください。',
+            no_matching_path:
+                'このポートに有効な Docker 転送ルールまたはプロキシプロセスが見つかりません。対象のコンテナを起動または再起動してから更新してください。解決しない場合は Docker ネットワーク設定を確認してください。',
+        },
+        dockerInputPolicyNotEffective:
+            'このポートはホストが直接受信するため、既存のコンテナポート保護ルールは適用されません。ホストファイアウォールで設定してください。',
+        dockerInputUseHostFirewall: 'このポートのアクセスはホストファイアウォールで設定してください。',
         dockerInputNotProtected:
             'ホストの INPUT ルールでは、この Docker 公開ポートを直接保護できません。クリックしてコンテナポート保護を開きます。',
         notInitialized: '未初期化',
@@ -4209,9 +4235,7 @@ const message = {
             '選択したルールの設定が異なります。再設定するとすべて統一して上書きされ、説明が空の場合はすべてクリアされます。',
         effective: '有効',
         forwardUnsynced: '未同期',
-        notEnabled: '未有効化',
         notEffective: '未反映',
-        dockerGuardStatusEffective: '{0} コンテナポート保護は正常に動作しています',
         dockerGuardStatusReason: {
             command_missing:
                 '{0} ファイアウォールコンポーネントが利用できないため、対応する保護を有効にできません。システムファイアウォールを確認してください',
@@ -4234,11 +4258,7 @@ const message = {
         forwardPortHelper: 'ポート範囲をサポートします。例: 8080-8089',
         forwardInboundInterface: '転送入站ネットワークインターフェース',
         exportHelper: '{0} 件のファイアウォールルールをエクスポートします。続行しますか？',
-        importSuccess: '{0} 件のルールを正常にインポートしました',
-        importPartialSuccess: 'インポート完了: {0} 件成功、{1} 件失敗',
         basicStatus: '現在のファイアウォールはバインドされていません。先にバインドしてください。',
-        baseIptables: 'iptables サービス',
-        forwardIptables: 'iptables ポート転送サービス',
         initMsg: '{0} を初期化します。続行しますか？',
         initDirectBackendConflictMsg:
             '{1} はまだバインドされています。{0} を初期化すると両方のファイアウォールルールが有効になり、予期せずアクセスが遮断される可能性があります。続行しますか？',
@@ -4251,7 +4271,7 @@ const message = {
             'アンバインド - アンバインドすると、追加されたすべてのファイアウォールルールが無効になります。注意して操作してください。確認しますか？',
         portWhiteList: 'ポートホワイトリスト',
         portWhiteListAlter:
-            '保存しても現在のファイアウォールルールはすぐに変更されません。新しいポートは、次回の初期化または起動時に許可されます。削除したポートを閉じるには、ルール一覧から既存のルールを手動で削除してください。',
+            '変更は保存時に即座に反映されます。追加したポートは自動的に許可されます。削除したポートは保護のみ解除されるため、閉じるにはルール一覧から許可ルールを削除してください。',
         portWhiteListHelper: 'IPv4/IPv6、TCP/UDP、単一ポート、8000-8100 のようなポート範囲に対応します。',
         chain: 'チェーン',
         sourceIP: '送信元 IP',
@@ -4271,9 +4291,14 @@ const message = {
             'このルールは {0} に {1} へのアクセスを許可しています。削除すると複数のサービスへのアクセスに影響する可能性があります。続行しますか？',
         deleteRiskRulesConfirm:
             '{0} 個のルールを削除します。そのうち {1} 個の許可ルールがサービスへのアクセスに影響する可能性があります。続行しますか？',
-        editRuleConfirm: '次の項目を変更します：{0}。ルールは直ちに適用され、再検証されます。続行しますか？',
+        editRuleConfirm: 'このルールを変更してもよろしいですか？',
     },
     runtime: {
+        importEnv: '環境変数をインポート',
+        envImportError: '{0} 行目：{1}',
+        envInvalidAssignment: '有効な NAME=value 形式で入力してください',
+        envUnclosedQuote: '引用符が閉じられていません',
+        envUnexpectedText: '閉じ引用符の後に余分な文字があります',
         runtime: 'ランタイム',
         workDir: '作業ディレクトリ',
         localHelper:
@@ -6269,6 +6294,14 @@ const message = {
             nodeDashTitle4: 'スケジュールタスク管理',
             nodeDashContent4:
                 'マルチノードスケジュールタスクの統一管理、ステータス監視、迅速な起動/停止、手動トリガー実行をサポート',
+            vmTitle1: '仮想マシン管理',
+            vmContent1: '仮想マシンの作成と管理、稼働状態の確認、リソース割り当ての調整ができます。',
+            vmTitle2: 'イメージとテンプレート',
+            vmContent2: 'ISO イメージと仮想マシンテンプレートを管理し、仮想マシンを簡単に作成できます。',
+            vmTitle3: '仮想ネットワーク',
+            vmContent3: '仮想ネットワークを一元管理し、仮想マシンのネットワーク接続を設定できます。',
+            vmTitle4: 'ストレージプール',
+            vmContent4: 'ストレージプールを管理し、仮想マシンにストレージリソースを割り当てられます。',
             nodeTitle1: 'ワンクリックノード追加',
             nodeContent1: '複数のサーバーノードを迅速に統合',
             nodeTitle2: 'バッチアップグレード',
@@ -6703,7 +6736,57 @@ const message = {
             barkConfigHelper: 'Barkアラート通知設定',
             webhookName: 'ボット名',
             webhookUrl: 'Webhook URL',
-            alertConfigProHelper: '商用版では、WeCom、DingTalk、Feishu、SMS 通知も利用できます。',
+            custom: 'Webhook',
+            webhookPreset: 'プリセット',
+            genericJsonPreset: '汎用 JSON',
+            customPreset: 'カスタム',
+            webhookUrlSecretHelper: 'Webhook URL は暗号化して保存され、ここで表示および編集できます',
+            webhookPublicAddressHelper:
+                '公開ネットワークから到達可能な HTTP/HTTPS アドレスのみ対応し、ローカル、プライベート、予約済みアドレスは拒否されます',
+            customWebhookRecoveryRequired:
+                'この設定は無効か旧バージョンのものです。Webhook URL と必要なシークレット Header を再入力して保存してください。',
+            clearSecret: 'クリア',
+            keepSecret: '変更しない',
+            secretCleared: '保存するとこのシークレットはクリアされます',
+            bodyType: 'Body タイプ',
+            bodyTemplate: 'Body テンプレート',
+            formFieldName: 'フィールド名',
+            formFieldValue: 'フィールド値',
+            addFormField: 'フィールドを追加',
+            webhookAdvanced: '詳細設定',
+            headers: 'Headers',
+            headerName: 'Header 名',
+            headerValue: 'Header 値',
+            secretValue: 'シークレット値',
+            addHeader: 'Header を追加',
+            templateVariables: 'テンプレート変数',
+            templateVariableTitle: 'アラートタイトル',
+            templateVariableMessage: 'アラート内容',
+            templateVariableType: 'アラートタイプ',
+            templateVariableNodeName: 'ノード名',
+            templateVariableTimestamp: '発生時刻',
+            templateVariablesHelper:
+                'title=アラートタイトル、message=アラート内容、type=アラートタイプ、nodeName=ノード名、timestamp=発生時刻。変数をクリックすると Body に挿入できます。',
+            testResultStale: '設定が変更されたため、前回のテスト結果は無効です',
+            alertConfigChanged: '設定が更新されました。更新してからもう一度お試しください',
+            presetOverwriteHelper: 'プリセットを切り替えると現在の Body 設定が上書きされます。続行しますか？',
+            customWebhookValidation: {
+                displayNameRequired: '表示名を入力してください',
+                urlRequired: 'Webhook URL を入力してください',
+                urlInvalid: 'Webhook URL には有効な HTTP または HTTPS URL を指定してください',
+                bodyRequired: 'リクエスト Body を設定してください',
+                jsonInvalid: 'JSON Body テンプレートが無効です',
+                formFieldRequired: 'Form フィールド名は必須です',
+                formFieldDuplicate: 'Form フィールド名は重複できません',
+                headerRequired: 'Header 名は必須です',
+                headerInvalid: 'Header 名が無効です',
+                headerDuplicate: 'Header 名は重複できません',
+                headerReserved: 'この Header はシステム管理のためカスタマイズできません',
+                headerMustBeSecret: '認証情報を含む Header はシークレット値に設定してください',
+                templateVariableInvalid: 'Body に未対応のテンプレート変数が含まれています',
+                secretRequired: 'シークレット値を入力するか、変更しない/クリアを選択してください',
+            },
+            alertConfigProHelper: '商用版では、追加の通知チャネルを利用できます。',
         },
         theme: {
             lingXiaGold: 'LXware Gold',
@@ -6753,6 +6836,8 @@ const message = {
             submitSuccess: '同期タスクが送信されました。',
         },
         vm: {
+            countLimitHelper:
+                'Professional 版では最大 {0} 台の仮想マシンを作成できます。Enterprise 版には台数制限がありません。',
             vm: '仮想マシン',
             title: '仮想マシン管理',
             healthCheck: 'ヘルスチェック',
@@ -6833,6 +6918,8 @@ const message = {
                 },
             },
             dependencies: '依存関係',
+            architectureUnsupported:
+                '現在のシステムアーキテクチャ {0} はサポートされていません。VM 機能は AMD64 と ARM64 のみをサポートしています。',
             dependencyPurpose: '用途',
             dependencyPurposeMap: {
                 libvirt: '仮想マシン管理サービスを提供し、ライフサイクルとリソーススケジューリングを担当します。',

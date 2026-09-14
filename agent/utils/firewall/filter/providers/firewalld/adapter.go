@@ -51,12 +51,8 @@ func (a *Adapter) Capabilities(ctx context.Context) (filter.Capabilities, error)
 		return filter.Capabilities{}, err
 	}
 	return filter.Capabilities{
-		Scopes: []filter.ScopePattern{{
-			Provider: filter.ProviderFirewalld, Families: []filter.Family{filter.FamilyIPv4, filter.FamilyIPv6, filter.FamilyInet},
-			Zone: filter.FirewalldInputZone, Directions: []filter.Direction{filter.DirectionInput},
-		}},
+
 		ExplicitPriority: explicitPriority,
-		NativePort:       true,
 	}, nil
 }
 
@@ -178,9 +174,6 @@ func (a *Adapter) PrepareRule(rule filter.FirewallRule) (filter.FirewallRule, er
 			return filter.FirewallRule{}, err
 		}
 	} else if normalized.NativeKind == filter.NativeKindZonePort && !isNativeZonePort(normalized) {
-		// Edit requests inherit the current native kind. Once a native zone port
-		// gains an address, loses its port, or changes to a deny action, it must
-		// be represented as a rich rule instead.
 		normalized.NativeKind = filter.NativeKindRichRule
 		normalized, err = filter.NormalizeRule(normalized)
 		if err != nil {
@@ -202,11 +195,6 @@ func (a *Adapter) Compile(snapshot filter.Snapshot, changes []filter.DesiredChan
 	}
 	if len(changes) != 1 {
 		return filter.BackendPlan{}, fmt.Errorf("%w: firewalld plans currently require exactly one change", filter.ErrInvalidRule)
-	}
-	for _, observed := range snapshot.Rules {
-		if observed.Persistence != "" && observed.Persistence != filter.PersistenceStatusConverged {
-			return filter.BackendPlan{}, fmt.Errorf("%w: firewalld runtime and permanent state differ", filter.ErrRuleStale)
-		}
 	}
 	rulePlan, err := a.compileChange(snapshot, changes[0])
 	if err != nil {
@@ -240,6 +228,9 @@ func (a *Adapter) Apply(ctx context.Context, plan filter.BackendPlan) (filter.Ap
 	executed := 0
 	for index, command := range rulePlan.Commands {
 		if err := a.writer.Run(ctx, command); err != nil {
+			if plan.CommandOnly {
+				return filter.ApplyResult{}, err
+			}
 			return filter.ApplyResult{}, a.compensate(ctx, rulePlan, executed, err)
 		}
 		executed = index + 1
@@ -314,15 +305,12 @@ func (a *Adapter) compileChange(snapshot filter.Snapshot, change filter.DesiredC
 	if normalized.UUID == "" {
 		return filter.NativeRulePlan{}, fmt.Errorf("%w: rule UUID is required", filter.ErrInvalidRule)
 	}
-	if (change.Operation == filter.ChangeCreate || change.Operation == filter.ChangeUpdate) && isBroadDeny(normalized) {
-		return filter.NativeRulePlan{}, filter.ErrLockoutRisk
-	}
 
 	expected := observedForRule(normalized)
 	plan := filter.NativeRulePlan{RuleUUID: normalized.UUID, Operation: change.Operation, Expected: expected}
 	switch change.Operation {
 	case filter.ChangeCreate:
-		plan.Commands, plan.RollbackCommands = pairedCommands(normalized, "add", "remove")
+		plan.Commands, plan.RollbackCommands = missingRuleCommands(snapshot, normalized)
 	case filter.ChangeAdopt:
 		target, targetErr := validateMutationTarget(snapshot, change, normalized, false)
 		if targetErr != nil {
@@ -337,8 +325,11 @@ func (a *Adapter) compileChange(snapshot filter.Snapshot, change filter.DesiredC
 			return filter.NativeRulePlan{}, targetErr
 		}
 		plan.Previous = &target
-		removeCommands, restoreCommands := pairedCommands(target.Rule, "remove", "add")
-		addCommands, removeNewCommands := pairedCommands(normalized, "add", "remove")
+		if target.Locator.Canonical == expected.Locator.Canonical {
+			break
+		}
+		removeCommands, restoreCommands := observedPairedCommands(target, "remove", "add")
+		addCommands, removeNewCommands := missingRuleCommands(snapshot, normalized)
 		plan.Commands = append(removeCommands, addCommands...)
 		plan.RollbackCommands = append(restoreCommands, removeNewCommands...)
 	case filter.ChangeDelete:
@@ -349,7 +340,15 @@ func (a *Adapter) compileChange(snapshot filter.Snapshot, change filter.DesiredC
 		plan.Previous = &target
 		plan.Expected = target
 		plan.Expected.Rule.UUID = normalized.UUID
-		plan.Commands, plan.RollbackCommands = pairedCommands(target.Rule, "remove", "add")
+		plan.Commands, plan.RollbackCommands = observedPairedCommands(target, "remove", "add")
+		if change.CommandOnly {
+			switch target.Persistence {
+			case filter.PersistenceStatusRuntimeOnly:
+				plan.Commands, plan.RollbackCommands = plan.Commands[:1], plan.RollbackCommands[:1]
+			case filter.PersistenceStatusPermanentOnly:
+				plan.Commands, plan.RollbackCommands = plan.Commands[1:], plan.RollbackCommands[1:]
+			}
+		}
 	default:
 		return filter.NativeRulePlan{}, fmt.Errorf("%w: unsupported operation %s", filter.ErrInvalidRule, change.Operation)
 	}
@@ -393,11 +392,6 @@ func validateWritableRule(rule filter.FirewallRule) error {
 	return nil
 }
 
-func isBroadDeny(rule filter.FirewallRule) bool {
-	return (rule.Action == filter.ActionDrop || rule.Action == filter.ActionReject) &&
-		rule.SourceAddress == "" && rule.DestinationAddress == "" && rule.SourcePort == "" && rule.DestinationPort == ""
-}
-
 func observedForRule(rule filter.FirewallRule) filter.ObservedRule {
 	canonical := nativeCanonical(rule)
 	return filter.ObservedRule{
@@ -413,10 +407,41 @@ func nativeCanonical(rule filter.FirewallRule) string {
 	return "rich:" + canonicalRichRule(rule)
 }
 
+func missingRuleCommands(snapshot filter.Snapshot, rule filter.FirewallRule) ([]filter.NativeCommand, []filter.NativeCommand) {
+	commands, rollback := pairedCommands(rule, "add", "remove")
+	var runtimeExists, permanentExists bool
+	for _, observed := range snapshot.Rules {
+		if observed.Locator.Canonical != nativeCanonical(rule) {
+			continue
+		}
+		runtimeExists = runtimeExists || observed.Persistence == filter.PersistenceStatusConverged || observed.Persistence == filter.PersistenceStatusRuntimeOnly
+		permanentExists = permanentExists || observed.Persistence == filter.PersistenceStatusConverged || observed.Persistence == filter.PersistenceStatusPermanentOnly
+	}
+	var changes, inverses []filter.NativeCommand
+	for index, exists := range []bool{runtimeExists, permanentExists} {
+		if !exists {
+			changes = append(changes, commands[index])
+			inverses = append(inverses, rollback[index])
+		}
+	}
+	return changes, inverses
+}
+
 func pairedCommands(rule filter.FirewallRule, operation, inverse string) ([]filter.NativeCommand, []filter.NativeCommand) {
-	option := nativeOption(rule, operation)
-	rollback := nativeOption(rule, inverse)
-	selector := scopeSelector(rule.Scope)
+	return pairedNativeCommands(rule.Scope, nativeOption(rule, operation), nativeOption(rule, inverse))
+}
+
+func observedPairedCommands(observed filter.ObservedRule, operation, inverse string) ([]filter.NativeCommand, []filter.NativeCommand) {
+	if observed.Rule.NativeKind != filter.NativeKindRichRule || observed.Raw == "" {
+		return pairedCommands(observed.Rule, operation, inverse)
+	}
+	return pairedNativeCommands(observed.Rule.Scope,
+		"--"+operation+"-rich-rule="+observed.Raw,
+		"--"+inverse+"-rich-rule="+observed.Raw)
+}
+
+func pairedNativeCommands(scope filter.Scope, option, rollback string) ([]filter.NativeCommand, []filter.NativeCommand) {
+	selector := scopeSelector(scope)
 	commands := []filter.NativeCommand{
 		{Executable: "firewall-cmd", Args: []string{selector, option}},
 		{Executable: "firewall-cmd", Args: []string{"--permanent", selector, option}},
@@ -458,7 +483,8 @@ func validateMutationTarget(snapshot filter.Snapshot, change filter.DesiredChang
 	if target.Protected {
 		return filter.ObservedRule{}, filter.ErrProtectedRule
 	}
-	if target.ParseStatus != filter.ParseStatusSupported || target.Persistence != filter.PersistenceStatusConverged {
+	if target.ParseStatus != filter.ParseStatusSupported ||
+		(target.Persistence != filter.PersistenceStatusConverged && !(change.CommandOnly && change.Operation == filter.ChangeDelete)) {
 		return filter.ObservedRule{}, filter.ErrRuleStale
 	}
 	want := normalized
@@ -505,6 +531,11 @@ func scopeSelector(scope filter.Scope) string {
 }
 
 func (a *Adapter) compensate(ctx context.Context, plan filter.NativeRulePlan, executed int, cause error) error {
+	if plan.Operation == filter.ChangeCreate {
+		return cause
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	rollbackErr := a.rollback(ctx, plan.Expected.Rule.Scope, plan, executed)
 	if rollbackErr != nil {
 		return fmt.Errorf("firewalld apply failed: %w; compensation failed: %v", cause, rollbackErr)
@@ -552,7 +583,6 @@ type zoneOutput struct {
 	ports    string
 	rich     string
 	services string
-	active   bool
 }
 
 func (a *Adapter) readScope(ctx context.Context, scope filter.Scope, permanent bool) (zoneOutput, error) {
@@ -575,9 +605,6 @@ func parseZoneOutput(output string) zoneOutput {
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
-		case line == filter.FirewalldInputZone+" (active)":
-			parsed.active = true
-			inRichRules = false
 		case strings.HasPrefix(line, "ports:"):
 			parsed.ports = strings.TrimSpace(strings.TrimPrefix(line, "ports:"))
 			inRichRules = false
@@ -598,10 +625,7 @@ func parseZoneOutput(output string) zoneOutput {
 }
 
 func publicZoneNotices(runtime, permanent zoneOutput) []filter.ScopeNotice {
-	notices := make([]filter.ScopeNotice, 0, 2)
-	if !runtime.active {
-		notices = append(notices, filter.ScopeNotice{Code: filter.ScopeNoticeManagedScopeInactive})
-	}
+	notices := make([]filter.ScopeNotice, 0, 1)
 	mismatched := make([]string, 0, 3)
 	if !sameFields(runtime.ports, permanent.ports) {
 		mismatched = append(mismatched, "ports")
@@ -667,7 +691,8 @@ type mergedObject struct {
 
 func mergeZoneObjects(scope filter.Scope, runtime, permanent zoneOutput) ([]filter.ObservedRule, error) {
 	objects := make(map[string]*mergedObject)
-	add := func(rule filter.ObservedRule, runtimeState bool) {
+	richObjects := make(map[string]*mergedObject)
+	add := func(rule filter.ObservedRule, runtimeState bool) *mergedObject {
 		key := string(rule.Rule.NativeKind) + "\x00" + rule.Locator.Canonical
 		object, exists := objects[key]
 		if !exists {
@@ -680,12 +705,18 @@ func mergeZoneObjects(scope filter.Scope, runtime, permanent zoneOutput) ([]filt
 		} else {
 			object.permanent = true
 		}
+		return object
 	}
 	parse := func(output zoneOutput, runtimeState bool) error {
 		for _, rule := range parseZonePorts(scope, output.ports) {
 			add(rule, runtimeState)
 		}
 		for _, raw := range nonEmptyLines(output.rich) {
+			if object, exists := richObjects[raw]; exists {
+				object.runtime = object.runtime || runtimeState
+				object.permanent = object.permanent || !runtimeState
+				continue
+			}
 			rule, family, supported := parseRichRule(scope, raw)
 			if !supported {
 				opaqueScope := scope
@@ -694,7 +725,7 @@ func mergeZoneObjects(scope filter.Scope, runtime, permanent zoneOutput) ([]filt
 				}
 				rule = opaqueRichRule(opaqueScope, raw)
 			}
-			add(rule, runtimeState)
+			richObjects[raw] = add(rule, runtimeState)
 		}
 		for _, service := range strings.Fields(output.services) {
 			if scope.Family == filter.FamilyInet {

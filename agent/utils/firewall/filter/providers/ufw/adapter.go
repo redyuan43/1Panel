@@ -54,12 +54,33 @@ func (a *Adapter) PrepareRule(rule filter.FirewallRule) (filter.FirewallRule, er
 	return normalized, nil
 }
 
+func (a *Adapter) AppendUnverified(ctx context.Context, rule filter.FirewallRule, comment string) error {
+	normalized, err := a.PrepareRule(rule)
+	if err != nil {
+		return err
+	}
+	if normalized.Action != filter.ActionAccept || normalized.DestinationPort == "" ||
+		normalized.SourceAddress != "" || normalized.SourcePort != "" ||
+		normalized.DestinationAddress != "" || normalized.Interface != "" {
+		return fmt.Errorf("%w: unverified UFW appends only support accepted ports", filter.ErrInvalidRule)
+	}
+	if a.writer == nil {
+		return errors.New("ufw writer is required")
+	}
+	comment = strings.TrimSpace(comment)
+	if comment == "" || strings.ContainsAny(comment, "\r\n\x00") {
+		return fmt.Errorf("%w: invalid UFW fallback comment", filter.ErrInvalidRule)
+	}
+	command := commentCommand(normalized, comment)
+	if err := validateCommand(command); err != nil {
+		return err
+	}
+	return a.writer.Run(ctx, command)
+}
+
 func (a *Adapter) Capabilities(context.Context) (filter.Capabilities, error) {
 	return filter.Capabilities{
-		Scopes: []filter.ScopePattern{{
-			Provider: filter.ProviderUFW, Families: []filter.Family{filter.FamilyIPv4, filter.FamilyIPv6},
-			Chains: []string{filter.UFWInputChain}, Directions: []filter.Direction{filter.DirectionInput},
-		}},
+
 		Marker: true, ExplicitPosition: true,
 	}, nil
 }
@@ -89,7 +110,7 @@ func (a *Adapter) ObserveScopes(ctx context.Context, scopes []filter.Scope) ([]f
 	}
 	numbered, err := a.reader.Read(ctx, "status", "numbered")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: read UFW numbered status: %w", filter.ErrInventoryUnavailable, err)
 	}
 
 	notices := statusNotices(numbered)
@@ -162,13 +183,23 @@ func (a *Adapter) Apply(ctx context.Context, plan filter.BackendPlan) (filter.Ap
 	executed := 0
 	for index, command := range plan.Rules[0].Commands {
 		if err := a.writer.Run(ctx, command); err != nil {
-			if a.failedCommandApplied(ctx, plan.Rules[0], index) {
-				executed = index + 1
+			if plan.CommandOnly {
+				return filter.ApplyResult{}, fmt.Errorf("execute UFW rule: %w", err)
+			}
+			if !plan.CreatesOnly() {
+				probeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				if a.failedCommandApplied(probeCtx, plan.Rules[0], index) {
+					executed = index + 1
+				}
+				cancel()
 			}
 			cause := ufwApplyError(plan.Rules[0], fmt.Errorf("execute UFW rule: %w", err))
 			return filter.ApplyResult{}, a.compensate(ctx, plan.Rules[0], executed, cause)
 		}
 		executed = index + 1
+	}
+	if plan.CommandOnly || plan.CreatesOnly() {
+		return filter.ApplyResult{Applied: []filter.ObservedRule{plan.Rules[0].Expected}}, nil
 	}
 	verification, err := a.verify(ctx, plan)
 	if err != nil {
@@ -211,8 +242,11 @@ func (a *Adapter) failedCommandApplied(ctx context.Context, plan filter.NativeRu
 	case filter.ChangeCreate:
 		return markerCount > 0
 	case filter.ChangeAdopt:
-		return plan.Previous == nil || !containsObservedRule(snapshot, *plan.Previous)
-	case filter.ChangeUpdate:
+		if commandIndex == 0 {
+			return plan.Previous == nil || !containsObservedRule(snapshot, *plan.Previous)
+		}
+		return markerCount > 0
+	case filter.ChangeUpdate, filter.ChangeReorder:
 		if commandIndex == 0 {
 			return markerCount == 0
 		}
@@ -291,9 +325,6 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 	if normalized.UUID == "" {
 		return filter.NativeRulePlan{}, fmt.Errorf("%w: rule UUID is required", filter.ErrInvalidRule)
 	}
-	if (change.Operation == filter.ChangeCreate || change.Operation == filter.ChangeUpdate) && isBroadDeny(normalized) {
-		return filter.NativeRulePlan{}, filter.ErrLockoutRisk
-	}
 	marker := "1panel-rule:" + normalized.UUID
 	position := insertionPosition(snapshot, normalized)
 	expected := observedForRule(normalized, marker, position)
@@ -305,7 +336,7 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 			return filter.NativeRulePlan{}, fmt.Errorf("%w: create target is out of range", filter.ErrInvalidRule)
 		}
 		command := insertCommand(position, normalized, marker)
-		if change.Append {
+		if change.Append || position == maximumObservedPosition(snapshot)+1 {
 			command = commentCommand(normalized, marker)
 			plan.Expected.Locator.NativeID = ""
 			plan.Expected.Locator.Position = nil
@@ -318,14 +349,23 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 			return filter.NativeRulePlan{}, targetErr
 		}
 		position = *target.Locator.Position
+		appendAtEnd := position == maximumObservedPosition(snapshot)
+		restoreAtEnd := change.RestoreAtEnd || appendAtEnd
 		plan.Previous = &target
 		plan.Expected = observedForRule(normalized, marker, position)
-		// UFW updates the comment of an existing rule when the same rule is added
-		// without insert/prepend. This keeps the rule active and in its original
-		// position throughout adoption.
-		plan.Commands = []filter.NativeCommand{commentCommand(normalized, marker)}
-		plan.RollbackCommands = []filter.NativeCommand{commentCommand(target.Rule, observedComment(target))}
-	case filter.ChangeUpdate:
+		if appendAtEnd {
+			plan.Expected.Locator.NativeID = ""
+			plan.Expected.Locator.Position = nil
+		}
+		plan.Commands = []filter.NativeCommand{
+			deletePositionCommand(position),
+			positionedCommand(position, normalized, marker, appendAtEnd),
+		}
+		plan.RollbackCommands = []filter.NativeCommand{
+			positionedCommand(position, target.Rule, observedComment(target), restoreAtEnd),
+			deleteRuleCommand(normalized, marker),
+		}
+	case filter.ChangeUpdate, filter.ChangeReorder:
 		target, targetErr := validateMutationTarget(snapshot, change, normalized, marker, true)
 		if targetErr != nil {
 			return filter.NativeRulePlan{}, targetErr
@@ -362,7 +402,7 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 			deleteRuleCommand(normalized, marker),
 		}
 	case filter.ChangeDelete:
-		target, targetErr := validateMutationTarget(snapshot, change, normalized, marker, true)
+		target, targetErr := validateMutationTarget(snapshot, change, normalized, marker, !change.UnmarkedAdopted)
 		if targetErr != nil {
 			return filter.NativeRulePlan{}, targetErr
 		}
@@ -374,8 +414,6 @@ func compileChange(snapshot filter.Snapshot, change filter.DesiredChange) (filte
 		plan.RollbackCommands = []filter.NativeCommand{
 			positionedCommand(position, target.Rule, observedComment(target), restoreAtEnd),
 		}
-	case filter.ChangeReorder:
-		return filter.NativeRulePlan{}, fmt.Errorf("%w: ufw reorder is not supported", filter.ErrUnsupportedScope)
 	default:
 		return filter.NativeRulePlan{}, fmt.Errorf("%w: unsupported operation %s", filter.ErrInvalidRule, change.Operation)
 	}
@@ -394,11 +432,6 @@ func validateWritableRule(rule filter.FirewallRule) error {
 		return fmt.Errorf("%w: ufw protocol %q is not supported", filter.ErrInvalidRule, rule.Protocol)
 	}
 	return nil
-}
-
-func isBroadDeny(rule filter.FirewallRule) bool {
-	return (rule.Action == filter.ActionDrop || rule.Action == filter.ActionReject) && rule.Protocol == "all" &&
-		rule.SourceAddress == "" && rule.DestinationAddress == "" && rule.DestinationPort == ""
 }
 
 func validateMutationTarget(snapshot filter.Snapshot, change filter.DesiredChange, desired filter.FirewallRule, marker string, requireOwned bool) (filter.ObservedRule, error) {
@@ -605,10 +638,6 @@ func (a *Adapter) verify(ctx context.Context, plan filter.BackendPlan) (filter.V
 		positionMatches := rulePlan.Expected.Locator.Position == nil ||
 			(observed.Locator.Position != nil && *observed.Locator.Position == *rulePlan.Expected.Locator.Position)
 		semanticMatches := filter.ObservedRuleMatchesExpected(observed, rulePlan.Expected.Rule)
-		// A unique generated marker proves that UFW committed this command. Some
-		// UFW versions render otherwise valid rules in a form the numbered-status
-		// parser cannot fully recover. Do not turn that read-side limitation into
-		// a failed write, but keep rejecting fully parsed semantic mismatches.
 		if observed.ParseStatus == filter.ParseStatusOpaque {
 			semanticMatches = true
 		}
@@ -621,6 +650,11 @@ func (a *Adapter) verify(ctx context.Context, plan filter.BackendPlan) (filter.V
 }
 
 func (a *Adapter) compensate(ctx context.Context, plan filter.NativeRulePlan, executed int, cause error) error {
+	if plan.Operation == filter.ChangeCreate {
+		return cause
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	rollbackErr := a.rollback(ctx, plan, executed)
 	if rollbackErr != nil {
 		return fmt.Errorf("ufw apply failed: %w; compensation failed: %v", cause, rollbackErr)
@@ -1165,6 +1199,32 @@ func statusActive(output string) bool {
 		}
 	}
 	return false
+}
+
+func IsIPv6Unavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		causes := joined.Unwrap()
+		for _, cause := range causes {
+			if !IsIPv6Unavailable(cause) {
+				return false
+			}
+		}
+		return len(causes) > 0
+	}
+	if wrapped, ok := err.(interface{ Unwrap() error }); ok {
+		return IsIPv6Unavailable(wrapped.Unwrap())
+	}
+	message := err.Error()
+	if strings.Contains(message, "Permission denied") || strings.Contains(message, "Operation not permitted") {
+		return false
+	}
+	return strings.Contains(message, "ERROR: IPv6 support not enabled") ||
+		strings.Contains(message, "ERROR: Adding IPv6 rule failed: IPv6 not enabled") ||
+		(strings.Contains(message, "ip6tables") &&
+			(strings.Contains(message, ": Address family not supported by protocol") || strings.Contains(message, ": Protocol not supported")))
 }
 
 type systemBackend struct{}

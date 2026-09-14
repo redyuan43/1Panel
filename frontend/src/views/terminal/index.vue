@@ -37,7 +37,7 @@ import HostTab from '@/views/terminal/host/index.vue';
 import CommandTab from '@/views/terminal/command/index.vue';
 import TerminalTab from '@/views/terminal/terminal/index.vue';
 import SettingTab from '@/views/terminal/setting/index.vue';
-import { onMounted, onUnmounted, ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import { getTerminalInfo } from '@/api/modules/setting';
 import { TerminalStore } from '@/store';
 import { useGlobalStore } from '@/composables/useGlobalStore';
@@ -68,6 +68,7 @@ const handleChange = (tab: any) => {
 const loadTerminalSetting = async () => {
     await getTerminalInfo().then((res) => {
         terminalStore.$patch({
+            showTerminalButton: res.data.showTerminalButton !== 'Disable',
             lineHeight: Number(res.data.lineHeight),
             letterSpacing: Number(res.data.letterSpacing),
             fontSize: Number(res.data.fontSize),
@@ -85,9 +86,6 @@ const loadTerminalSetting = async () => {
 onMounted(() => {
     loadTerminalSetting();
     handleChange('terminal');
-});
-onUnmounted(() => {
-    terminalTabRef.value?.cleanTimer();
 });
 </script>
 

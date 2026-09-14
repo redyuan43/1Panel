@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,6 +38,22 @@ func run(args ...string) (string, error) {
 		return stdout, fmt.Errorf("command=nft %s failed: %w", strings.Join(args, " "), err)
 	}
 	return stdout, nil
+}
+
+func readNftObject(run func(...string) (string, error), args ...string) (string, bool, error) {
+	output, err := run(args...)
+	if err == nil {
+		return output, true, nil
+	}
+	message := err.Error()
+	if slices.Contains(args, "ip6") && (strings.Contains(message, "Address family not supported") || strings.Contains(message, "Protocol not supported")) {
+		return "", false, fmt.Errorf("%w: %v", filter.ErrFamilyUnavailable, err)
+	}
+	if strings.Contains(message, "Error:") && strings.Contains(message, "No such file or directory") &&
+		!strings.Contains(message, "Operation not permitted") && !strings.Contains(message, "Permission denied") {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 func runCommand(args ...string) error {
@@ -152,13 +169,13 @@ func hasBaseChainBinding(output string) bool {
 
 func loadFamilyInitStatus(family filter.Family) (bool, bool, error) {
 	for _, chain := range BasicChains() {
-		if _, err := run("list", "chain", TableFamily(family), TableName, chain); err != nil {
-			return false, false, nil
+		if _, exists, err := readNftObject(run, "list", "chain", TableFamily(family), TableName, chain); err != nil || !exists {
+			return false, false, err
 		}
 	}
-	stdout, err := run("list", "chain", TableFamily(family), TableName, InputChain)
-	if err != nil {
-		return false, false, nil
+	stdout, exists, err := readNftObject(run, "list", "chain", TableFamily(family), TableName, InputChain)
+	if err != nil || !exists {
+		return false, false, err
 	}
 	for _, chain := range BasicChains() {
 		if !strings.Contains(stdout, "jump "+chain) {

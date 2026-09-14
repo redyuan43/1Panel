@@ -10,6 +10,7 @@ type HostRouter struct{}
 func (s *HostRouter) InitRouter(Router *gin.RouterGroup) {
 	hostRouter := Router.Group("hosts")
 	baseApi := v2.ApiGroupApp.BaseApi
+	Router.POST("/internal/terminal/sessions/revoke", baseApi.RevokeTerminalSessions)
 	{
 		hostRouter.POST("", baseApi.CreateHost)
 		hostRouter.POST("/info", baseApi.GetHostByID)
@@ -23,8 +24,10 @@ func (s *HostRouter) InitRouter(Router *gin.RouterGroup) {
 
 		hostRouter.POST("/firewall/base", baseApi.LoadFirewallBaseInfo)
 		hostRouter.POST("/firewall/operate", baseApi.OperateFirewall)
+		hostRouter.POST("/firewall/port", baseApi.UpdatePanelFirewallPort)
 		hostRouter.GET("/firewall/settings", baseApi.LoadFirewallSettings)
 		hostRouter.POST("/firewall/settings/operate", baseApi.OperateFirewallBackend)
+		hostRouter.POST("/firewall/settings/whitelist", baseApi.UpdateFirewallPortWhitelist)
 		hostRouter.POST("/firewall/forward/base", baseApi.LoadForwardingBaseInfo)
 		hostRouter.POST("/firewall/forward/search", baseApi.SearchForwardingRules)
 		hostRouter.POST("/firewall/forward/operate", baseApi.OperateForwardingRules)
@@ -32,7 +35,7 @@ func (s *HostRouter) InitRouter(Router *gin.RouterGroup) {
 		hostRouter.POST("/firewall/rules/search", baseApi.SearchFirewallRules)
 		hostRouter.POST("/firewall/rules/reset", baseApi.ResetFirewallRules)
 		hostRouter.POST("/firewall/rules/native/detail", baseApi.LoadFirewallNativeDetail)
-		hostRouter.POST("/firewall/rules/check", baseApi.CheckFirewallRules)
+		hostRouter.POST("/firewall/rules/adopt", baseApi.AdoptFirewallRule)
 		hostRouter.POST("/firewall/rules", baseApi.CreateFirewallRules)
 		hostRouter.POST("/firewall/rules/sync/preview", baseApi.PreviewFirewallRuleSync)
 		hostRouter.GET("/firewall/rules/sync/task", baseApi.LoadFirewallRuleSyncTask)
@@ -84,6 +87,9 @@ func (s *HostRouter) InitRouter(Router *gin.RouterGroup) {
 		hostRouter.GET("/terminal/local", baseApi.WsLocalTerminal)
 		hostRouter.GET("/terminal/ssh", baseApi.WsHostSSH)
 		hostRouter.GET("/terminal/container", baseApi.WsContainerTerminal)
+		hostRouter.POST("/terminal/sessions/search", baseApi.SearchTerminalSessions)
+		hostRouter.POST("/terminal/sessions/close", baseApi.CloseTerminalSession)
+		hostRouter.POST("/terminal/sessions/closeAll", baseApi.CloseAllTerminalSessions)
 
 		hostRouter.GET("/disks", baseApi.GetCompleteDiskInfo)
 		hostRouter.POST("/disks/partition", baseApi.PartitionDisk)

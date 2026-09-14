@@ -1,56 +1,60 @@
 <template>
-    <div>
+    <div class="terminal-page" :class="{ 'is-mobile': isMobile }">
         <el-tabs
             type="card"
-            class="terminal-tabs card-interval"
+            class="terminal-tabs"
             style="background-color: var(--panel-terminal-tag-bg-color)"
             v-model="terminalValue"
-            :before-leave="beforeLeave"
+            addable
+            @tab-add="showConnections = !showConnections"
             @tab-change="quickCmd = ''"
             @edit="handleTabsRemove"
         >
             <el-tab-pane
-                :key="item.index"
-                v-for="item in terminalTabs"
+                :key="item.key"
+                v-for="item in store.entries"
                 :closable="true"
                 :label="item.title"
-                :name="item.index"
+                :name="item.key"
             >
                 <template #label>
-                    <span class="custom-tabs-label">
-                        <span
-                            v-if="item.status === 'online'"
-                            :style="`color: ${
-                                item.latency < 100 ? '#69db7c' : item.latency < 300 ? '#f59f00' : '#d9480f'
-                            }; display: inline-flex; align-items: center`"
-                        >
-                            <span>&nbsp;{{ item.latency }}&nbsp;ms&nbsp;</span>
-                            <el-icon>
-                                <circleCheck />
-                            </el-icon>
+                    <el-tooltip
+                        :content="`${item.title} · ${
+                            item.status === 'online' ? `${item.latency} ms` : $t('commons.button.reconnect')
+                        }`"
+                        placement="top-start"
+                        :show-after="300"
+                    >
+                        <span class="terminal-tab-label">
+                            <span v-if="item.status === 'online'" class="terminal-tab-status" aria-hidden="true">
+                                <span class="terminal-status-dot"></span>
+                            </span>
+                            <el-button
+                                v-else
+                                icon="Refresh"
+                                class="terminal-tab-reconnect"
+                                :aria-label="$t('commons.button.reconnect')"
+                                link
+                                @click.stop="onReconnect(item)"
+                            />
+                            <span class="terminal-tab-title">{{ item.title }}</span>
+                            <span
+                                v-if="item.key === terminalValue && item.status === 'online'"
+                                class="terminal-tab-latency"
+                            >
+                                {{ item.latency }} ms
+                            </span>
                         </span>
-                        <el-button
-                            v-if="item.status === 'closed'"
-                            icon="Refresh"
-                            class="text-white"
-                            size="default"
-                            link
-                            @click="onReconnect(item)"
-                        />
-                        <span v-if="item.title.length <= 20">&nbsp;{{ item.title }}&nbsp;</span>
-                        <el-tooltip v-else :content="item.title" placement="top-start">
-                            <span>&nbsp;{{ item.title.substring(0, 17) }}...&nbsp;</span>
-                        </el-tooltip>
-                    </span>
+                    </el-tooltip>
                 </template>
-                <Terminal
+                <div
+                    class="terminal-slot"
+                    :ref="(el: any) => onSlot(item.key, el)"
                     :style="{
                         height: `calc(100vh - ${loadHeight()})`,
                         'background-color': `var(--panel-logs-bg-color)`,
                     }"
-                    :ref="'t-' + item.index"
-                    :key="item.Refresh"
-                ></Terminal>
+                ></div>
 
                 <div class="flex items-center gap-2 w-full py-2 flex-wrap">
                     <AiSetting v-if="!isMobile" class="shrink-0" />
@@ -98,162 +102,48 @@
                     />
                 </div>
             </el-tab-pane>
-            <el-tab-pane :closable="false" name="newTabs">
-                <template #label>
-                    <el-button v-popover="popoverRef" class="tagButton" icon="Plus"></el-button>
-                    <el-popover
-                        ref="popoverRef"
-                        width="320px"
-                        trigger="hover"
-                        virtual-triggering
-                        persistent
-                        :offset="-4"
-                    >
-                        <div class="p-2 space-y-2">
-                            <div class="flex gap-2">
-                                <button
-                                    v-if="!isNodeAdmin"
-                                    @click="onNewSsh"
-                                    class="flex-1 flex flex-col items-center justify-center px-3 py-2.5 bg-[var(--el-fill-color-light)] hover:bg-[var(--panel-main-bg-color-9)] rounded transition-colors duration-200 cursor-pointer group border-0 outline-none"
-                                >
-                                    <el-icon
-                                        class="text-xl mb-1 text-[var(--el-text-color-primary)] group-hover:text-[var(--el-color-primary)] transition-colors"
-                                    >
-                                        <Plus />
-                                    </el-icon>
-                                    <span
-                                        class="text-xs text-[var(--el-text-color-primary)] group-hover:text-[var(--el-color-primary)] font-medium truncate w-full text-center transition-colors"
-                                    >
-                                        {{ $t('terminal.createConn') }}
-                                    </span>
-                                </button>
-                                <button
-                                    @click="onNewLocal"
-                                    class="flex-1 flex flex-col items-center justify-center px-3 py-2.5 bg-[var(--el-fill-color-light)] hover:bg-[var(--panel-main-bg-color-9)] rounded transition-colors duration-200 cursor-pointer group border-0 outline-none"
-                                >
-                                    <el-icon
-                                        class="text-xl mb-1 text-[var(--el-text-color-primary)] group-hover:text-[var(--el-color-primary)] transition-colors"
-                                    >
-                                        <House />
-                                    </el-icon>
-                                    <span
-                                        class="text-xs text-[var(--el-text-color-primary)] group-hover:text-[var(--el-color-primary)] font-medium truncate w-full text-center transition-colors"
-                                    >
-                                        {{ $t('terminal.localhost') }}
-                                    </span>
-                                </button>
-                            </div>
-                            <template v-if="!isNodeAdmin">
-                                <el-divider class="my-0" />
-
-                                <div class="search-container px-1 py-1 bg-[var(--el-fill-color-light)] rounded">
-                                    <el-input
-                                        v-model="hostFilterInfo"
-                                        class="w-full"
-                                        clearable
-                                        suffix-icon="Search"
-                                        :placeholder="$t('commons.button.search')"
-                                        size="small"
-                                    >
-                                        <template #prefix>
-                                            <el-icon class="el-input__icon"><Search /></el-icon>
-                                        </template>
-                                    </el-input>
-                                </div>
-                                <el-tree
-                                    ref="treeRef"
-                                    :expand-on-click-node="false"
-                                    node-key="id"
-                                    :default-expand-all="true"
-                                    :data="hostTree"
-                                    :props="defaultProps"
-                                    :filter-node-method="filterHost"
-                                    :empty-text="$t('terminal.noHost')"
-                                    class="host-tree"
-                                >
-                                    <template #default="{ node, data }">
-                                        <span class="custom-tree-node w-full">
-                                            <span
-                                                v-if="node.label === 'Default'"
-                                                class="text-xs font-medium text-[var(--el-text-color-primary)]"
-                                            >
-                                                {{ $t('commons.table.default') }}
-                                            </span>
-                                            <div v-else class="w-full min-w-0">
-                                                <span v-if="node.label.length <= 22">
-                                                    <a
-                                                        @click="onClickConn(node, data)"
-                                                        class="text-xs text-[var(--el-text-color-primary)] hover:text-[var(--el-color-primary)] transition-colors cursor-pointer block truncate"
-                                                    >
-                                                        {{ node.label }}
-                                                    </a>
-                                                </span>
-                                                <el-tooltip v-else :content="node.label" placement="right">
-                                                    <span>
-                                                        <a
-                                                            @click="onClickConn(node, data)"
-                                                            class="text-xs text-[var(--el-text-color-primary)] hover:text-[var(--el-color-primary)] transition-colors cursor-pointer block truncate"
-                                                        >
-                                                            {{ node.label.substring(0, 30) }}...
-                                                        </a>
-                                                    </span>
-                                                </el-tooltip>
-                                            </div>
-                                        </span>
-                                    </template>
-                                </el-tree>
-                            </template>
-                        </div>
-                    </el-popover>
-                </template>
-            </el-tab-pane>
-            <div v-if="terminalTabs.length === 0">
+            <template #add-icon>
+                <ConnectionMenu ref="connectionMenuRef" v-model="showConnections" :open-session="openConnection" />
+            </template>
+            <div v-if="store.entries.length === 0">
                 <el-empty
                     :style="{ height: `calc(100vh - ${loadEmptyHeight()})`, 'background-color': '#000' }"
                     :description="$t('terminal.emptyTerminal')"
                 ></el-empty>
             </div>
         </el-tabs>
-        <el-tooltip :content="loadTooltip()" placement="top">
-            <el-button
-                @click="toggleFullscreen"
-                v-if="!isMobile"
-                class="bg-transparent border-0 absolute right-[50px] font-semibold text-sm"
-                :style="{ top: loadFullScreenHeight() }"
-                icon="FullScreen"
-            ></el-button>
-        </el-tooltip>
-
-        <HostDialog
-            ref="dialogRef"
-            @on-conn-terminal="onConnTerminal"
-            @on-new-local="onNewLocal"
-            @load-host-tree="loadHostTree"
-        />
+        <div v-if="!isMobile" class="terminal-actions">
+            <el-tooltip :content="loadTooltip()" placement="top">
+                <el-button
+                    class="terminal-action"
+                    icon="FullScreen"
+                    text
+                    :aria-label="loadTooltip()"
+                    @click="toggleFullscreen"
+                />
+            </el-tooltip>
+        </div>
     </div>
 </template>
 
 <script setup lang="ts">
-import { ref, getCurrentInstance, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
-import Terminal from '@/components/terminal/index.vue';
-import HostDialog from '@/views/terminal/terminal/host-create.vue';
-import type Node from 'element-plus/es/components/tree/src/model/node';
-import { ElTree } from 'element-plus';
+import { ref, watch, nextTick, onMounted, onBeforeUnmount, onActivated, onDeactivated } from 'vue';
 import screenfull from 'screenfull';
 import i18n from '@/lang';
-import { Host } from '@/api/interface/host';
-import { getHostTree, testByID, testLocalConn } from '@/api/modules/terminal';
+import { testByID, testLocalConn } from '@/api/modules/terminal';
 import { useGlobalStore } from '@/composables/useGlobalStore';
 import router from '@/routers';
 import { getCommandTree } from '@/api/modules/command';
 import { getAgentSettingInfo } from '@/api/modules/setting';
 import AiSetting from '@/views/terminal/setting/ai/index.vue';
-import { MsgWarning } from '@/utils/message';
+import { TerminalSessionStore } from '@/store';
+import ConnectionMenu from '@/components/terminal/connection-menu/index.vue';
+import type { TerminalConnectionOptions } from '@/components/terminal/connection-menu/types';
 
 const { isFullScreen, isMobile, isNodeAdmin, openMenuTabs } = useGlobalStore();
+const store = TerminalSessionStore();
 
-const dialogRef = ref();
-const ctx = getCurrentInstance() as any;
+const connectionMenuRef = ref<InstanceType<typeof ConnectionMenu>>();
 
 const toggleFullscreen = () => {
     if (screenfull.isEnabled) {
@@ -266,8 +156,6 @@ const loadTooltip = () => {
 
 let timer: ReturnType<typeof setInterval> | null = null;
 const terminalValue = ref();
-const terminalTabs = ref([]) as any;
-let tabIndex = 0;
 
 const commandTree = ref();
 const quickCommandProps = {
@@ -277,36 +165,22 @@ let quickCmd = ref();
 let batchVal = ref();
 let isBatch = ref<boolean>(false);
 
-const popoverRef = ref();
-
-const hostFilterInfo = ref('');
-const hostTree = ref<Array<Host.HostTree>>();
-const treeRef = ref<InstanceType<typeof ElTree>>();
-const defaultProps = {
-    label: 'label',
-    children: 'children',
-};
-interface Tree {
-    id: number;
-    label: string;
-    children?: Tree[];
-}
+const showConnections = ref(false);
 const initCmd = ref('');
 
 const acceptParams = async () => {
     isFullScreen.value = false;
     loadCommandTree();
-    if (!isNodeAdmin.value) {
-        loadHostTree();
-    } else {
-        hostTree.value = [];
-    }
-    if (terminalTabs.value.length === 0) {
+    if (store.entries.length === 0) {
         await openDefaultLocalConn();
+    } else {
+        if (!store.find(terminalValue.value)) {
+            terminalValue.value = store.entries[0].key;
+        }
+        await claim();
+        store.sync();
     }
-    timer = setInterval(() => {
-        syncTerminal();
-    }, 1000 * 5);
+    timer = setInterval(store.sync, 1000 * 5);
     if (!isMobile.value) {
         screenfull.on('change', () => {
             isFullScreen.value = screenfull.isFullscreen;
@@ -315,13 +189,14 @@ const acceptParams = async () => {
 };
 
 const openDefaultLocalConn = async () => {
+    await nextTick();
     if (isNodeAdmin.value) {
-        onNewLocal();
+        await connectionMenuRef.value?.connectLocal();
         return;
     }
-    await getAgentSettingInfo().then((res) => {
+    await getAgentSettingInfo().then(async (res) => {
         if (res.data?.localSSHConnShow === 'Enable') {
-            onNewLocal();
+            await connectionMenuRef.value?.connectLocal();
         }
     });
 };
@@ -329,12 +204,40 @@ const openDefaultLocalConn = async () => {
 const cleanTimer = () => {
     clearInterval(Number(timer));
     timer = null;
-    for (const terminal of terminalTabs.value) {
-        if (ctx && ctx.refs[`t-${terminal.index}`][0]) {
-            terminal.status = ctx.refs[`t-${terminal.index}`][0].onClose();
+};
+
+const slotEls: Record<string, HTMLElement> = {};
+const onSlot = (key: string, el: HTMLElement | null) => {
+    if (el) slotEls[key] = el;
+    else delete slotEls[key];
+};
+let pageVisible = true;
+const claim = async () => {
+    for (const item of store.entries) {
+        if (pageVisible) {
+            store.setSlot(item.key, slotEls[item.key] || null);
+        } else if (store.slots[item.key] && store.slots[item.key] === slotEls[item.key]) {
+            store.setSlot(item.key, null);
         }
     }
+    if (!pageVisible) return;
+    await nextTick();
+    for (const item of store.entries) {
+        store.instances[item.key]?.refit();
+    }
 };
+watch(
+    () => store.entries.length,
+    () => nextTick(claim),
+);
+onActivated(() => {
+    pageVisible = true;
+    claim();
+});
+onDeactivated(() => {
+    pageVisible = false;
+    claim();
+});
 
 const loadHeight = () => {
     return openMenuTabs.value ? '250px' : '210px';
@@ -342,48 +245,30 @@ const loadHeight = () => {
 const loadEmptyHeight = () => {
     return openMenuTabs.value ? '201px' : '156px';
 };
-const loadFullScreenHeight = () => {
-    return openMenuTabs.value ? '105px' : '60px';
-};
 
-const handleTabsRemove = (targetName: string, action: 'remove' | 'add') => {
+const handleTabsRemove = async (targetName: string, action: 'remove' | 'add') => {
     if (action !== 'remove') {
         return;
     }
-    if (ctx) {
-        ctx.refs[`t-${targetName}`] && ctx.refs[`t-${targetName}`][0].onClose();
+    if (!store.find(targetName)) {
+        return;
     }
-    const tabs = terminalTabs.value;
+    const tabs = store.entries;
     let activeName = terminalValue.value;
     if (activeName === targetName) {
-        tabs.forEach((tab: any, index: any) => {
-            if (tab.index === targetName) {
+        tabs.forEach((tab, index) => {
+            if (tab.key === targetName) {
                 const nextTab = tabs[index + 1] || tabs[index - 1];
                 if (nextTab) {
-                    activeName = nextTab.index;
+                    activeName = nextTab.key;
                 }
             }
         });
     }
     terminalValue.value = activeName;
-    terminalTabs.value = tabs.filter((tab: any) => tab.index !== targetName);
+    store.remove(targetName);
 };
 
-const loadHostTree = async () => {
-    if (isNodeAdmin.value) {
-        hostTree.value = [];
-        return;
-    }
-    const res = await getHostTree({});
-    hostTree.value = res.data;
-};
-watch(hostFilterInfo, (val: any) => {
-    treeRef.value!.filter(val);
-});
-const filterHost = (value: string, data: any) => {
-    if (!value) return true;
-    return data.label.includes(value);
-};
 const loadCommandTree = async () => {
     const res = await getCommandTree('command');
     commandTree.value = res.data || [];
@@ -394,16 +279,10 @@ const loadCommandTree = async () => {
     }
 };
 
-const executeCommand = (command: string) => {
-    if (!ctx) {
-        return;
-    }
-    if (isBatch.value) {
-        for (const tab of terminalTabs.value) {
-            ctx.refs[`t-${tab.index}`] && ctx.refs[`t-${tab.index}`][0].sendMsg(command + '\n');
-        }
-    } else {
-        ctx.refs[`t-${terminalValue.value}`] && ctx.refs[`t-${terminalValue.value}`][0].sendMsg(command + '\n');
+const sendToTerminals = (command: string, all: boolean) => {
+    const keys = all ? store.entries.map((e) => e.key) : [terminalValue.value];
+    for (const key of keys) {
+        store.instances[key]?.sendMsg(command);
     }
 };
 
@@ -411,140 +290,34 @@ const handleQuickCommandChange = (val: Array<string>) => {
     if (!val?.length) {
         return;
     }
-    executeCommand(val[val.length - 1]);
+    sendToTerminals(val[val.length - 1] + '\n', isBatch.value);
     quickCmd.value = '';
 };
 
 function batchInput() {
-    if (batchVal.value === '' || !ctx) {
+    if (batchVal.value === '') {
         return;
     }
-    if (isBatch.value) {
-        for (const tab of terminalTabs.value) {
-            ctx.refs[`t-${tab.index}`] && ctx.refs[`t-${tab.index}`][0].sendMsg(batchVal.value + '\n');
-        }
-        batchVal.value = '';
-        return;
-    }
-    ctx.refs[`t-${terminalValue.value}`] && ctx.refs[`t-${terminalValue.value}`][0].sendMsg(batchVal.value + '\n');
+    sendToTerminals(batchVal.value + '\n', isBatch.value);
     batchVal.value = '';
 }
 
-function beforeLeave(activeName: string) {
-    if (activeName === 'newTabs') {
-        return false;
-    }
-}
+const connectionError = 'Failed to set up the connection. Please check the host information';
 
-const onNewSsh = () => {
-    if (isNodeAdmin.value) {
-        MsgWarning(i18n.global.t('terminal.nodeAdminLocalOnly'));
-        return;
-    }
-    dialogRef.value!.acceptParams({ isLocal: false });
-};
-const onNewLocal = async () => {
-    const res = await testLocalConn();
-    if (!res.data) {
-        dialogRef.value!.acceptParams({ isLocal: true });
-        return;
-    }
-    terminalTabs.value.push({
-        index: tabIndex,
-        title: i18n.global.t('terminal.localhost'),
-        wsID: 0,
-        status: 'online',
-        latency: 0,
-    });
-    terminalValue.value = tabIndex;
-    nextTick(() => {
-        ctx.refs[`t-${terminalValue.value}`] &&
-            ctx.refs[`t-${terminalValue.value}`][0].acceptParams({
-                endpoint: '/api/v2/hosts/terminal/local',
-                initCmd: initCmd.value,
-                error: '',
-            });
-        initCmd.value = '';
-    });
-    tabIndex++;
-};
-
-const onClickConn = (node: Node, data: Tree) => {
-    if (node.level === 1) {
-        return;
-    }
-    onConnTerminal(node.label, data.id);
+const openConnection = async (options: TerminalConnectionOptions) => {
+    const cmd = initCmd.value;
+    initCmd.value = '';
+    terminalValue.value = await store.open({ ...options, initCmd: cmd });
 };
 
 const onReconnect = async (item: any) => {
-    if (ctx) {
-        ctx.refs[`t-${item.index}`] && ctx.refs[`t-${item.index}`][0].onClose();
-    }
-    item.Refresh = !item.Refresh;
-    if (item.wsID === 0) {
-        const res = await testLocalConn();
-        nextTick(() => {
-            ctx.refs[`t-${item.index}`] &&
-                ctx.refs[`t-${item.index}`][0].acceptParams({
-                    endpoint: '/api/v2/hosts/terminal/local',
-                    initCmd: initCmd.value,
-                    error: res.data ? '' : 'Failed to set up the connection. Please check the host information',
-                });
-            initCmd.value = '';
-        });
-        syncTerminal();
-        return;
-    }
-
-    const res = await testByID(item.wsID);
-    nextTick(() => {
-        ctx.refs[`t-${item.index}`] &&
-            ctx.refs[`t-${item.index}`][0].acceptParams({
-                endpoint: '/api/v2/hosts/terminal/ssh',
-                args: `id=${item.wsID}`,
-                initCmd: initCmd.value,
-                error: res.data ? '' : 'Failed to set up the connection. Please check the host information',
-            });
-        initCmd.value = '';
-    });
-    syncTerminal();
+    const nodeName = new URLSearchParams(item.args).get('operateNode') || undefined;
+    const res = item.wsID === 0 ? await testLocalConn(nodeName) : await testByID(item.wsID);
+    const cmd = initCmd.value;
+    initCmd.value = '';
+    await store.reconnect(item.key, res.data ? '' : connectionError, cmd);
+    store.sync();
 };
-
-const onConnTerminal = async (title: string, wsID: number) => {
-    if (isNodeAdmin.value) {
-        MsgWarning(i18n.global.t('terminal.nodeAdminLocalOnly'));
-        return;
-    }
-    const res = await testByID(wsID);
-    terminalTabs.value.push({
-        index: tabIndex,
-        title: title,
-        wsID: wsID,
-        status: res.data ? 'online' : 'closed',
-        latency: 0,
-    });
-    terminalValue.value = tabIndex;
-    nextTick(() => {
-        ctx.refs[`t-${terminalValue.value}`] &&
-            ctx.refs[`t-${terminalValue.value}`][0].acceptParams({
-                endpoint: '/api/v2/hosts/terminal/ssh',
-                args: `id=${wsID}`,
-                initCmd: initCmd.value,
-                error: res.data ? '' : 'Authentication failed. Please check the host information!',
-            });
-        initCmd.value = '';
-    });
-    tabIndex++;
-};
-
-function syncTerminal() {
-    for (const terminal of terminalTabs.value) {
-        if (ctx && ctx.refs[`t-${terminal.index}`][0]) {
-            terminal.status = ctx.refs[`t-${terminal.index}`][0].isWsOpen() ? 'online' : 'closed';
-            terminal.latency = ctx.refs[`t-${terminal.index}`][0].getLatency();
-        }
-    }
-}
 
 const changeFullScreen = () => {
     isFullScreen.value = screenfull.isFullscreen;
@@ -552,11 +325,13 @@ const changeFullScreen = () => {
 
 defineExpose({
     acceptParams,
-    cleanTimer,
 });
 
 onBeforeUnmount(() => {
     document.removeEventListener('fullscreenchange', changeFullScreen);
+    cleanTimer();
+    pageVisible = false;
+    claim();
 });
 
 onMounted(() => {
@@ -569,9 +344,46 @@ onMounted(() => {
 </script>
 
 <style lang="scss" scoped>
+.terminal-page {
+    --terminal-actions-width: 40px;
+    position: relative;
+    min-width: 0;
+    padding-top: 7px;
+
+    &.is-mobile {
+        --terminal-actions-width: 0px;
+    }
+}
+
+.terminal-actions {
+    position: absolute;
+    top: 7px;
+    right: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    width: var(--terminal-actions-width);
+    height: var(--el-tabs-header-height, 40px);
+}
+
+.terminal-action {
+    width: 32px;
+    height: 32px;
+    margin: 0;
+    padding: 0;
+    border-radius: 6px;
+    color: var(--el-text-color-regular);
+
+    &:hover {
+        color: var(--el-color-primary);
+    }
+}
+
 .terminal-tabs {
     :deep(.el-tabs__header) {
-        padding: 0;
+        justify-content: flex-start;
+        padding: 0 var(--terminal-actions-width) 0 0;
+        min-height: var(--el-tabs-header-height);
         position: relative;
         margin: 0 0 3px 0;
     }
@@ -585,6 +397,17 @@ onMounted(() => {
     :deep(.el-tabs__item) {
         padding: 0;
     }
+    :deep(.el-tabs__nav-wrap) {
+        flex: 0 1 auto;
+        min-width: 0;
+    }
+
+    :deep(.el-tabs__new-tab) {
+        width: auto;
+        height: auto;
+        margin: 0;
+        border: 0;
+    }
     :deep(.el-tabs__item.is-active) {
         color: var(--panel-terminal-tag-active-text-color);
         background-color: var(--panel-terminal-tag-active-bg-color);
@@ -595,31 +418,85 @@ onMounted(() => {
     :deep(.el-tabs__item.is-active:hover) {
         color: var(--panel-terminal-tag-active-text-color);
     }
-}
+    :deep(.el-tabs__header .el-tabs__item.is-closable) {
+        padding: 0 12px;
 
-.tagButton {
-    border: 0;
-    background-color: var(--el-tabs__item);
-}
-
-.host-tree {
-    max-height: 300px;
-    overflow-y: auto;
-}
-
-.search-container {
-    :deep(.el-input__wrapper) {
-        border-radius: 6px;
-        box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-
-        &:hover {
-            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+        .is-icon-close {
+            width: 14px;
+            margin-left: 6px;
+            right: 0;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity var(--el-transition-duration);
         }
 
-        &.is-focus {
-            box-shadow: 0 0 0 2px var(--el-color-primary-light-3);
+        &.is-active,
+        &:hover,
+        &:focus-within {
+            .is-icon-close {
+                opacity: 1;
+                pointer-events: auto;
+            }
+        }
+
+        @media (hover: none), (pointer: coarse) {
+            .is-icon-close {
+                opacity: 1;
+                pointer-events: auto;
+            }
         }
     }
+}
+
+.terminal-tab-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 220px;
+}
+
+.terminal-tab-status,
+.terminal-tab-reconnect {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 14px;
+    height: 14px;
+    padding: 0;
+}
+
+.terminal-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: var(--el-color-success);
+}
+
+.terminal-tab-reconnect {
+    color: inherit;
+}
+
+.terminal-tab-title {
+    min-width: 0;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.terminal-tab-latency {
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 400;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    opacity: 0.7;
+}
+
+.terminal-slot {
+    width: 100%;
 }
 
 .vertical-tabs > .el-tabs__content {
@@ -627,9 +504,6 @@ onMounted(() => {
     color: #6b778c;
     font-size: 32px;
     font-weight: 600;
-}
-.el-tabs--top.el-tabs--card > .el-tabs__header .el-tabs__item:last-child {
-    padding-right: 0px;
 }
 .el-input__wrapper {
     border-radius: 50px;

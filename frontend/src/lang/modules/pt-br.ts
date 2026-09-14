@@ -507,6 +507,8 @@ const message = {
         closeCurrent: 'Fechar atual',
         closeOther: 'Fechar outros',
         closeAll: 'Fechar todos',
+        keepAlive: 'Manter sessão da página',
+        cancelKeepAlive: 'Parar de manter a sessão da página',
     },
     header: {
         logout: 'Logout',
@@ -954,7 +956,9 @@ const message = {
             from_remote: 'Este modelo não foi baixado pelo 1Panel; não há logs de download relacionados.',
             no_logs: 'Os logs de download deste modelo foram excluídos e não podem ser visualizados.',
             vllmVersionHelper: 'Para servidores FusionXpark GB 10, selecione a versão -cu130.',
-            ascendVisibleDevices: 'Dispositivos Ascend visíveis',
+            vllmDeployProfile: 'Modelo de implantação',
+            vllmProfileFlash0731: 'DeepSeek V4 Flash 0731',
+            vllmProfileVisionExp: 'DeepSeek V4 Flash Vision Exp',
             vllmCommandPortHelper:
                 'O comando de inicialização deve usar a porta {0}; caso contrário, o serviço ficará inacessível.',
             ascendVisibleDevices: 'Dispositivos Ascend visíveis (ASCEND_RT_VISIBLE_DEVICES)',
@@ -1148,7 +1152,6 @@ const message = {
             cachedToken: 'Tokens em cache',
             cacheHitRate: 'Taxa de acerto do cache',
             activeUsers: 'Usuários ativos',
-            activeStreamingRequests: 'Solicitações de streaming ativas',
             activeModels: 'Modelos ativos',
             failedRequests: 'Requisições com falha',
             averageTokenPerRequest: 'Média de Token/requisição',
@@ -2097,6 +2100,9 @@ const message = {
         profileBlockDesc: 'Mede bloqueios em canais, select e primitivas de sincronização.',
     },
     terminal: {
+        showTerminalButton: 'Atalho para o terminal',
+        showTerminalButtonHelper:
+            'Ao ativar esta opção, um botão de atalho para o terminal será exibido no canto inferior direito da página.',
         local: 'Local',
         defaultConn: 'Conexão Padrão',
         defaultConnHelper:
@@ -2139,6 +2145,19 @@ const message = {
         key: 'Chave privada',
         keyPassword: 'Senha da chave privada',
         emptyTerminal: 'Nenhum terminal está conectado no momento.',
+        sessionReconnecting: 'Conexão perdida, reconectando...',
+        sessionExpired:
+            'A sessão não está mais disponível, pressione Enter ou clique em reconectar para abrir uma nova',
+        sessionKicked: 'Esta sessão foi aberta em outra janela',
+        sessionCount: '{0} sessões',
+        sessionRules: 'Regras da sessão de terminal',
+        sessionRuleClose: 'Fechar o terminal encerra a sessão imediatamente.',
+        sessionRuleDisconnect: 'Recupere em até 30 minutos após atualizar, fechar o navegador ou perder a conexão.',
+        sessionRuleRevalidate: 'A sessão termina se o login for inválido ou a verificação exceder o tempo limite.',
+        sessionRuleResources: 'Mais terminais consomem mais recursos. Feche os que não estiver usando.',
+        minimize: 'Minimizar',
+        closeAllSessions: 'Fechar todas as sessões',
+        closeAllConfirm: 'Todas as sessões de terminal serão desconectadas e não poderão ser recuperadas. Continuar?',
         lineHeight: 'Altura da linha',
         letterSpacing: 'Espaçamento entre letras',
         fontSize: 'Tamanho da fonte',
@@ -2678,6 +2697,7 @@ const message = {
         panelInstallDir: 'O diretório de instalação do 1Panel não pode ser excluído',
         wgetTask: 'Tarefa de Download',
         stopWgetConfirm: 'Tem certeza de que deseja parar esta tarefa de download?',
+        downloadRecordsNotRemoved: 'Alguns registros não foram removidos. Atualize e tente novamente.',
         existFileTitle: 'Aviso de arquivo com o mesmo nome',
         existFileHelper: 'O arquivo enviado contém um arquivo com o mesmo nome. Deseja substituí-lo?',
         existFileSize: 'Tamanho do arquivo (novo -> antigo)',
@@ -2805,6 +2825,7 @@ const message = {
         portChangeHelper: 'Modificar a porta do serviço e reiniciar o serviço. Deseja continuar?',
         theme: 'Tema',
         menuTabs: 'Guias do menu',
+        menuTabsHelper: 'Após habilitar, clique no botão de cadeado da guia para manter a sessão da página.',
         menuAccordion: 'Expansão múltipla de menus',
         menuAccordionHelper:
             'Após ativar, vários grupos de menus da barra lateral podem permanecer expandidos ao mesmo tempo.',
@@ -3200,6 +3221,8 @@ const message = {
         source: 'Fonte para download',
         versionNotSame:
             'A versão do nó não corresponde à do nó principal. Atualize na Gestão de Nós antes de tentar novamente.',
+        currentNodeVersionNotSame:
+            'A versão do nó atual não corresponde à do nó principal. Entre em contato com o administrador para atualizar o nó atual.',
         versionCompare:
             'Detectado que o nó {0} já está na última versão atualizável. Por favor, verifique a versão do nó principal e tente novamente!',
         about: 'Sobre',
@@ -3309,14 +3332,15 @@ const message = {
         restoreCommunity: 'Restaurar Community Edition',
         restoreCommunityOnline: 'Restauração online',
         restoreCommunityOffline: 'Restauração offline',
-        restoreCommunityPackageFound:
-            'Um pacote offline utilizável da Community Edition foi detectado. A restauração offline está disponível.',
-        restoreCommunityPackageMissing:
-            'Nenhum pacote offline utilizável da Community Edition foi detectado. A restauração offline não está disponível no momento.',
+        restoreCommunityPackageFound: 'O pacote está pronto',
+        restoreCommunityPackageMissing: 'Aguardando o pacote',
+        restoreCommunityPackageChecking: 'Verificando o pacote',
+        restoreCommunityPackageReadyHelper: 'Você pode prosseguir com a restauração offline.',
         restoreCommunityOnlineHelper:
             'O pacote Community Edition da versão atual será baixado automaticamente e os dados exclusivos da Enterprise serão limpos.',
         restoreCommunityOfflineHelper:
             'Coloque em {path} um pacote oficial cuja versão não seja anterior à versão Enterprise atual. A troca será habilitada quando um pacote utilizável for detectado.',
+        restoreCommunityCopyDownloadLink: 'Copiar link de download',
         restoreCommunityConfirm:
             'Após trocar de versão, você poderá entrar na Community Edition com a conta atual de superadministrador da Enterprise. Os dados exclusivos da Enterprise serão removidos durante a troca. Prossiga com cuidado.',
         restoreCommunityStarting:
@@ -3344,6 +3368,7 @@ const message = {
         monitor:
             'Faça upgrade para a edição comercial para acompanhar o status do site em tempo real, tendências de visitantes, origens de tráfego, logs de requisições e mais.',
         alert: 'Faça upgrade para a edição comercial para receber alertas por SMS e consultar os logs de alertas.',
+        vm: 'Atualize para a edição comercial para gerenciar máquinas virtuais, imagens, modelos, redes virtuais e recursos de armazenamento no 1Panel.',
         node: 'Atualize para a edição comercial para gerenciar vários servidores Linux com o 1Panel.',
         nodeApp:
             'Atualize para a edição comercial para atualizar versões de aplicativos multi-nó sem alternar manualmente entre os nós.',
@@ -3990,6 +4015,14 @@ const message = {
         gzipMinLengthHelper: 'Tamanho mínimo para compressão',
         gzipCompLevelHelper: 'Nível de compressão',
         gzipHelper: 'Ativar compressão na transmissão',
+        brotliHelper: 'Ativar compressão brotli, geralmente menor que gzip',
+        brotliCompLevelHelper: 'Taxa de compressão brotli, de 0 a 11',
+        brotliManagedExternallyHelper:
+            'O brotli está configurado manualmente no nginx.conf; o painel mostra os valores em vigor e não os sobrescreve.',
+        brotliManagedUnavailableHelper:
+            'O painel não conseguiu adicionar automaticamente a configuração brotli gerenciada ao nginx.conf; os valores abaixo não terão efeito.',
+        brotliMinLengthHelper: 'Tamanho mínimo da resposta para compressão brotli',
+        brotliSaveFailed: 'Falha ao salvar as configurações brotli; as configurações gzip acima foram aplicadas',
         connections: 'Conexões ativas',
         accepts: 'Accepts',
         handled: 'Handled',
@@ -4150,23 +4183,13 @@ const message = {
             drifted: 'Divergente',
         },
         ruleTargetRequired: 'Informe pelo menos um endereço IP ou uma porta',
-        batchRuleLimit: 'É possível criar no máximo {0} regras por vez',
         resolution_adopt: 'Assumir gerenciamento',
+        plan_duplicate_rules:
+            'Regras duplicadas com condições e ações idênticas não podem ser gerenciadas. Exclua manualmente as regras duplicadas e tente novamente.',
         adoptRuleConfirm: 'Depois disso, o 1Panel poderá manter e excluir esta regra existente. Continuar?',
-        plan_equivalent_external_rule:
-            'Já existe uma regra externa idêntica. Assuma seu gerenciamento sem criar uma duplicata.',
-        plan_multiple_equivalent_external_rules:
-            'Existem várias regras externas idênticas. Selecione uma para gerenciar.',
-        plan_equivalent_managed_rule: 'Uma regra idêntica já é gerenciada pelo 1Panel. Não é necessário duplicá-la.',
+        plan_exact_rule_conflict:
+            'Já existe uma regra com as mesmas condições, mas com uma ação oposta de permitir ou negar.',
         allRulesAlreadyExist: 'Todas as {0} regras verificadas já existem. Não há novas regras para criar.',
-        ruleCheckResult: 'Resultados da verificação de regras',
-        ruleCheckStatus_creatable: 'Pode ser criada',
-        ruleCheckStatus_existing: 'Já existe',
-        ruleCheckStatus_error: 'Erro',
-        ruleCheckExistingHelper: 'Uma regra idêntica já existe e será ignorada.',
-        ruleCheckReadyHelper: 'A verificação foi aprovada. Esta regra pode ser criada.',
-        ruleCheckExternalExists: 'Uma regra externa idêntica já existe e será ignorada automaticamente.',
-        ruleCheckBlockedHelper: 'Regras com erros não podem ser enviadas. Volte, edite-as e verifique novamente.',
         plan_managed_rule_drifted:
             'A regra gerenciada não corresponde ao firewall ativo. Resolva a divergência primeiro.',
         plan_opaque_rule_in_target_scope:
@@ -4175,10 +4198,9 @@ const message = {
         plan_protected_rule: 'Esta regra está protegida e não pode ser assumida, alterada ou excluída.',
         plan_blocked: 'A regra não pode ser aplicada com segurança. Atualize a lista e tente novamente.',
         scopeDefaultMismatch: 'A zona padrão do sistema é {0}; esta página gerencia apenas a zona public.',
-        scopeInactive: 'O escopo gerenciado está inativo. Novas regras podem não afetar o tráfego atual.',
         scopeMissing: 'O escopo gerenciado {0} não existe e será criado com segurança ao aplicar a primeira regra.',
         scopeUnmanagedActive: 'Outros escopos ativos foram detectados: {0}. O 1Panel não modificará suas regras.',
-        scopeRuntimeMismatch: 'As configurações ativa e permanente diferem em: {0}.',
+        scopeRuntimeMismatch: 'As configurações ativa e permanente do firewalld não coincidem. Reinicie o firewall.',
         dockerRestart: 'Operações de firewall exigem reinicialização do serviço Docker',
         firewallHelper: 'Firewall do sistema {0}',
         firewallNotStart: 'O firewall do sistema não está habilitado atualmente. Habilite-o primeiro.',
@@ -4208,28 +4230,10 @@ const message = {
         configuredRules: '{0} regras configuradas',
         addressFamily: 'Versão do IP',
         portOrRange: 'Porta / intervalo',
-        exportAllRules: 'Exportar todas as regras',
         importBackendHelper:
             'As regras importadas são convertidas para o backend atual {0}. As regras de origem não são alteradas.',
-        resetDirectRulesHelper:
-            'Exclua de {0} as cadeias, regras em execução e arquivos persistentes do firewall do 1Panel; as políticas salvas no banco são mantidas',
-        resetWhitelistRulesHelper:
-            'Redefina a configuração personalizada ativa em {0}, restaure os padrões de instalação e desative {0}; as políticas do banco são mantidas e podem ser sincronizadas novamente.',
-        cleanupForwardingBackendHelper:
-            'Redefina as regras de execução de encaminhamento de portas do 1Panel em {0}: exclua todas as regras e cadeias relacionadas e mantenha os dados do banco de dados',
-        cleanupDockerBackendHelper:
-            'Redefina as regras de execução de proteção de portas Docker do 1Panel em {0}: exclua todas as regras e cadeias relacionadas e mantenha os dados do banco de dados',
-        cleanupBeforeBackendSwitch:
-            'O backend atual {0} ainda contém regras de execução do 1Panel. Redefina-o antes de mudar para {1}.',
-        cleanupAction: 'Redefinir',
-        backendSwitchNotice:
-            'Redefina o backend atual antes de trocar o firewall do sistema, o encaminhamento de portas ou a proteção Docker. As políticas do banco são mantidas e podem ser inicializadas ou sincronizadas após a troca.',
-        switchBackendHelper: 'Mudar para {0}?',
-        switchDockerBackendHelper: 'Mudar para {0}? Isso atualizará a configuração e reiniciará o Docker.',
         ruleSyncTitle: 'Sincronizar regras',
         ruleSyncAction: 'Sincronizar regras',
-        ruleSyncHelper:
-            'Sincroniza as regras gerenciadas pelo 1Panel do firewall selecionado para o firewall atual. As regras de origem não são excluídas e regras externas não são incluídas.',
         ruleSyncDatabase: 'Banco de dados do 1Panel',
         ruleSyncDatabaseHelper:
             'Sincroniza e ajusta as regras gerenciadas no firewall atual com base nas regras do banco de dados do 1Panel. As regras ausentes serão adicionadas e as excedentes serão removidas.',
@@ -4238,7 +4242,6 @@ const message = {
             'Sincronizar {1} para corresponder exatamente às {0} regras do banco de dados? {2} regras do destino serão removidas e as ausentes serão adicionadas.',
         ruleSyncSource: 'Fonte da configuração',
         ruleSyncTarget: 'Backend atual',
-        ruleSyncTotal: 'Regras convertidas',
         ruleSyncReady: 'Prontas',
         ruleSyncExisting: 'Existentes',
         ruleSyncRemove: 'A remover',
@@ -4249,26 +4252,16 @@ const message = {
             managedOrderDiffers: 'A ordem das regras gerenciadas difere da sequência do banco de dados.',
             managedOnlyInTarget: 'A regra gerenciada existe apenas no firewall de destino.',
             managedRuntimeCannotRemove: 'A regra ativa gerenciada não pode ser removida com segurança.',
-            managedOrderBlocked:
-                'As regras gerenciadas não podem ser reordenadas através de regras externas, não reconhecidas ou protegidas.',
-            mayBlockManagement: 'A regra pode bloquear a conexão de gerenciamento atual.',
             missingFromTarget: 'A regra não existe no firewall de destino.',
             targetDiffers: 'A regra de destino difere da política do banco de dados.',
             alreadyExistsInTarget: 'A regra já existe no firewall de destino.',
             onlyInTarget: 'A regra existe apenas no firewall de destino.',
             stale: 'O estado da regra está desatualizado. Atualize e tente novamente.',
-            lockoutRisk: 'Esta alteração pode bloquear o acesso de gerenciamento.',
             protectedRule: 'Esta regra protegida do firewall não pode ser modificada.',
+            dockerAcceptReadOnly:
+                'Esta regra ACCEPT é somente leitura e será preservada durante a sincronização das outras regras. Para removê-la, exclua-a manualmente no host.',
             cannotReconcile: 'Não foi possível sincronizar a regra de destino: {0}',
         },
-        ruleSyncConfirm: 'Sincronizar {0} regras de {1} para {2}? O backend de origem não será alterado.',
-        ruleSyncResetSource: 'Redefinir e desativar o firewall de origem {0} após a sincronização',
-        ruleSyncResetSourceHelper:
-            'A origem só será redefinida depois que todas as regras forem sincronizadas com sucesso.',
-        ruleSyncResetSourceBlocked:
-            'Algumas regras não podem ser sincronizadas. Resolva-as antes de redefinir a origem.',
-        ruleSyncResetSourceConfirm:
-            'Sincronizar {0} regras de {1} para {2} e depois redefinir e desativar {1}? Toda a configuração será removida e não poderá ser recuperada.',
         ruleSyncPartial: 'Sincronização concluída: {0} com sucesso, {1} já existiam e {2} falharam.',
         ruleSyncSuccess: 'Sincronização concluída: {0} com sucesso, {1} já existiam e {2} removidas.',
         ruleSyncStatus: {
@@ -4277,6 +4270,21 @@ const message = {
             remove: 'A remover',
             blocked: 'Indisponível',
         },
+        resetDirectRulesHelper:
+            'Exclua de {0} as cadeias, regras em execução e arquivos persistentes do firewall do 1Panel; as políticas salvas no banco são mantidas',
+        resetWhitelistRulesHelper:
+            'Redefina a configuração personalizada ativa em {0}, restaure os padrões de instalação e desative {0}; as políticas do banco são mantidas e podem ser sincronizadas novamente.',
+        cleanupForwardingBackendHelper:
+            'Redefina as regras de execução de encaminhamento de portas do 1Panel em {0}: exclua todas as regras e cadeias relacionadas e mantenha os dados do banco de dados',
+        cleanupDockerBackendHelper:
+            'Redefina as regras de execução de proteção de portas Docker do 1Panel em {0}: exclua todas as regras e cadeias relacionadas e mantenha os dados do banco de dados',
+        cleanupBeforeBackendSwitch:
+            'O backend atual {0} ainda contém regras de execução do 1Panel. Redefina-o antes de mudar para {1}. A redefinição remove apenas as regras de execução; as políticas do banco são mantidas e podem ser inicializadas ou sincronizadas após a troca.',
+        cleanupAction: 'Redefinir',
+        backendSwitchNotice:
+            'Recomenda-se habilitar apenas uma forma de gerenciamento de firewall. Executar vários firewalls ao mesmo tempo pode causar conflitos de regras, estados inconsistentes ou falhas de acesso às portas dos contêineres.',
+        switchBackendHelper: 'Mudar para {0}?',
+        switchDockerBackendHelper: 'Mudar para {0}? Isso atualizará a configuração e reiniciará o Docker.',
         uninstalledStatus: 'Não instalado',
         selectedBackendNotInstalled:
             'O serviço {backend} não foi detectado. Instale-o manualmente pela {library} ou altere o backend do firewall em {settings}.',
@@ -4284,6 +4292,23 @@ const message = {
         partiallyInitialized: 'Parcialmente inicializado',
         dockerGuardHelper:
             'Configure restrições de acesso para as portas publicadas pelos contêineres Docker no host. Portas sem proteção mantêm o acesso padrão do Docker.',
+        dockerTrafficPathMixed:
+            'As portas selecionadas usam caminhos de acesso diferentes. Configure-as separadamente.',
+        dockerTrafficPathUnknown:
+            'Não foi possível determinar o caminho de acesso desta porta. Verifique a rede do Docker e tente novamente.',
+        dockerTrafficPathReason: {
+            nat_inspect_failed:
+                'Não foi possível ler as regras NAT do Docker. Verifique os comandos e as permissões do firewall e atualize a página.',
+            proxy_inspect_failed:
+                'Não foi possível inspecionar os processos docker-proxy. Verifique o acesso às informações dos processos e atualize a página.',
+            nat_chain_unreachable:
+                'Existe uma regra de encaminhamento do Docker para esta porta, mas a cadeia de entrada NAT não está ativa. Verifique as regras do firewall do Docker ou reinicie o Docker e atualize a página.',
+            no_matching_path:
+                'Nenhuma regra de encaminhamento do Docker ativa ou processo proxy foi encontrado para esta porta. Inicie ou reinicie o contêiner e atualize a página. Se o problema continuar, verifique a rede do Docker.',
+        },
+        dockerInputPolicyNotEffective:
+            'O host recebe esta porta diretamente, portanto a regra de proteção da porta do contêiner não se aplica. Configure-a no firewall do host.',
+        dockerInputUseHostFirewall: 'Configure o acesso a esta porta no firewall do host.',
         dockerInputNotProtected:
             'As regras INPUT do host não protegem diretamente esta porta publicada pelo Docker. Clique para abrir a proteção de portas de contêineres.',
         notInitialized: 'Não inicializado',
@@ -4314,9 +4339,7 @@ const message = {
             'As regras selecionadas têm configurações diferentes. Configure-as novamente para substituir todas; uma descrição vazia limpará todas as descrições.',
         effective: 'Em vigor',
         forwardUnsynced: 'Não sincronizado',
-        notEnabled: 'Não habilitado',
         notEffective: 'Sem efeito',
-        dockerGuardStatusEffective: 'A proteção de portas de contêineres {0} está funcionando normalmente',
         dockerGuardStatusReason: {
             command_missing:
                 'O componente de firewall {0} não está disponível e a proteção correspondente não pode ser habilitada. Verifique o firewall do sistema',
@@ -4340,11 +4363,7 @@ const message = {
         forwardPortHelper: 'Suporta intervalos de portas, ex. 8080-8089',
         forwardInboundInterface: 'Interface de Rede de Entrada para Encaminhamento',
         exportHelper: 'Prestes a exportar {0} regras de firewall. Continuar?',
-        importSuccess: '{0} regras importadas com sucesso',
-        importPartialSuccess: 'Importação concluída: {0} sucesso, {1} falha',
         basicStatus: 'O firewall atual não está vinculado. Vincule-o primeiro.',
-        baseIptables: 'Serviço iptables',
-        forwardIptables: 'Serviço de Encaminhamento de Porta iptables',
         initMsg: 'Prestes a inicializar {0}, continuar?',
         initDirectBackendConflictMsg:
             '{1} ainda está vinculado. Se {0} for inicializado, os dois conjuntos de regras ficarão ativos e poderão bloquear o acesso inesperadamente. Continuar?',
@@ -4358,7 +4377,7 @@ const message = {
             'Desvincular - Quando desvinculado, todas as regras de firewall adicionadas se tornarão inválidas. Prossiga com cautela. Confirmar?',
         portWhiteList: 'Lista branca de portas',
         portWhiteListAlter:
-            'Salvar não altera imediatamente as regras atuais do firewall. Novas portas serão abertas na próxima inicialização ou ativação. Para fechar uma porta removida, exclua manualmente a regra existente na lista de regras.',
+            'As alterações entram em vigor ao salvar. As portas adicionadas são liberadas automaticamente; remover uma porta apenas retira sua proteção. Para fechá-la, exclua a regra de permissão na lista de regras.',
         portWhiteListHelper: 'Suporta IPv4/IPv6, TCP/UDP, portas únicas e intervalos como 8000-8100.',
         chain: 'Cadeia',
         sourceIP: 'IP de Origem',
@@ -4378,10 +4397,14 @@ const message = {
             'Esta regra permite que {0} acesse {1}. Excluí-la pode afetar o acesso a vários serviços. Continuar?',
         deleteRiskRulesConfirm:
             'Excluirá {0} regras. {1} regras de liberação podem afetar o acesso aos serviços. Continuar?',
-        editRuleConfirm:
-            'Os seguintes campos serão alterados: {0}. A regra será aplicada e verificada imediatamente. Continuar?',
+        editRuleConfirm: 'Tem certeza de que deseja modificar esta regra?',
     },
     runtime: {
+        importEnv: 'Importar variáveis de ambiente',
+        envImportError: 'Linha {0}: {1}',
+        envInvalidAssignment: 'Era esperada uma atribuição NOME=valor válida',
+        envUnclosedQuote: 'Aspas não fechadas',
+        envUnexpectedText: 'Texto inesperado após as aspas de fechamento',
         runtime: 'Runtime',
         workDir: 'Diretório de trabalho',
         localHelper: 'Para problemas de instalação em ambiente local e uso em ambiente offline, consulte ',
@@ -6409,6 +6432,14 @@ const message = {
             nodeDashTitle4: 'Gerenciamento de Tarefas Agendadas',
             nodeDashContent4:
                 'Gerenciamento unificado de tarefas agendadas multi-nó, suporta monitoramento de status, início/parada rápida e execução manual por acionamento',
+            vmTitle1: 'Máquinas virtuais',
+            vmContent1: 'Crie e gerencie máquinas virtuais, consulte seu estado e ajuste a alocação de recursos.',
+            vmTitle2: 'Imagens e modelos',
+            vmContent2: 'Gerencie imagens ISO e modelos para simplificar a criação de máquinas virtuais.',
+            vmTitle3: 'Redes virtuais',
+            vmContent3: 'Gerencie redes virtuais e configure as conexões de rede das máquinas virtuais.',
+            vmTitle4: 'Pools de armazenamento',
+            vmContent4: 'Gerencie pools de armazenamento e aloque recursos para as máquinas virtuais.',
             nodeTitle1: 'Adição de Nó com Um Clique',
             nodeContent1: 'Integre rapidamente vários nós de servidor',
             nodeTitle2: 'Atualização em Lote',
@@ -6854,8 +6885,57 @@ const message = {
             barkConfigHelper: 'Configuração de notificação de alerta Bark',
             webhookName: 'Nome do bot',
             webhookUrl: 'URL do Webhook',
-            alertConfigProHelper:
-                'A edição comercial também oferece suporte a alertas via WeCom, DingTalk, Feishu e SMS.',
+            custom: 'Webhook',
+            webhookPreset: 'Predefinição',
+            genericJsonPreset: 'JSON genérico',
+            customPreset: 'Personalizado',
+            webhookUrlSecretHelper: 'A URL do Webhook é armazenada criptografada e pode ser vista e editada aqui',
+            webhookPublicAddressHelper:
+                'Somente endereços HTTP/HTTPS acessíveis publicamente são aceitos; endereços locais, privados e reservados são bloqueados',
+            customWebhookRecoveryRequired:
+                'Esta configuração é inválida ou veio de uma versão anterior. Informe novamente a URL do Webhook e os headers secretos necessários e salve.',
+            clearSecret: 'Limpar',
+            keepSecret: 'Manter inalterado',
+            secretCleared: 'Este segredo será limpo ao salvar',
+            bodyType: 'Tipo do Body',
+            bodyTemplate: 'Modelo do Body',
+            formFieldName: 'Nome do campo',
+            formFieldValue: 'Valor do campo',
+            addFormField: 'Adicionar campo',
+            webhookAdvanced: 'Avançado',
+            headers: 'Headers',
+            headerName: 'Nome do Header',
+            headerValue: 'Valor do Header',
+            secretValue: 'Valor secreto',
+            addHeader: 'Adicionar Header',
+            templateVariables: 'Variáveis do modelo',
+            templateVariableTitle: 'Título do alerta',
+            templateVariableMessage: 'Conteúdo do alerta',
+            templateVariableType: 'Tipo de alerta',
+            templateVariableNodeName: 'Nome do nó',
+            templateVariableTimestamp: 'Hora do evento',
+            templateVariablesHelper:
+                'title=título do alerta, message=conteúdo, type=tipo, nodeName=nome do nó, timestamp=hora do evento. Clique para inserir a variável no Body.',
+            testResultStale: 'A configuração foi alterada; o resultado do teste anterior não é mais válido',
+            alertConfigChanged: 'A configuração foi atualizada. Atualize a página e tente novamente.',
+            presetOverwriteHelper: 'Trocar a predefinição substituirá a configuração atual do Body. Continuar?',
+            customWebhookValidation: {
+                displayNameRequired: 'Informe um nome de exibição',
+                urlRequired: 'Informe uma URL de Webhook',
+                urlInvalid: 'A URL do Webhook deve ser uma URL HTTP ou HTTPS válida',
+                bodyRequired: 'Configure o Body da solicitação',
+                jsonInvalid: 'O modelo JSON do Body é inválido',
+                formFieldRequired: 'Os nomes dos campos Form são obrigatórios',
+                formFieldDuplicate: 'Os nomes dos campos Form devem ser únicos',
+                headerRequired: 'Os nomes dos Headers são obrigatórios',
+                headerInvalid: 'O nome do Header é inválido',
+                headerDuplicate: 'Os nomes dos Headers devem ser únicos',
+                headerReserved: 'Este Header é gerenciado pelo sistema e não pode ser personalizado',
+                headerMustBeSecret: 'Headers de autenticação ou credenciais devem ser marcados como valores secretos',
+                templateVariableInvalid: 'O Body contém uma variável de modelo não compatível',
+                secretRequired: 'Informe um segredo ou escolha Manter inalterado ou Limpar',
+            },
+            alertConfigProHelper: 'A edição comercial adiciona mais canais de notificação.',
         },
         theme: {
             lingXiaGold: 'LXware Gold',
@@ -6908,6 +6988,8 @@ const message = {
             submitSuccess: 'Tarefa de sincronização enviada com sucesso.',
         },
         vm: {
+            countLimitHelper:
+                'A edição Professional permite criar até {0} máquinas virtuais. A edição Enterprise não limita a quantidade.',
             vm: 'Máquina virtual',
             title: 'Gerenciamento de Máquinas Virtuais',
             healthCheck: 'Verificação de integridade',
@@ -6994,6 +7076,8 @@ const message = {
                 },
             },
             dependencies: 'Dependências',
+            architectureUnsupported:
+                'A arquitetura atual do sistema, {0}, não é compatível. Os recursos de VM aceitam apenas AMD64 e ARM64.',
             dependencyPurpose: 'Finalidade',
             dependencyPurposeMap: {
                 libvirt:
