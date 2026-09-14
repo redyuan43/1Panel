@@ -1,0 +1,12 @@
+#costs-view .cost-filters { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+#costs-view .cost-filters label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+#costs-view .cost-filters input, #costs-view .cost-filters select { max-width: 220px; min-height: 34px; }
+#costs-view .cost-filters input[type="date"] { max-width: 155px; }
+#costs-view .metric-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+#costs-view .section-block { margin-top: 20px; }
+#costs-view .cost-note { color: var(--text-secondary, #657184); font-size: 13px; line-height: 1.7; }
+#costs-view code.request-id-full { display: block; overflow-wrap: anywhere; }
+#costs-view .cost-pagination { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+#costs-view #cost-detail { padding: 20px; border: 1px solid var(--border, #d7dce4); }
+#costs-view .cost-import { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+@media(max-width: 700px) { #costs-view .metric-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

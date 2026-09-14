@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 import asyncio
@@ -9,6 +9,8 @@ import sqlite3
 from urllib.parse import quote
 from .instance_status import classify_instances
 from .cache_audit import CacheAudit
+from .cost_control import install_cost_routes
+from .costs import backfill_costs
 from .content_audit import ArchiveReader
 import time
 from typing import Any, AsyncIterator
@@ -66,9 +68,17 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         owned = runtime is None
         app.state.runtime = runtime or build_runtime()
         await app.state.runtime.start()
-        yield
-        if owned:
-            await app.state.runtime.close()
+        cost_path = getattr(app.state.runtime.route_traces, "database_path", None)
+        backfill = asyncio.create_task(backfill_costs(cost_path)) if cost_path else None
+        try:
+            yield
+        finally:
+            if backfill is not None:
+                backfill.cancel()
+                with suppress(asyncio.CancelledError):
+                    await backfill
+            if owned:
+                await app.state.runtime.close()
 
     app = FastAPI(
         title="1Panel AI Router Control",
@@ -81,6 +91,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     app.include_router(media_router(admin=True))
     app.include_router(lan_https_router)
     install_h3_mcp(app)
+    install_cost_routes(app, _authorized_runtime)
 
     @app.get("/media")
     async def media_console() -> FileResponse:

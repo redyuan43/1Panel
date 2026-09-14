@@ -1,0 +1,10 @@
+{
+  "currency": "CNY",
+  "unit": "nano_cny_per_token",
+  "source": "Zhipu September 2026 bill; verified through 2026-09-13",
+  "versions": [
+    {"id": "glm-flash-20260902-promo", "model": "glm-5.3-flash", "since": "2026-09-02T00:00:00+08:00", "until": "2026-09-10T00:00:00+08:00", "input": 400, "cached": 115, "output": 1400},
+    {"id": "glm-flash-20260910-standard", "model": "glm-5.3-flash", "since": "2026-09-10T00:00:00+08:00", "until": null, "input": 800, "cached": 230, "output": 2800},
+    {"id": "glm-5.3-20260909-standard", "model": "glm-5.3", "since": "2026-09-09T00:00:00+08:00", "until": null, "input": 8000, "cached": 2000, "output": 28000}
+  ]
+}

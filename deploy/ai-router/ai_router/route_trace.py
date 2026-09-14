@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -13,6 +14,7 @@ from typing import Any
 
 from .config import Registry, Settings
 from .cache_audit import initialize as initialize_cache_audit
+from .costs import initialize as initialize_costs, consume_trace as record_cost_trace
 
 
 SCHEMA_VERSION = 3
@@ -1388,6 +1390,7 @@ class RouteTraceStore:
     def _initialize(self) -> None:
         with self._connect(initialize=True) as connection:
             initialize_cache_audit(connection)
+            initialize_costs(connection)
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS route_traces (
@@ -1548,6 +1551,17 @@ class RouteTraceStore:
                     encoded,
                 ),
             )
+
+            # Accounting is repairable from the trace; never fail an inference
+            # because an auxiliary accounting write failed.
+            connection.execute("SAVEPOINT cost_accounting")
+            try:
+                record_cost_trace(connection, payload)
+                connection.execute("RELEASE cost_accounting")
+            except Exception:
+                connection.execute("ROLLBACK TO cost_accounting")
+                connection.execute("RELEASE cost_accounting")
+                logging.getLogger(__name__).exception("cost accounting unavailable for request %s", payload["request_id"])
 
     def _get(self, request_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:

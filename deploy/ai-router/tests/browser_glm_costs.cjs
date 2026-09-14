@@ -1,0 +1,74 @@
+// Only use the isolated fixture; no production UI mutations or inference.
+const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+const assert=require('node:assert/strict');
+const fs=require('node:fs/promises');
+const path=require('node:path');
+const base=process.env.UI_PREVIEW_URL||'http://127.0.0.1:14819';
+const output=process.env.UI_TEST_OUTPUT||path.resolve('browser-artifacts/glm-costs');
+(async()=>{
+  assert.equal(new URL(base).hostname,'127.0.0.1');
+  assert.equal((await fetch(base+'/__ui_preview__').then(r=>r.json())).isolated,true);
+  await fs.mkdir(output,{recursive:true});
+  const browser=await chromium.launch({headless:true,...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE?{executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}:{})});
+  const page=await browser.newPage({viewport:{width:1600,height:1100}});
+  const errors=[],checks=[];
+  page.on('pageerror',e=>errors.push(String(e)));
+  await page.addInitScript(()=>sessionStorage.setItem('ai-router-admin-key','ui-preview-only'));
+  try {
+    await page.goto(base); await page.waitForFunction(()=>state.dashboard&&state.settings);
+    await page.locator('[data-view="costs"]').click();
+    await page.waitForFunction(()=>document.querySelectorAll('#cost-summary .metric').length===6);
+    assert.match(await page.locator('#cost-coverage').innerText(),/40 个请求/);
+    assert.equal(await page.locator('#cost-table tr').count(),30);
+    assert.match(await page.locator('#cost-table').innerText(),/待检查消耗/);
+    assert.doesNotMatch(await page.locator('#cost-table').innerText(),/已确认.*浪费/);
+    checks.push('cost summary and high consumption remain separate from confirmed waste');
+    await page.locator('#cost-next').click();
+    await page.waitForFunction(()=>document.querySelectorAll('#cost-table tr').length===10);
+    assert.match(await page.locator('#cost-table').innerText(),/进行中/);
+    assert.match(await page.locator('#cost-table').innerText(),/待核对/);
+    await page.locator('[data-cost-request="cost-preview-pending"]').click();
+    await page.waitForFunction(()=>document.querySelector('#cost-detail').textContent.includes('进行中'));
+    await fetch(base+'/__complete__',{method:'POST'});
+    await page.waitForFunction(()=>document.querySelector('#cost-detail').textContent.includes('实测用量估算'),{},{timeout:12000});
+    checks.push('5-second refresh updates final usage without showing unknown as zero');
+    await page.locator('#auto-refresh').uncheck();
+    await page.locator('#cost-model').selectOption('glm-5.3');
+    await page.waitForFunction(()=>document.querySelectorAll('#cost-table tr').length===3);
+    await page.locator('#cost-model').selectOption('glm-5.3-flash');
+    await page.locator('#cost-conversation').fill('cost-conversation-a');
+    await page.locator('#cost-conversation').press('Tab');
+    await page.waitForFunction(()=>document.querySelector('#cost-page').textContent.includes('35 次'));
+    await page.locator('#cost-client').fill('cost-client-b');await page.locator('#cost-client').press('Tab');
+    await page.waitForFunction(()=>document.querySelector('#cost-table').textContent.includes('没有符合'));
+    await page.locator('#cost-client').fill('');await page.locator('#cost-client').press('Tab');
+    await page.locator('#cost-conversation').fill('');await page.locator('#cost-conversation').press('Tab');
+    await page.locator('#cost-from').fill('2026-09-08');await page.locator('#cost-from').press('Tab');
+    await page.locator('#cost-to').fill('2026-09-08');await page.locator('#cost-to').press('Tab');
+    await page.waitForFunction(()=>document.querySelector('#cost-table').textContent.includes('没有符合'));
+    await page.locator('#cost-from').fill('2026-09-09');await page.locator('#cost-from').press('Tab');
+    await page.locator('#cost-to').fill('2026-09-09');await page.locator('#cost-to').press('Tab');
+    await page.waitForFunction(()=>document.querySelector('#cost-page').textContent.includes('35 次'));
+    checks.push('model, client, conversation, date filters and pagination');
+    assert.ok(process.env.UI_BILL_FILE,'UI_BILL_FILE must refer to the synthetic fixture');
+    for (const expected of ['新增 4 行','新增 0 行']) {
+      await page.locator('#cost-bill-file').setInputFiles(process.env.UI_BILL_FILE);
+      await page.locator('#cost-bill-import').click();
+      await page.waitForFunction(text=>document.querySelector('#notice').textContent.includes(text),expected);
+    }
+    assert.match(await page.locator('#cost-bill-table').innerText(),/-0\.00001/);
+    checks.push('XLSX import, idempotency, negative adjustment and daily reconciliation');
+    await page.locator('#cost-table [data-cost-request]').first().click();
+    await page.waitForFunction(()=>document.querySelector('#cost-detail').textContent.includes('价格版本'));
+    assert.match(await page.locator('#cost-detail').innerText(),/cost-preview-/);
+    await page.screenshot({path:path.join(output,'costs-desktop.png'),fullPage:true});
+    await page.reload();await page.waitForFunction(()=>state.view==='costs'&&document.querySelectorAll('#cost-summary .metric').length===6);
+    await page.setViewportSize({width:390,height:844});
+    await page.screenshot({path:path.join(output,'costs-mobile.png'),fullPage:true});
+    assert.ok(await page.locator('#cost-model').isVisible());
+    checks.push('saved view reload and mobile layout');
+    assert.deepEqual(errors,[]);
+    await fs.writeFile(path.join(output,'result.json'),JSON.stringify({passed:true,checks,errors},null,2));
+    process.stdout.write(JSON.stringify({passed:true,checks}));
+  } finally {await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1);});

@@ -4333,6 +4333,7 @@ async def _audit(
             evidence={
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "output_tokens_measured": token_count(measured_output) is not None,
                 "cached_prompt_tokens": cached_prompt_tokens,
                 "cache_measurement_source": cache_measurement_source,
                 "backend_usage": backend_usage,

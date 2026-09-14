@@ -35,13 +35,14 @@ const state = ViewPreferences.state("console", {
   selectedClientId: null,
   view: "dashboard",
   timer: null,
-}, {view:["dashboard","nodes","requests","audit","clients","cache-deployments","settings"], routeGraphMode:["simple","detailed"], selectedTraceId:"id", selectedTraceNodeId:"id", selectedCacheDeploymentId:"id", selectedCacheLayerId:"id", selectedCacheDeploymentTab:"string", cacheDeploymentAnomaliesOnly:"boolean", selectedClientId:"id"});
+}, {view:["dashboard","nodes","requests","audit","costs","clients","cache-deployments","settings"], routeGraphMode:["simple","detailed"], selectedTraceId:"id", selectedTraceNodeId:"id", selectedCacheDeploymentId:"id", selectedCacheLayerId:"id", selectedCacheDeploymentTab:"string", cacheDeploymentAnomaliesOnly:"boolean", selectedClientId:"id"});
 
 const viewTitles = {
   dashboard: "运行总览",
   nodes: "端点管理",
   requests: "请求记录",
   audit: "路由审计",
+  costs: "费用与降本",
   clients: "客户端账号",
   "cache-deployments": "缓存部署",
   settings: "策略设置",
@@ -1987,6 +1988,7 @@ function requestStandaloneRow(item) {
       <td>
         <code class="request-id-full">${escapeHtml(item.request_id)}</code>
         <span class="table-secondary">无会话 ID</span>
+        ${costRequestLink(item)}
       </td>
       <td><strong class="table-primary">1 / 1</strong></td>
       <td>
@@ -2090,6 +2092,7 @@ function requestRoundRow(item) {
         <span class="table-secondary request-id-full">分支 ${escapeHtml(item.branch_id || "—")}</span>
         <span class="table-secondary request-id-full">父分支 ${escapeHtml(item.parent_branch_id || "—")}</span>
         <span class="table-secondary">${requestLineageLabel(item)}</span>
+        ${costRequestLink(item)}
       </td>
       <td><strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong></td>
       <td>
@@ -2725,7 +2728,7 @@ function renderTraceDetail(preserveReviews = {}) {
   byId("trace-detail-summary").textContent =
     trace.excerpt?.text || "此请求没有可显示的文本摘要。";
   byId("trace-detail-meta").innerHTML = [
-    `请求 <code>${escapeHtml(trace.request_id)}</code>`,
+    `请求 <code>${escapeHtml(trace.request_id)}</code> ${costRequestLink(trace)}`,
     ...(trace.client_request_id
       ? [`客户端请求 <code>${escapeHtml(trace.client_request_id)}</code>`]
       : []),
@@ -4611,6 +4614,7 @@ function switchView(view) {
     item.classList.toggle("active", item.id === `${view}-view`);
   });
   byId("view-title").textContent = viewTitles[view];
+  if (view === "costs" && typeof loadCosts === "function") void loadCosts();
   if (view === "requests") void loadRequestTraces();
   if (view === "audit") return cacheView.view === "overview" ? loadCacheOverview() : loadRouteAudit();
   if (view === "clients") loadClients(true);
@@ -4626,6 +4630,10 @@ function startPolling() {
       if (state.view === "clients") loadClients(true);
       if (state.view === "cache-deployments") {
         void loadCacheDeployments(true);
+      }
+      if (state.view === "costs") {
+        void loadCosts(true);
+        if (costsState.requestId) void showCostDetail(costsState.requestId, "cost-detail", true);
       }
       if (state.view === "requests") loadRequestTraces(true);
       if (state.view === "audit") {

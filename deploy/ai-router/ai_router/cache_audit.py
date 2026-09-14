@@ -23,6 +23,7 @@ def initialize(connection):
             request_id TEXT PRIMARY KEY, scope TEXT NOT NULL, prefix_hash TEXT NOT NULL,
             message_count INTEGER NOT NULL, created_at REAL NOT NULL, version INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS workbuddy_history_scope ON workbuddy_history(scope,created_at);
+        CREATE INDEX IF NOT EXISTS workbuddy_history_prefix ON workbuddy_history(scope,version,prefix_hash,created_at);
         CREATE TABLE IF NOT EXISTS prefix_breaks (
             request_id TEXT NOT NULL, attempt INTEGER NOT NULL,
             created_at REAL NOT NULL, payload_json TEXT NOT NULL,

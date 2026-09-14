@@ -174,10 +174,25 @@ class WorkBuddyHistory:
         hashes = chain(bare)
         with closing(sqlite3.connect(self.database_path, timeout=2)) as db:
             # Small metadata-only index; no archive scans on the request path.
-            rows = db.execute("SELECT request_id,prefix_hash,message_count FROM workbuddy_history WHERE scope=? AND created_at>? AND version=? ORDER BY message_count DESC,created_at DESC LIMIT 256", (self.scope(client_id, raw.get("model")), time.time()-86400, VERSION)).fetchall()
-        candidates = [row for row in rows if 2 <= row[2] <= len(hashes) and hashes[row[2]-1] == row[1]]
+            # Filter by the actual prefix before limiting results. A busy
+            # account's long conversations must not hide a short exact match.
+            rows = []
+            for offset in range(1, len(hashes), 200):
+                batch = hashes[offset:offset + 200]
+                marks = ",".join("?" for _ in batch)
+                rows.extend(db.execute(
+                    "SELECT request_id,prefix_hash,message_count,created_at "
+                    "FROM workbuddy_history WHERE scope=? AND created_at>? AND version=? "
+                    f"AND prefix_hash IN ({marks}) "
+                    "ORDER BY message_count DESC,created_at DESC,request_id DESC LIMIT 3",
+                    (self.scope(client_id, raw.get("model")), time.time()-86400, VERSION, *batch),
+                ).fetchall())
+        candidates = sorted(
+            (row for row in rows if 2 <= row[2] <= len(hashes) and hashes[row[2]-1] == row[1]),
+            key=lambda row: (row[2], row[3], row[0]), reverse=True,
+        )
         reader = None
-        for request_id, _, _ in candidates[:3]:
+        for request_id, _, _, _ in candidates[:3]:
             reader = reader or self.reader()
             archived = reader.read(request_id)
             bodies = stage_bodies(archived)

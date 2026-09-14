@@ -7,6 +7,7 @@
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/assets/style.css">
     <link rel="stylesheet" href="/assets/routing-modes.css">
+    <link rel="stylesheet" href="/assets/costs.css">
   </head>
   <body>
     <header class="app-header">
@@ -34,6 +35,7 @@
       <button class="tab" type="button" data-view="nodes">端点管理</button>
       <button class="tab" type="button" data-view="requests">请求记录</button>
       <button class="tab" type="button" data-view="audit">路由审计</button>
+      <button class="tab" type="button" data-view="costs">费用与降本</button>
       <button class="tab" type="button" data-view="clients">客户端账号</button>
       <a class="tab" href="/lan-https">局域网 HTTPS</a>
       <a class="tab" href="/media">媒体任务</a>
@@ -57,6 +59,35 @@
       </div>
 
       <p id="notice" class="notice" role="status"></p>
+
+      <section id="costs-view" class="view">
+        <p class="cost-note">GLM-5.3 / GLM-5.3-Flash · 人民币用量估算。请求结束后更新；缺少完整用量的尝试显示待核对。官方实扣与减免通过账单对账。</p>
+        <div class="cost-filters">
+          <label>开始日期（北京时间）<input id="cost-from" type="date"></label>
+          <label>结束日期（包含当天）<input id="cost-to" type="date"></label>
+          <label>模型<select id="cost-model"><option value="">全部 GLM</option><option value="glm-5.3">GLM-5.3</option><option value="glm-5.3-flash">GLM-5.3-Flash</option></select></label>
+          <label>客户端<input id="cost-client" placeholder="客户端 ID"></label>
+          <label>会话<input id="cost-conversation" placeholder="完整会话 ID"></label>
+          <label>请求用量状态<select id="cost-measurement"><option value="">全部状态</option><option value="measured">实测用量估算</option><option value="unknown">待核对</option><option value="pending">进行中</option></select></label>
+          <label>排序<select id="cost-sort"><option value="cost">费用从高到低</option><option value="time">最近调用优先</option></select></label>
+        </div>
+        <div id="cost-summary" class="metric-strip" aria-label="GLM 费用指标"></div>
+        <p id="cost-composition" class="cost-note"></p><p id="cost-coverage" class="cost-note"></p>
+        <section class="section-block"><div class="section-heading"><h3>请求费用与消耗线索</h3></div>
+          <p class="cost-note">缓存折扣节省＝命中 Token 相对普通输入价格的差额，并不代表减少了 Token。长输出、首次请求和正常新增内容需要结合任务检查。</p>
+          <div class="table-wrap"><table><thead><tr><th>时间</th><th>完整请求 ID / 尝试</th><th>实际模型 / 状态</th><th>总输入 / 缓存 / 输出 Token</th><th>费用估算</th><th>消耗证据</th></tr></thead><tbody id="cost-table"></tbody></table></div>
+          <div class="cost-pagination"><button id="cost-prev" class="secondary" type="button">上一页</button><span id="cost-page"></span><button id="cost-next" class="secondary" type="button">下一页</button></div>
+        </section>
+        <section id="cost-detail" class="section-block" hidden aria-live="polite"></section>
+        <section class="section-block"><div class="section-heading"><h3>高成本会话</h3></div><div class="table-wrap"><table><thead><tr><th>会话 ID</th><th>客户端</th><th>请求 / 尝试</th><th>估算费用</th><th>待核对尝试</th></tr></thead><tbody id="cost-conversations"></tbody></table></div></section>
+        <section class="section-block"><div class="section-heading"><h3>官方账单日级对账</h3></div>
+          <p class="cost-note">按北京时间和模型汇总，覆盖选定日期；不应用客户端和会话筛选。差额＝官方结算净额－Router 已知估算。跨日调用、未经过 Router 的调用及用量缺失都可能造成差额；日汇总账单无法匹配到单个请求。</p>
+          <div class="cost-import"><label>智谱费用明细 XLSX <input id="cost-bill-file" type="file" accept=".xlsx"></label><button id="cost-bill-import" type="button">导入账单</button></div>
+          <p class="cost-note">仅保存日期、模型、账单标识和计费字段；不保存原文件、API Key 或手机号。重复账单自动跳过。</p>
+          <div class="table-wrap"><table><thead><tr><th>日期</th><th>模型</th><th>Router 估算</th><th>官方费用</th><th>减免调整</th><th>结算净额</th><th>差额 / 完整性</th></tr></thead><tbody id="cost-bill-table"></tbody></table></div>
+        </section>
+        <section class="section-block"><div class="section-heading"><h3>账单验证的价格版本</h3></div><p class="cost-note">单位：元 / 百万 Token，顺序为普通输入 / 缓存输入 / 输出。按上游尝试开始时间选价，实际结算以导入账单为准。</p><div class="table-wrap"><table><thead><tr><th>模型</th><th>生效区间（北京时间）</th><th>单价</th></tr></thead><tbody id="cost-prices"></tbody></table></div></section>
+      </section>
 
       <section id="dashboard-view" class="view active">
         <div id="summary" class="metric-strip" aria-label="运行指标"></div>
@@ -1520,5 +1551,6 @@
     <script src="/assets/cache-audit.js"></script>
     <script src="/assets/routing-modes.js"></script>
     <script src="/assets/app.js"></script>
+    <script src="/assets/costs.js"></script>
   </body>
 </html>
