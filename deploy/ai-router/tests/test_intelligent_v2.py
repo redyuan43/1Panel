@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -830,7 +831,13 @@ def test_deepseek_tool_history_is_rejected_before_upstream(
     monkeypatch,
 ) -> None:
     registry = v2_registry(tmp_path)
-    endpoint = registry.by_id("cloud-deepseek-v4-flash")
+    endpoint = replace(
+        registry.by_id("cloud-deepseek-v4-flash"),
+        metadata={
+            **registry.by_id("cloud-deepseek-v4-flash").metadata,
+            "history_reasoning_required": True,
+        },
+    )
     assert endpoint is not None
     monkeypatch.setenv(
         "AI_ROUTER_STATE_KEY",
@@ -920,7 +927,13 @@ def test_deepseek_tool_history_still_rejected_after_compaction(
     monkeypatch,
 ) -> None:
     registry = v2_registry(tmp_path)
-    endpoint = registry.by_id("cloud-deepseek-v4-flash")
+    endpoint = replace(
+        registry.by_id("cloud-deepseek-v4-flash"),
+        metadata={
+            **registry.by_id("cloud-deepseek-v4-flash").metadata,
+            "history_reasoning_required": True,
+        },
+    )
     assert endpoint is not None
     monkeypatch.setenv(
         "AI_ROUTER_STATE_KEY",
@@ -1018,6 +1031,98 @@ def test_deepseek_tool_history_still_rejected_after_compaction(
                 allow_compaction=True,
             )
         )
+    run(runtime.close())
+
+
+def test_deepseek_tool_history_passes_without_reasoning_flag(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    # Live probes (2026-09-11) show deepseek-v4-flash and deepseek-v4-pro
+    # accept tool transactions with missing or empty reasoning_content, so
+    # the preflight must not block migration unless the endpoint explicitly
+    # declares history_reasoning_required.
+    registry = v2_registry(tmp_path)
+    endpoint = registry.by_id("cloud-deepseek-v4-flash")
+    assert endpoint is not None
+    monkeypatch.setenv(
+        "AI_ROUTER_STATE_KEY",
+        Fernet.generate_key().decode(),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_LITELLM_MASTER_KEY",
+        "internal-key",
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "audit.jsonl"),
+    )
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(tmp_path / "route-traces.sqlite3"),
+    )
+    runtime = build_runtime(
+        settings=v2_settings(tmp_path),
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    body = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "search",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+                "codex_reasoning_items": [
+                    {
+                        "type": "reasoning",
+                        "encrypted_content": "private",
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "result",
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    }
+    assert deepseek_history_requires_migration(body, "chat")
+    decision = RouteDecision(
+        endpoint=endpoint,
+        requested_model="auto",
+        task="general",
+        prompt_tokens=100,
+        output_reserve_tokens=65536,
+        reason="remote_profile_fallback",
+        affinity="new",
+        score=1,
+        strategy_version="intelligent_v2",
+        route_profile="general",
+        context_required=65636,
+    )
+    routed, capsule = run(
+        _prepare_routed_body(
+            runtime,
+            body,
+            api_kind="chat",
+            decision=decision,
+            request_id="history-preflight-default",
+            allow_compaction=False,
+        )
+    )
+    assert capsule is None
+    assert routed["messages"][0]["tool_calls"][0]["id"] == "call_1"
     run(runtime.close())
 
 

@@ -79,7 +79,8 @@ def test_lmcache_kv_transfer_config_uses_external_connector() -> None:
     }
 
 
-def test_vllm_health_exposes_gpu_and_lmcache_metrics() -> None:
+@pytest.mark.parametrize("registrations,active", [(2, False), (4, True)])
+def test_vllm_health_exposes_gpu_and_lmcache_metrics(registrations, active) -> None:
     endpoint = Registry(ROOT / "config/registry.yaml").by_id(
         "ai-qwen38-27b"
     )
@@ -116,9 +117,9 @@ def test_vllm_health_exposes_gpu_and_lmcache_metrics() -> None:
                     "instance_id": "lmcache-test",
                     "engine_type": "MPCacheServer",
                     "chunk_size": 1600,
-                    "registered_gpu_ids": [0, 1],
-                    "active_sessions": 2,
-                    "cache_context_meta": {"0": {}, "1": {}},
+                    "registered_gpu_ids": list(range(registrations)),
+                    "active_sessions": registrations,
+                    "cache_context_meta": {str(index): {} for index in range(registrations)},
                     "storage_manager": {
                         "l1_manager": {
                             "memory_used_bytes": 32 << 30,
@@ -165,9 +166,9 @@ def test_vllm_health_exposes_gpu_and_lmcache_metrics() -> None:
     assert status.detail["prompt_tokens_external_transfer"] == 28000
     lmcache = status.detail["lmcache"]
     assert lmcache["healthy"] is True
-    assert lmcache["connector_active"] is True
-    assert lmcache["registered_count"] == 2
-    assert lmcache["expected_registrations"] == 2
+    assert lmcache["connector_active"] is active
+    assert lmcache["registered_count"] == registrations
+    assert lmcache["expected_registrations"] == 4
     assert lmcache["chunk_size"] == 1600
     assert lmcache["memory_total_bytes"] == 80 << 30
     assert lmcache["lookup_hit_tokens"] == 28000
@@ -204,7 +205,8 @@ def test_lmcache_ui_and_service_contracts_are_present() -> None:
     assert "--supported-transfer-mode lmcache_driven" in lmcache_runner
     assert "--worker-registration-grace-seconds 1800" in lmcache_runner
     assert "--runtime nvidia" in lmcache_runner
-    assert "-e CUDA_VISIBLE_DEVICES=0,1" in lmcache_runner
+    assert '-e CUDA_VISIBLE_DEVICES="$cuda_visible_devices"' in lmcache_runner
+    assert 'cuda_visible_devices="$(seq -s, 0 "$((gpu_count - 1))")"' in lmcache_runner
     assert '--cpuset-cpus "$numa_cpu_list"' in lmcache_runner
     assert '--cpuset-mems "$numa_node"' in lmcache_runner
     assert 'NUMBA_CACHE_DIR="$NUMBA_CACHE_DIR"' in lmcache_runner

@@ -388,11 +388,20 @@ def test_workbuddy_api_normalizes_continuations_and_audits_only_metadata(environ
     output = forwarded[0]
     assert output["messages"][2:] == tail
     assert output["messages"][1]["content"].endswith("PRIVATE_USER_SENTINEL")
-    assert "PRIVATE_MEMORY_SENTINEL" in output["messages"][1]["content"]
-    assert "PRIVATE_CATALOG_SENTINEL" in output["messages"][1]["content"]
-    assert "PRIVATE_MEMORY_SENTINEL" not in output["messages"][0]["content"]
-    assert "PRIVATE_CATALOG_SENTINEL" not in json.dumps(output["tools"])
-    assert [t["function"]["parameters"] for t in output["tools"]] == [t["function"]["parameters"] for t in before["tools"]]
+    if tail:
+        # No verified prior snapshot: preserve the caller's complete history
+        # instead of relocating dynamic content across an existing turn.
+        assert output["messages"] == before["messages"]
+        assert output["tools"] == sorted(before["tools"], key=lambda tool: tool["function"]["name"])
+    else:
+        assert "PRIVATE_MEMORY_SENTINEL" in output["messages"][1]["content"]
+        assert "PRIVATE_CATALOG_SENTINEL" in output["messages"][1]["content"]
+        assert "PRIVATE_MEMORY_SENTINEL" not in output["messages"][0]["content"]
+        assert "PRIVATE_CATALOG_SENTINEL" not in json.dumps(output["tools"])
+    # Tool serialization sorts names, but schemas are bound to their name,
+    # not to the previous array position.
+    assert {t["function"]["name"]: t["function"]["parameters"] for t in output["tools"]} == {
+        t["function"]["name"]: t["function"]["parameters"] for t in before["tools"]}
     assert body == before
     audit_text = audit_path.read_text()
     moves = [json.loads(line) for line in audit_text.splitlines() if json.loads(line).get("event") == "workbuddy_dynamic_context_moved"]
@@ -400,4 +409,7 @@ def test_workbuddy_api_normalizes_continuations_and_audits_only_metadata(environ
     assert moves[0]["moved"] and moves[0]["target_user_index"] == 1
     assert len(moves[0]["stable_prefix_sha256"]) == 64
     assert moves[0]["skip_reason"] is None
+    history = [json.loads(line) for line in audit_text.splitlines() if json.loads(line).get("event") == "workbuddy_history"]
+    assert len(history) == 1 and history[0]["association"] == "unconfirmed"
+    assert bool(history[0].get("reorder_bypassed")) == bool(tail)
     assert "PRIVATE_" not in audit_text

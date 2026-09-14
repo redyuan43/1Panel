@@ -9,6 +9,7 @@ import sqlite3
 import time
 from collections import Counter
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -107,6 +108,7 @@ from ai_router.types import (
     RouteDecision,
 )
 from ai_router.types import Endpoint
+from ai_router.types import DeploymentProfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -382,12 +384,37 @@ def pilot_manifest() -> dict:
     }
 
 
+def ai_pool_registry() -> Registry:
+    """Explicit legacy pool fixture, independent of the deployed vLLM layout."""
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    profiles = {}
+    for worker in six_ai_workers():
+        profiles[worker["profile_id"]] = DeploymentProfile(
+            id=worker["profile_id"], tiers=(worker["tier"],), modalities=("text", "image"),
+            context_size=worker["context_size"], safe_context_tokens=worker["safe_context_tokens"],
+            cache_type_k=worker["cache_type_k"], cache_type_v=worker["cache_type_v"],
+            short_request_rank=worker["short_request_rank"], vision_status=worker["vision_status"], max_images=1)
+    endpoint = replace(registry.by_id("ai-qwen38-27b"), backend_type="ai_pool",
+        api_base="http://pool-fixture.invalid/v1", health_url="http://pool-fixture.invalid/health",
+        load_url="http://pool-fixture.invalid/health", safe_context_tokens=262144,
+        configured_context_tokens=262144, max_concurrency=6, metadata={},
+        deployment_profiles=tuple(profiles.values()))
+    return registry.with_endpoints([endpoint if item.id == endpoint.id else item for item in registry.endpoints])
+
+
+@pytest.mark.parametrize("backend,expected", [("ai_pool", 1), ("vllm", 8), ("codex_pool", 8)])
+def test_physical_capacity_does_not_multiply_single_slot_pool_workers(backend, expected):
+    from ai_router.api import _deployment_capacity
+    endpoint = Registry(ROOT / "config/registry.yaml").by_id("ai-qwen38-27b")
+    assert _deployment_capacity(replace(endpoint, backend_type=backend, max_concurrency=8)) == expected
+
+
 def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 13
-    assert registry.by_id("ai-qwen38-27b").max_concurrency == 4
+    assert len(registry.endpoints) == 14
+    assert registry.by_id("ai-qwen38-27b").max_concurrency == 8
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
@@ -402,8 +429,8 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     ai = registry.by_id("ai-qwen38-27b")
     assert ai is not None
     assert ai.public_model == "siyuan/qwen38-v100-196k"
-    assert ai.safe_context_tokens == 196608
-    assert ai.configured_context_tokens == 196608
+    assert ai.safe_context_tokens == 262144
+    assert ai.configured_context_tokens == 262144
     assert ai.backend_type == "vllm"
     assert [item.id for item in ai.deployment_profiles] == [
         "v100-tp2-qwen38-196k",
@@ -465,13 +492,14 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
         if endpoint.enabled and endpoint.auto_candidate
     )
     assert glm.capabilities.responses == "adapter"
+    assert registry.by_id("zhipu-glm-5.3").capabilities.responses == "adapter"
     assert all(
         endpoint.capabilities.responses == "native"
         for endpoint in registry.endpoints
         if (
             endpoint.enabled
             and endpoint.auto_candidate
-            and endpoint.id != glm.id
+            and endpoint.id not in {glm.id, "zhipu-glm-5.3"}
         )
     )
     nx3_shared = registry.by_id("nx3-qwen36-shared-64k")
@@ -1712,7 +1740,7 @@ def test_router_drain_rejects_new_inference_but_keeps_status_available(
 def test_ai_pool_health_builds_physical_deployments_and_quarantines_drift(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     workers = six_ai_workers()
@@ -1800,7 +1828,7 @@ def test_health_monitor_does_not_probe_disabled_endpoint() -> None:
 def test_ai_pool_health_marks_directly_processing_worker_busy(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     workers = ai_workers()
@@ -1855,7 +1883,7 @@ def test_ai_pool_health_marks_directly_processing_worker_busy(
 
 
 def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     status = healthy(
@@ -1912,7 +1940,7 @@ def test_ai_pool_pins_conversation_to_physical_worker(tmp_path: Path) -> None:
 def test_ai_pool_marks_restarted_worker_cache_generation(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     workers = ai_workers()
@@ -1962,7 +1990,7 @@ def test_ai_pool_marks_restarted_worker_cache_generation(
 def test_short_requests_hash_across_p40s_and_reserve_v100(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     policy = RoutingPolicy(
@@ -2015,7 +2043,7 @@ def test_short_requests_hash_across_p40s_and_reserve_v100(
 def test_ai_pool_keeps_affinity_candidate_when_externally_leased(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     workers = ai_workers()
@@ -2060,7 +2088,7 @@ def test_ai_pool_keeps_affinity_candidate_when_externally_leased(
 
 
 def test_ai_pool_pins_busy_affinity_candidate(tmp_path: Path) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     workers = ai_workers()
@@ -2114,7 +2142,7 @@ def test_ai_pool_pins_busy_affinity_candidate(tmp_path: Path) -> None:
 def test_new_ai_session_avoids_recently_used_worker(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     store = InMemoryStateStore()
@@ -2230,7 +2258,7 @@ def test_auto_conversation_falls_back_from_disabled_bound_endpoint(
 def test_selected_ai_worker_rejects_external_busy_without_wait(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     ai = registry.by_id("ai-qwen38-27b")
     assert ai is not None
     workers = ai_workers()
@@ -2269,7 +2297,7 @@ def test_selected_ai_worker_rejects_external_busy_without_wait(
 def test_selected_ai_worker_waits_through_release_lag(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     ai = registry.by_id("ai-qwen38-27b")
     assert ai is not None
     busy_workers = ai_workers()
@@ -2324,7 +2352,7 @@ def test_selected_ai_worker_waits_through_release_lag(
 
 
 def test_ai_pool_failure_excludes_only_the_failed_worker(tmp_path: Path) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     status = healthy(
@@ -2354,7 +2382,7 @@ def test_ai_pool_failure_excludes_only_the_failed_worker(tmp_path: Path) -> None
 
 
 def test_ai_pool_filters_workers_by_required_context(tmp_path: Path) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     status = healthy(
@@ -3104,7 +3132,7 @@ def test_auto_tool_request_falls_back_local_when_sol_is_rate_limited(
 def test_ai_responses_route_binds_a_physical_worker(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     status = healthy(
@@ -3139,7 +3167,7 @@ def test_ai_responses_route_binds_a_physical_worker(
 def test_ai_large_context_excludes_64k_physical_worker(
     tmp_path: Path,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     workers = [
@@ -3728,7 +3756,7 @@ def test_evaluator_capacity_acquisition_does_not_wait(
     )
     runtime = build_runtime(
         settings=settings(tmp_path),
-        registry=Registry(ROOT / "config" / "registry.yaml"),
+        registry=ai_pool_registry(),
         store=InMemoryStateStore(),
         token_counter=SimpleTokenCounter(),
     )
@@ -3781,13 +3809,15 @@ def test_evaluator_capacity_acquisition_does_not_wait(
     run(runtime.close())
 
 
-def test_validated_vision_endpoints_are_registered_for_images() -> None:
+def test_declared_vision_endpoints_are_registered_for_images() -> None:
     registry = Registry(ROOT / "config" / "registry.yaml")
     validated = {
         "ai-qwen38-27b",
         "ivan-qwen38-flash-128k",
         "amd-qwen38-rocmfpx-128k",
         "codex-pro-gpt-5.6-sol",
+        "codex-pro-gpt-6-astra",
+        "cloud-deepseek-v4-flash",
         "qwen36-shared-fleet",
         "zhipu-glm-5.3-flash",
     }
@@ -3857,7 +3887,7 @@ def test_models_endpoint_reports_vision_capabilities(
         "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
     ]["supportsImages"] is True
     assert models[
-        "huihui/Qwen3.8-27B-Q4-DFlash2"
+        "siyuan/qwen38-v100-196k"
     ]["supportsImages"] is True
     assert "RadixArk/Qwen3.8-Flash-Next-NVFP4" not in models
     assert models["zhipu/glm-5.3-flash"]["supportsImages"] is True
@@ -3995,7 +4025,7 @@ def test_ai_image_is_resized_for_inference_and_original_is_archived(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
@@ -4126,7 +4156,7 @@ def test_explicit_ai_rejects_remote_image_without_fetching_it(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     endpoint = registry.by_id("ai-qwen38-27b")
     assert endpoint is not None
     monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
@@ -4197,7 +4227,7 @@ def test_auto_vision_workspace_failure_tries_p40_then_v100_then_falls_back(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     ai = registry.by_id("ai-qwen38-27b")
     assert ai is not None
     ai.quality["general"] = 1000
@@ -5823,7 +5853,7 @@ def test_auto_spills_busy_local_to_next_local_without_cooldown(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     value = settings(tmp_path)
     value.write_runtime(
         {
@@ -5870,7 +5900,7 @@ def test_auto_spills_busy_local_to_next_local_without_cooldown(
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        assert payload["model"] == "huihui/Qwen3.8-27B-Q4-DFlash2"
+        assert payload["model"] == registry.by_id("ai-qwen38-27b").provider_model
         return httpx.Response(
             200,
             headers={"content-type": "application/json"},
@@ -5998,7 +6028,7 @@ def test_auto_uses_cloud_after_all_local_capacity_is_busy(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = ai_pool_registry()
     value = settings(tmp_path)
     value.write_runtime(
         {
@@ -6111,7 +6141,7 @@ def test_auto_returns_429_when_all_local_busy_and_cloud_disabled(
     monkeypatch,
 ) -> None:
     async def scenario() -> None:
-        registry = Registry(ROOT / "config" / "registry.yaml")
+        registry = ai_pool_registry()
         value = settings(tmp_path)
         monkeypatch.setenv(
             "AI_ROUTER_LITELLM_MASTER_KEY",
@@ -6209,7 +6239,7 @@ def test_eight_parallel_auto_capacity_selections_stay_local(
     monkeypatch,
 ) -> None:
     async def scenario() -> None:
-        registry = Registry(ROOT / "config" / "registry.yaml")
+        registry = ai_pool_registry()
         value = settings(tmp_path)
         value.write_runtime(
             {
@@ -8381,7 +8411,7 @@ def test_public_response_and_error_hide_internal_route_details(
         item["id"] for item in internal_catalog.json()["data"]
     }
     assert "auto" in internal_ids
-    assert "huihui/Qwen3.8-27B-Q4-DFlash2" in internal_ids
+    assert "siyuan/qwen38-v100-196k" in internal_ids
     assert "siyuan/auto" not in internal_ids
     run(runtime.internal_client.aclose())
     run(runtime.close())

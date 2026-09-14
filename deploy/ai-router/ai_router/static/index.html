@@ -1060,6 +1060,47 @@
                   压缩模型 ID
                   <input id="compaction-model" type="text">
                 </label>
+                <label class="wide">摘要单次生成额度（token，含思考）
+                  <input id="compaction-summary-output" type="number" min="1" max="393216" step="1">
+                </label>
+                <p class="wide">单次额度不等于最终摘要长度，也不会扩大后台整任务预算。启用思考时需同时预留思考和答案空间；额度不足会明确失败，不截断原文。</p>
+                <label class="wide">摘要思考模式
+                  <select id="compaction-summary-reasoning">
+                    <option value="provider_default">跟随模型默认（兼容原设置）</option>
+                    <option value="disabled">关闭思考（仅 DeepSeek）</option>
+                    <option value="low">低强度思考（仅 DeepSeek）</option>
+                  </select>
+                </label>
+                <p class="wide">仅影响摘要，不改变正常对话模型或思考模式。修改后旧后台任务不会按新模式继续调用，需重新创建任务。关闭或降低思考不保证质量更高，输出预算与完整性检查仍有效。</p>
+                <label class="toggle-row wide"><span>后台预压缩（还需账号允许压缩；不会直接覆盖当前会话）</span><input id="compaction-background" type="checkbox"></label>
+                <label>后台单任务时限（秒）<input id="compaction-budget-seconds" type="number" min="1" max="600" step="1"></label>
+                <label>后台单任务最多调用次数<input id="compaction-budget-calls" type="number" min="1" max="32" step="1"></label>
+                <label>后台单任务累计输入 token<input id="compaction-budget-input" type="number" min="1" max="1000000" step="1"></label>
+                <label>后台单任务累计输出 token<input id="compaction-budget-output" type="number" min="8192" max="64000" step="1"></label>
+                <p class="wide">预算在创建任务时固定，重启不会重置；设置修改仅影响新任务，可取消旧任务后重新创建。默认值也是当前安全上限，可调低；输出预算至少容纳一次 8192 token 预留。预算不足会停止任务，不会悄悄截断原文。</p>
+                <label class="toggle-row wide"><span>历史找回查询改写（无可靠匹配时，用摘要模型改写一次当前问题；需账号历史授权，会计入用量）</span><input id="history-query-rewrite" type="checkbox"></label>
+                <label class="toggle-row wide"><span>后台整理历史（纯本地索引，不调用模型；关闭后保留进度和已有索引）</span><input id="history-index-enabled" type="checkbox"></label>
+                <label>每批最多变更记录<input id="history-index-records" type="number" min="1" max="32" step="1"></label>
+                <label>每批目标时限（秒）<input id="history-index-seconds" type="number" min="0.01" max="2" step="0.01"></label>
+                <label>后台工作时间占比（%）<input id="history-index-duty" type="number" min="1" max="50" step="1"></label>
+                <p class="wide">先处理新记录，再补旧历史；账号之间共享读取，内容仍隔离。通过批次间休息控制占比，不是系统 CPU 硬限额；单条大记录可能超过目标时限，不会为赶时间截断。暂停和恢复不重建索引。</p>
+                <label>
+                  指定模型的长上下文策略
+                  <select id="context-policy-mode">
+                    <option value="legacy">保持原有规则（兼容旧设置）</option>
+                    <option value="compact">压缩后继续</option>
+                    <option value="extended">扩展上下文，不主动压缩</option>
+                  </select>
+                </label>
+                <label>
+                  目标 Codex 端点 ID
+                  <input id="context-policy-endpoint" type="text" placeholder="codex-pro-gpt-6-astra">
+                </label>
+                <label>
+                  扩展上下文预算（输入 + 输出预留）
+                  <input id="context-policy-limit" type="number" min="1" max="1050000" step="1">
+                </label>
+                <p class="wide">适用于暗号或直接指定目标模型的请求。选择“压缩后继续”即授权该模型在超限时使用上方压缩模型，覆盖全局压缩许可；原文可能被摘要替代。扩展策略不绕过配额、健康、授权或账号目录上限，设置数值不代表已通过长上下文实测。切换策略不会还原已经压缩的历史，也不会关闭客户端自身的压缩。</p>
               </div>
             </section>
 
@@ -1346,6 +1387,28 @@
             </label>
             <label>路由策略<select id="client-routing-mode"><option value="inherit">继承全局</option><option value="cost">成本优先</option><option value="efficiency">效率优先</option><option value="quality">质量优先</option></select></label>
             <label class="toggle-row"><span>此账号仅使用本地模型</span><input id="client-local-only" type="checkbox"></label>
+            <label class="toggle-row"><span>找回本 Router 账号的跨会话历史</span><input id="client-history-recall" type="checkbox"></label>
+            <label class="toggle-row"><span>允许将可出云的旧记录补给已授权云模型</span><input id="client-history-cloud" type="checkbox"></label>
+            <label class="toggle-row"><span>另行允许未记录原始隐私设置的旧历史出云（不覆盖明确的仅限本地记录）</span><input id="client-history-legacy-cloud" type="checkbox"></label>
+            <p class="help-text">按 Router 客户端账号隔离：只能找回本账号的历史，不读取其他账号。共用同一账号或其密钥的人共用该账号历史；旧记录不能替代当前指令，本地记录不会因此出云。</p>
+            <div class="wide"><button id="client-history-status-refresh" type="button">查看历史索引状态</button><pre id="client-history-status" aria-live="polite"></pre></div>
+            <label class="wide">排除或恢复会话（仅影响此账号的历史找回）<input id="client-history-conversation" type="text" maxlength="256" placeholder="会话 ID"></label>
+            <div class="wide"><button id="client-history-exclude" type="button">排除此会话</button><button id="client-history-restore" type="button">恢复此会话</button></div>
+            <label class="wide">查看引用原文<input id="client-history-source-id" type="text" maxlength="64" placeholder="路由记录里的历史来源 ID"></label>
+            <div class="wide"><button id="client-history-source-view" type="button">查看原文（记录审计）</button><pre id="client-history-source" aria-live="polite"></pre></div>
+            <div class="wide"><button id="client-compaction-refresh" type="button">刷新后台压缩任务</button><pre id="client-compaction-jobs" aria-live="polite"></pre></div>
+            <label>归档请求 ID<input id="client-compaction-request" type="text" maxlength="128"></label>
+            <label>目标模型端点 ID<input id="client-compaction-target" type="text" maxlength="128"></label>
+            <div class="wide"><button id="client-compaction-create" type="button">创建后台压缩任务（会调用模型）</button></div>
+            <label class="wide">待取消任务 ID<input id="client-compaction-job-id" type="text" maxlength="64"></label>
+            <div class="wide"><button id="client-compaction-cancel" type="button">取消任务</button><p class="help-text">结果未知的任务不会自动重试。取消在途请求后仍可能需要核对上游结果。</p></div>
+            <details class="wide"><summary>核对未知结果后解除暂停</summary>
+              <p class="help-text">请先根据上游记录确认操作已经结束。此操作仅放弃结果，不会重发原请求，也不会删除原对话。</p>
+              <label>未知操作 ID<input id="client-compaction-operation" type="text" maxlength="64"></label>
+              <label>终态证据引用（记录编号或日志位置，不要粘贴凭据）<input id="client-compaction-evidence" type="text" minlength="8" maxlength="512"></label>
+              <label class="toggle-row"><span>我已确认上游操作结束，并选择放弃本次结果</span><input id="client-compaction-confirm-terminal" type="checkbox"></label>
+              <button id="client-compaction-reconcile" type="button">确认核对并放弃结果</button>
+            </details>
 
             <label>
               信息披露

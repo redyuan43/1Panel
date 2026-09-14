@@ -174,9 +174,28 @@ evaluator:
       - batch
 
 compaction:
+  summary_reasoning: provider_default
+  summary_output_tokens: 8192
   enabled: true
+  background_enabled: false
+  background_limits:
+    max_seconds: 600
+    max_calls: 32
+    max_input_tokens: 1000000
+    max_output_tokens: 64000
+  history_query_rewrite_enabled: false
+  history_indexing:
+    enabled: true
+    batch_records: 8
+    max_batch_seconds: 0.25
+    duty_cycle: 0.2
   mode: explicit_only
   model_id: ai-qwen38-27b
+
+context_policy:
+  mode: legacy
+  endpoint_id: codex-pro-gpt-6-astra
+  extended_context_tokens: 500000
 
 cloud:
   enabled: false

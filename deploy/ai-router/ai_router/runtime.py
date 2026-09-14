@@ -314,6 +314,12 @@ class RouterRuntime:
         self._instance_heartbeat = asyncio.create_task(self._heartbeat_instances())
         from .history_index import rebuild_verified_history
         self._verified_history_backfill = asyncio.create_task(rebuild_verified_history(self))
+        from .memory_service import HistoryMemory
+        self.history_memory = HistoryMemory(self)
+        self._history_memory_worker = asyncio.create_task(self.history_memory.run())
+        from .compaction_worker import CompactionWorker
+        self.compaction_worker = CompactionWorker(self)
+        self._background_compaction = asyncio.create_task(self.compaction_worker.run())
 
     async def _heartbeat_instances(self) -> None:
         while True:
@@ -470,7 +476,24 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        compaction_task = getattr(self, "_background_compaction", None)
+        if compaction_task is not None:
+            compaction_task.cancel()
+            try:
+                await compaction_task
+            except asyncio.CancelledError:
+                pass
+        memory_worker = getattr(self, "_history_memory_worker", None)
+        if memory_worker is not None:
+            memory_worker.cancel()
+            try:
+                await memory_worker
+            except asyncio.CancelledError:
+                pass
         await self.endpoint_token_counter.close()
+        close_archive = getattr(self.training, "close", None)
+        if close_archive is not None:
+            close_archive()
         backfill = getattr(self, "_verified_history_backfill", None)
         if backfill is not None:
             backfill.cancel()

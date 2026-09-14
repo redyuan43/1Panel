@@ -22,6 +22,9 @@ from .cache_deployments import (
     load_cache_deployment_catalog,
 )
 from .errors import RouterError
+from .context_policy import validate_target as validate_context_target
+from .compaction_worker import validate_background_settings
+from .config import deep_merge
 from .identity import IdentityProfile
 from .media_service.gateway import router as media_router
 from .h3_mcp import install_h3_mcp
@@ -47,6 +50,7 @@ EDITABLE_SECTIONS = {
     "affinity",
     "cloud",
     "compaction",
+    "context_policy",
     "evaluator",
     "failover",
     "health",
@@ -162,6 +166,9 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             )
             override["routing"]["prompt_directives"] = prepared_prompt
         try:
+            proposed = current.settings.preview_runtime(override)
+            validate_context_target(proposed.get("context_policy", {}), current.registry)
+            validate_background_settings(proposed, current.registry)
             current.settings.write_runtime(override)
         except (TypeError, ValueError) as exc:
             raise RouterError(
@@ -242,6 +249,12 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             if draft_record
             else snapshot["active"].get("settings", {})
         )
+        try:
+            proposed_context = {**base_settings.get("context_policy", {}), **changes.get("context_policy", {})}
+            validate_context_target(proposed_context, current.registry)
+            validate_background_settings(deep_merge(base_settings, changes), current.registry)
+        except (TypeError, ValueError) as exc:
+            raise RouterError(str(exc), status_code=400, code="invalid_policy_draft") from exc
         proposed_prompt = (
             changes.get("routing", {}).get("prompt_directives")
             if isinstance(changes.get("routing"), dict)
@@ -361,6 +374,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         )
         try:
             active = await current.policy_config.activate(
+                validate_dependencies=lambda settings: validate_background_settings(settings, current.registry),
                 expected_revision=_optional_int(
                     value.get("expected_revision")
                 ),
@@ -718,6 +732,50 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         current = _authorized_runtime(request)
         return {"clients": await current.clients.list_accounts()}
 
+    @app.get("/api/clients/{client_id}/history-memory")
+    async def history_memory_status(client_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        if await current.clients.current_policy(client_id) is None:
+            raise RouterError("client unavailable", status_code=404, code="client_not_found")
+        index = _history_memory_index(current, read_only=True)
+        from .memory_ingestion import indexing_options
+        section = getattr(current.settings, "section", lambda _: {})("compaction")
+        enabled = indexing_options(section.get("history_indexing"))["enabled"]
+        if index is None:
+            return {"state": "not_initialized", "indexing_enabled": enabled}
+        return {"state": "available", "indexing_enabled": enabled,
+                **await asyncio.to_thread(index.status, client_id)}
+
+    @app.post("/api/clients/{client_id}/history-memory/exclusions")
+    async def history_memory_exclusion(client_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        policy = await current.clients.current_policy(client_id)
+        if not policy:
+            raise RouterError("active Router account required", status_code=403, code="history_account_unavailable")
+        value = await _json_body(request)
+        conversation_id = value.get("conversation_id")
+        excluded = value.get("excluded")
+        if not isinstance(conversation_id, str) or not 1 <= len(conversation_id.strip()) <= 256 or type(excluded) is not bool:
+            raise RouterError("conversation ID and boolean exclusion required", status_code=400, code="invalid_history_exclusion")
+        index = _history_memory_index(current, read_only=False)
+        await asyncio.to_thread(index.exclude, client_id, conversation_id.strip(), excluded)
+        current.audit.write("history_memory_exclusion", client_id=client_id,
+                            conversation_id=conversation_id.strip(), excluded=excluded)
+        return {"ok": True}
+
+    @app.get("/api/clients/{client_id}/history-memory/sources/{source_id}")
+    async def history_memory_source(client_id: str, source_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        if await current.clients.history_account_policy(client_id) is None:
+            raise RouterError("history access is not authorized", status_code=403, code="history_access_denied")
+        index = _history_memory_index(current, read_only=True)
+        source = await asyncio.to_thread(index.read, client_id, source_id, cloud=False) if index else None
+        if source is None:
+            raise RouterError("history source unavailable", status_code=404, code="history_source_not_found")
+        current.audit.write("history_memory_source_viewed", client_id=client_id, source_id=source_id)
+        from dataclasses import asdict
+        return {"source_id": source_id, "source": asdict(source)}
+
     @app.post("/api/clients")
     async def create_client(request: Request) -> JSONResponse:
         current = _authorized_runtime(request)
@@ -737,6 +795,107 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             {"client": account},
             status_code=201,
         )
+
+    @app.get("/api/clients/{client_id}/compaction-jobs")
+    async def compaction_jobs_list(client_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        if await current.clients.current_policy(client_id) is None:
+            raise RouterError("client unavailable", status_code=404, code="client_not_found")
+        jobs = _compaction_jobs(current, read_only=True)
+        return {"jobs": await asyncio.to_thread(jobs.list_jobs, client_id) if jobs else []}
+
+    @app.post("/api/clients/{client_id}/compaction-jobs")
+    async def compaction_job_create(client_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        policy = await current.clients.current_policy(client_id)
+        if not policy or not policy.allow_compaction:
+            raise RouterError("client compaction is not authorized", status_code=403, code="compaction_access_denied")
+        if not current.settings.section("compaction").get("background_enabled", False):
+            raise RouterError("background compaction is disabled", status_code=409, code="background_compaction_disabled")
+        value = await _json_body(request)
+        request_id = value.get("request_id")
+        target_id = value.get("target_endpoint_id")
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 128 or not isinstance(target_id, str):
+            raise RouterError("archive request and target endpoint are required", status_code=400, code="invalid_compaction_source")
+        trace = await current.route_traces.get(request_id)
+        if not trace or trace.get("client_id") != client_id or not trace.get("branch_id"):
+            raise RouterError("source trace unavailable", status_code=404, code="compaction_source_not_found")
+        target = current.registry.by_id(target_id)
+        summary = current.registry.by_id(current.compactor.model_id)
+        if not target or not target.enabled or not summary or not summary.enabled or summary.safe_context_tokens <= 9216:
+            raise RouterError("compaction dependency unavailable", status_code=409, code="compaction_dependency_unavailable")
+        def read_source():
+            reader = ArchiveReader(os.environ.get("AI_ROUTER_TRAINING_DB_PATH", "/training/conversations.sqlite3"),
+                                   os.environ.get("AI_ROUTER_TRAINING_KEY_PATH", "/training/training.key"))
+            return reader.read(request_id)
+        try:
+            payload = await asyncio.to_thread(read_source)
+        except Exception as exc:
+            raise RouterError("encrypted archive unavailable", status_code=503, code="compaction_archive_unavailable") from exc
+        source = (payload or {}).get("request", {})
+        body = source.get("effective_body") or source.get("received_body")
+        key_id = source.get("key_id", "")
+        if source.get("client_id") != client_id or source.get("protocol") not in {"chat", "responses"} or not isinstance(body, dict):
+            raise RouterError("archive source unavailable", status_code=404, code="compaction_source_not_found")
+        if not await current.clients.is_key_active(client_id, key_id):
+            raise RouterError("source credential has been revoked", status_code=403, code="compaction_access_denied")
+        source_policy = source.get("history_source_policy")
+        source_cloud_allowed = (isinstance(source_policy, dict)
+            and type(source_policy.get("version")) is int and source_policy["version"] == 1
+            and source_policy.get("local_only") is False)
+        local_only = policy.local_only or not source_cloud_allowed
+        if local_only and summary.cloud:
+            raise RouterError("source cannot be sent to cloud summary model", status_code=403, code="compaction_source_local_only")
+        from types import SimpleNamespace
+        from .background_context import _candidate_branches
+        from .summary_provenance import request_scope
+        state = await current.conversations.get(trace["branch_id"])
+        lineage = None
+        if state is not None and state.lineage_relation == "continuation" and state.parent_branch_id:
+            lineage = SimpleNamespace(relation="continuation", lineage_id=state.conversation_id,
+                parent=await current.conversations.get(state.parent_branch_id))
+        branches = await _candidate_branches(current, trace["branch_id"], lineage)
+        summary_scope = await request_scope(current, owner=client_id, branch=trace["branch_id"],
+            api_kind=source["protocol"], body=source.get("received_body") or body, ancestors=branches[1:])
+        jobs = _compaction_jobs(current, read_only=False)
+        job = await asyncio.to_thread(jobs.create, client_id, trace["branch_id"], body, source["protocol"], {
+            **summary_scope.job_parameters(),
+            "limits": current.settings.section("compaction").get("background_limits", {}),
+            "summary_reasoning": current.settings.section("compaction").get("summary_reasoning", "provider_default"),
+            "summary_output_tokens": current.settings.section("compaction").get("summary_output_tokens", 8192),
+            "model_id": summary.id, "target_context_tokens": target.safe_context_tokens,
+            "target_endpoint_id": target.id, "key_id": key_id, "local_only": local_only})
+        current.audit.write("compaction_job_created", job_id=job["id"], client_id=client_id, source_request_id=request_id)
+        return {"job": jobs.public(job)}
+
+    @app.post("/api/clients/{client_id}/compaction-jobs/{job_id}/cancel")
+    async def compaction_job_cancel(client_id: str, job_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        jobs = _compaction_jobs(current, read_only=False, existing_only=True)
+        if jobs is None or not await asyncio.to_thread(jobs.cancel, client_id, job_id):
+            raise RouterError("job unavailable", status_code=404, code="compaction_job_not_found")
+        current.audit.write("compaction_job_cancelled", job_id=job_id, client_id=client_id)
+        return {"job": jobs.public(await asyncio.to_thread(jobs.read, client_id, job_id))}
+
+    @app.post("/api/clients/{client_id}/compaction-jobs/{job_id}/reconcile")
+    async def compaction_job_reconcile(client_id: str, job_id: str, request: Request) -> dict[str, Any]:
+        current = _authorized_runtime(request)
+        value = await _json_body(request)
+        if value.get("upstream_terminal_confirmed") is not True or value.get("discard_result") is not True:
+            raise RouterError("confirm upstream termination and discard explicitly", status_code=400,
+                              code="compaction_reconciliation_confirmation_required")
+        jobs = _compaction_jobs(current, read_only=False, existing_only=True)
+        if jobs is None:
+            raise RouterError("job unavailable", status_code=404, code="compaction_job_not_found")
+        try:
+            job = await asyncio.to_thread(jobs.abandon_verified_operation, client_id, job_id,
+                value.get("operation_id"), value.get("evidence_reference"))
+        except ValueError as exc:
+            raise RouterError(str(exc), status_code=409, code="compaction_reconciliation_conflict") from exc
+        current.audit.write("compaction_operation_reconciled", job_id=job_id, client_id=client_id,
+                            operation_id=value.get("operation_id"), method="operator_attested_terminal_discard",
+                            source=request.client.host if request.client else "unknown")
+        return {"job": job}
 
     @app.patch("/api/clients/{client_id}")
     async def update_client(
@@ -1306,6 +1465,22 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
 
 def _runtime(request: Request) -> RouterRuntime:
     return request.app.state.runtime
+
+
+def _history_memory_index(current: RouterRuntime, *, read_only: bool):
+    from .memory_index import MemoryIndex
+    path = current.settings.runtime_path.with_name("history-memory.sqlite3")
+    if read_only and not path.is_file():
+        return None
+    return MemoryIndex(path, current.state_encryption_key, read_only=read_only)
+
+
+def _compaction_jobs(current: RouterRuntime, *, read_only: bool, existing_only=False):
+    from .compaction_jobs import CompactionJobs
+    path = current.settings.runtime_path.with_name("compaction-jobs.sqlite3")
+    if (read_only or existing_only) and not path.is_file():
+        return None
+    return CompactionJobs(path, current.state_encryption_key, read_only=read_only)
 
 
 def _authorized_runtime(request: Request) -> RouterRuntime:
