@@ -65,7 +65,8 @@ def studio_overlay(files):
     source = replace(source, 'async function startStage(stageId, newSeed) {',
         'async function startStage(stageId, newSeed) {\n'
         '  if (state.project?.connector_owner) {\n'
-        '    if (stageId !== "preview" || newSeed || (state.recipeSelections[state.project.id] && state.recipeSelections[state.project.id] !== state.project.recipe_id)) { $("commonStageError").textContent = "配置或种子变更请使用修改输入，保存新版本并重新确认。"; $("commonStageError").classList.remove("hidden"); return; }\n'
+        '    if (stageId !== "preview" || newSeed || (recipeScope(state.project, stageId) && state.recipeSelections[state.project.id] && state.recipeSelections[state.project.id] !== state.project.recipe_id)) { $("commonStageError").textContent = "配置或种子变更请使用修改输入，保存新版本并重新确认。"; $("commonStageError").classList.remove("hidden"); return; }\n'
+        '    const unavailable = state.project.stages.preview.fleet_pending ? "" : previewUnavailable(state.project);\n    if (unavailable) { $("commonStageError").textContent = unavailable; $("commonStageError").classList.remove("hidden"); return; }\n'
         '    return runAction(() => window.h3BrowserAction("h3_start_preview", {expected_output_id: state.project.stages.context_ir.output_id, expected_run_id: state.project.stages.preview.run_id || null}));\n'
         '  }')
     source = replace(source, 'async function approveStage(stageId) {',

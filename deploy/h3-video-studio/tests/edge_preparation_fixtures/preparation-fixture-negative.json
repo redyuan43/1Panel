@@ -1,0 +1,51 @@
+{
+  "model_lifecycle": {
+    "state": "idle",
+    "phase": "idle",
+    "execution_id": null,
+    "queueable": true,
+    "ready": false,
+    "reason": null,
+    "transition_started_at": 1789356474.2396853,
+    "updated_at": 1789356474.2396853
+  },
+  "preparation_guard": {
+    "eligible": false,
+    "reasons": [
+      "resource_stability_not_ready"
+    ],
+    "observed_at": 1789356474.2396853,
+    "profile_ids": [
+      "H3_I2V_A4_TURBO4"
+    ],
+    "requires_model_switch": true
+  },
+  "active": [],
+  "queues": [
+    {
+      "lane_id": "fast",
+      "queued_or_running": 0,
+      "running_count": 0,
+      "pending_count": 0,
+      "untracked_count": 0,
+      "managed_worker_stopped": true
+    }
+  ],
+  "validation_lease": null,
+  "release_validation_gate": {
+    "enabled": false,
+    "allow_execution_prefixes": []
+  },
+  "recipe_capacity": {
+    "H3_I2V_A4_TURBO4": {
+      "available_slots": 0,
+      "eligible_lanes": [],
+      "recipe_version": "b8a2d2a760e0b600ff236c749df7370dbce9d43e7791126d539542b0a53b6d24",
+      "reasons": [
+        "edge_model_idle"
+      ],
+      "max_active_jobs": 1
+    }
+  },
+  "fixture_only": true
+}

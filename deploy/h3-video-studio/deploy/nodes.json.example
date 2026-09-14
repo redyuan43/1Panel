@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "legacy_node": "ivan",
+  "nodes": [
+    {
+      "id": "ivan",
+      "url": "http://ivan-ms-7b17.taild500c8.ts.net:8789",
+      "key_file": "/home/ai/.config/h3-studio-ivan/fleet.key",
+      "enabled": false,
+      "max_parallel": 2,
+      "priority": 20,
+      "legacy_profiles": []
+    },
+    {
+      "id": "ivan-u24",
+      "url": "http://ivan-u24.taild500c8.ts.net:8789",
+      "key_file": "/home/ai/.config/h3-studio-ivan/fleet-ivan-u24.key",
+      "enabled": false,
+      "max_parallel": 1,
+      "priority": 10,
+      "legacy_profiles": []
+    }
+  ]
+}

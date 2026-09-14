@@ -14,7 +14,7 @@ async function main() {
       const url = new URL(route.request().url());
       assert.equal(url.origin, "http://localhost:12345");
       if (url.pathname.endsWith(".js")) return route.fulfill({contentType: "text/javascript", body: await fs.readFile(path.join(__dirname, "../frontend", path.basename(url.pathname)))});
-      const inputs = ["name", "prompt", "duration", "orientation", "recipe_id", "prompt_processing", "first_frame", "last_frame", "reference_image", "reference_video", "reference_audio"];
+      const inputs = ["name", "prompt", "duration", "orientation", "recipe_id", "preview_recipe_id", "prompt_processing", "first_frame", "last_frame", "reference_image", "reference_video", "reference_audio"];
       return route.fulfill({contentType: "text/html", body: `<html><body><form id="projectForm">${inputs.map(name => `<input name="${name}">`).join("")}<input name="seed" id="seedInput"><input id="manualSeedInput"><input name="mode" id="modeInput"><input name="audio_policy" id="audioPolicyInput"></form><div id="formError"></div><textarea id="optimizedPrompt"></textarea><div id="stageMetrics"></div><script>
 window.state={};window.calls=[];window.showSetup=()=>window.dispatchEvent(new Event("h3-input-edit-reset"));
 window.setActiveButtons=window.renderAssetFields=window.renderCreateRecipes=()=>{};
@@ -24,15 +24,16 @@ window.api=async(url,options)=>{window.calls.push({url,options});if(!options){le
     await page.goto("http://localhost:12345/");
     const created = await page.evaluate(async () => {
       const form = new FormData();
-      for (const [key, value] of Object.entries({mode: "i2v", prompt: "unchanged scene", duration: "15", orientation: "portrait", audio_policy: "native", seed: "123"})) form.set(key, value);
+      for (const [key, value] of Object.entries({mode: "i2v", prompt: "unchanged scene", duration: "15", orientation: "portrait", audio_policy: "native", seed: "123", preview_recipe_id: "A4"})) form.set(key, value);
       form.set("first_frame", new File(["source-photo"], "original.png", {type: "image/png"}));
       return window.h3SaveBrowserDraft(form);
     });
     assert.deepEqual(created.assets, {first_frame: "asset_uploaded"});
     assert.equal(created.mode, "i2v");
+    assert.equal(created.preview_recipe_id, "A4");
     assert.equal(created.prompt, "unchanged scene");
     assert.equal(created.recipe_id, undefined);
-    const project = {id: "abc123", connector_owner: "owner", connector_revision: "v1", mode: "i2v", audio_policy: "native", duration: 15,
+    const project = {id: "abc123", connector_owner: "owner", connector_revision: "v1", preview_recipe_id: "A4", mode: "i2v", audio_policy: "native", duration: 15,
       orientation: "portrait", prompt_ir: "old prompt", prompt_original: "original request", assets: {first_frame: {asset_id: "asset_retained"}},
       input_assets: [{kind: "first_frame", asset_id: "asset_retained"}], stages: {preview: {status: "pending"}}, seed: "2696045020911358409"};
     const render = value => page.evaluate(detail => { window.state.project = detail; window.dispatchEvent(new CustomEvent("h3-project-rendered", {detail})); }, value);
@@ -42,6 +43,11 @@ window.api=async(url,options)=>{window.calls.push({url,options});if(!options){le
     assert.equal(await page.locator('[name="prompt"]').inputValue(), "new prompt");
     const edited = await page.evaluate(() => window.h3SaveBrowserDraft(new FormData(document.getElementById("projectForm"))));
     assert.equal(edited.expected_revision, "v2");
+    assert.equal(edited.preview_recipe_id, "A4");
+    const original = await page.evaluate(() => { const form=new FormData(document.getElementById("projectForm")); form.set("preview_recipe_id", ""); return window.h3SaveBrowserDraft(form); });
+    assert.equal(original.preview_recipe_id, null);
+    const hidden = await page.evaluate(() => { const form=new FormData(document.getElementById("projectForm")); form.set("mode", "t2v"); form.set("preview_recipe_id", "A4"); return window.h3SaveBrowserDraft(form); });
+    assert.equal(hidden.preview_recipe_id, null);
     assert.deepEqual(edited.assets, {first_frame: "asset_retained"});
     assert.equal(edited.original_prompt, "original request");
     assert.equal(edited.seed, undefined);

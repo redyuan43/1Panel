@@ -1,0 +1,4 @@
+[Unit]
+Description=Edge H3 dedicated resource boundary
+[Slice]
+MemoryAccounting=yes

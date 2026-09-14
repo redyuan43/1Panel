@@ -1,0 +1,462 @@
+{
+  "default_recipe_id": "A4",
+  "recipes": [
+    {
+      "description": "LightX2V v1.2，4步原生音视频。",
+      "label": "A4 · 默认",
+      "metadata_files": [],
+      "people_lora_strength": 0.0,
+      "provenance": [
+        {
+          "path": "/home/ai/.local/state/h3-studio-ivan-production/deployment/optimization-20260909/A4-r3/workflow.json",
+          "sha256": "20b53db849fc05c633ce50e4e8c7d5e615eebc933c97c672249fdc91227501e0"
+        }
+      ],
+      "recipe_id": "A4",
+      "runtime_qualification": "separate scheduling configuration; graph validation does not qualify hardware",
+      "runtime_source": {
+        "comfyui_commit": "250b2e9551a7bc7a8ebb5beb07e0fecd2983e04a",
+        "comfyui_version": "0.34.0",
+        "source_sha256": {
+          "comfy_minimax_model.py": "a613ed7c9d84e846eb43b7401efdc87cbc4ae579b87bdd7bdd9d5bb64e5fe34a",
+          "comfy_model_base.py": "45082978479efb4726b96185d89de440563e16f17446af92c4655b587ef6aee6",
+          "t8_sampling.py": "111da5e52b28f2424f57b36f88db63e3ea02b538a8cdfdea1c8ad2f122ad7bb5"
+        },
+        "t8_commit": "5ff46c253192e9d8cae185280fd34f4b4add063b",
+        "t8_version": "1.3.3"
+      },
+      "sampling": {
+        "plan_node": "7",
+        "sampler": "dual_clock_euler",
+        "sampler_node": "10",
+        "scheduler": "native_flow",
+        "shift_audio": 3.0,
+        "shift_video": 6.0,
+        "steps": 4
+      },
+      "shape": {
+        "actual_duration_seconds": 15.083333333333334,
+        "audio_mode": "native",
+        "duration_seconds": 15,
+        "fps": 24,
+        "frames": 362,
+        "height": 864,
+        "mode": "t2v",
+        "trim": false,
+        "width": 480
+      },
+      "status": "formal",
+      "structure_sha256": "525118105ff9d3434f054101e0cec8005cf1b873af1e5753f6ab32304aee9e97",
+      "template": "recipes/A4.json",
+      "template_sha256": "0beea5449cb9c4730ebc02f0937d278806684fbaa0574880723a17648da41ca6",
+      "trigger": "",
+      "version": "20260910.1",
+      "weights": [
+        {
+          "filename": "minimax_h3_fl2va_int8_convrot.safetensors",
+          "hash_evidence": "experiments/optimization-20260909/c_realism/prepare.py",
+          "role": "base",
+          "sha256": "7ad4c73e6e378b822ffd1629f27f632d3787d95f5e468e3af958f98c58df96a5"
+        },
+        {
+          "filename": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "text_encoder",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_video_vae_fp16.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "video_vae",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_audio_vae_fp32.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "audio_vae",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+          "repository": "lightx2v/Minimax-h3-Turbo",
+          "revision": "2f015e66b37c585cea9dc4ae6f1850ea8788e742",
+          "role": "lora",
+          "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8",
+          "size_bytes": 1956193000
+        }
+      ]
+    },
+    {
+      "description": "A4 + r34l1sm，无 People LoRA；不是禁止画面出现人物。",
+      "label": "A4 · 写实触发词 / 无 People LoRA",
+      "metadata_files": [],
+      "people_lora_strength": 0.0,
+      "provenance": [
+        {
+          "path": "/home/ai/.local/state/h3-studio-ivan-production/deployment/optimization-20260909/A4-working-set-v4/A4_C0/workflow.json",
+          "sha256": "62fdab2f4506c4d8300b2d065fdd684c0ccbb7962fa85f096fa32019bc625309"
+        }
+      ],
+      "recipe_id": "A4_C0",
+      "runtime_qualification": "separate scheduling configuration; graph validation does not qualify hardware",
+      "runtime_source": {
+        "comfyui_commit": "250b2e9551a7bc7a8ebb5beb07e0fecd2983e04a",
+        "comfyui_version": "0.34.0",
+        "source_sha256": {
+          "comfy_minimax_model.py": "a613ed7c9d84e846eb43b7401efdc87cbc4ae579b87bdd7bdd9d5bb64e5fe34a",
+          "comfy_model_base.py": "45082978479efb4726b96185d89de440563e16f17446af92c4655b587ef6aee6",
+          "t8_sampling.py": "111da5e52b28f2424f57b36f88db63e3ea02b538a8cdfdea1c8ad2f122ad7bb5"
+        },
+        "t8_commit": "5ff46c253192e9d8cae185280fd34f4b4add063b",
+        "t8_version": "1.3.3"
+      },
+      "sampling": {
+        "plan_node": "7",
+        "sampler": "dual_clock_euler",
+        "sampler_node": "10",
+        "scheduler": "native_flow",
+        "shift_audio": 3.0,
+        "shift_video": 6.0,
+        "steps": 4
+      },
+      "shape": {
+        "actual_duration_seconds": 15.083333333333334,
+        "audio_mode": "native",
+        "duration_seconds": 15,
+        "fps": 24,
+        "frames": 362,
+        "height": 864,
+        "mode": "t2v",
+        "trim": false,
+        "width": 480
+      },
+      "status": "formal",
+      "structure_sha256": "525118105ff9d3434f054101e0cec8005cf1b873af1e5753f6ab32304aee9e97",
+      "template": "recipes/A4_C0.json",
+      "template_sha256": "3da117f14b806bb6c09d46daa1d1f4e8b42860c62fbcf720608856f7f795f229",
+      "trigger": "r34l1sm\n",
+      "version": "20260910.1",
+      "weights": [
+        {
+          "filename": "minimax_h3_fl2va_int8_convrot.safetensors",
+          "hash_evidence": "experiments/optimization-20260909/c_realism/prepare.py",
+          "role": "base",
+          "sha256": "7ad4c73e6e378b822ffd1629f27f632d3787d95f5e468e3af958f98c58df96a5"
+        },
+        {
+          "filename": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "text_encoder",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_video_vae_fp16.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "video_vae",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_audio_vae_fp32.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "audio_vae",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+          "repository": "lightx2v/Minimax-h3-Turbo",
+          "revision": "2f015e66b37c585cea9dc4ae6f1850ea8788e742",
+          "role": "lora",
+          "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8",
+          "size_bytes": 1956193000
+        }
+      ]
+    },
+    {
+      "description": "A4 与 People 1.0 的固定 FP32 组合 LoRA，单 Bypass。",
+      "label": "A4 · 写实 People 1.0",
+      "metadata_files": [],
+      "people_lora_strength": 1.0,
+      "provenance": [
+        {
+          "path": "/home/ai/.local/state/h3-studio-ivan-production/deployment/optimization-20260909/A4-working-set-v3/A4_C1/workflow.json",
+          "sha256": "a7a484652eb50cc119ed0ac39411dcbc5be1b111f8546981f2adff6721798dad"
+        },
+        {
+          "path": "ivan:/media/ivan/44A2C0D9A2C0D11A/h3-comparison-20260909/loras/a4v12_people10_fp32.safetensors.receipt.json",
+          "sha256": "0678473f515652c2d45a7d1beddea2edef6e2f9d19c722a53391749b60a15a59"
+        }
+      ],
+      "recipe_id": "A4_C1",
+      "runtime_qualification": "separate scheduling configuration; graph validation does not qualify hardware",
+      "runtime_source": {
+        "comfyui_commit": "250b2e9551a7bc7a8ebb5beb07e0fecd2983e04a",
+        "comfyui_version": "0.34.0",
+        "source_sha256": {
+          "comfy_minimax_model.py": "a613ed7c9d84e846eb43b7401efdc87cbc4ae579b87bdd7bdd9d5bb64e5fe34a",
+          "comfy_model_base.py": "45082978479efb4726b96185d89de440563e16f17446af92c4655b587ef6aee6",
+          "t8_sampling.py": "111da5e52b28f2424f57b36f88db63e3ea02b538a8cdfdea1c8ad2f122ad7bb5"
+        },
+        "t8_commit": "5ff46c253192e9d8cae185280fd34f4b4add063b",
+        "t8_version": "1.3.3"
+      },
+      "sampling": {
+        "plan_node": "7",
+        "sampler": "dual_clock_euler",
+        "sampler_node": "10",
+        "scheduler": "native_flow",
+        "shift_audio": 3.0,
+        "shift_video": 6.0,
+        "steps": 4
+      },
+      "shape": {
+        "actual_duration_seconds": 15.083333333333334,
+        "audio_mode": "native",
+        "duration_seconds": 15,
+        "fps": 24,
+        "frames": 362,
+        "height": 864,
+        "mode": "t2v",
+        "trim": false,
+        "width": 480
+      },
+      "status": "formal",
+      "structure_sha256": "879987e6268d9f9112a0629e63732a148dd4060ea6b4d55cee95fba4a19cf4a4",
+      "template": "recipes/A4_C1.json",
+      "template_sha256": "9f5f0b49dd688efd9b938b9fff38cbff95e094f8545c6ae9444ad3f5acef5bbe",
+      "trigger": "r34l1sm\n",
+      "version": "20260910.1",
+      "weights": [
+        {
+          "filename": "minimax_h3_fl2va_int8_convrot.safetensors",
+          "hash_evidence": "experiments/optimization-20260909/c_realism/prepare.py",
+          "role": "base",
+          "sha256": "7ad4c73e6e378b822ffd1629f27f632d3787d95f5e468e3af958f98c58df96a5"
+        },
+        {
+          "filename": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "text_encoder",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_video_vae_fp16.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "video_vae",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_audio_vae_fp32.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "audio_vae",
+          "sha256": null
+        },
+        {
+          "composition_sources": [
+            {
+              "filename": "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+              "repository": "lightx2v/Minimax-h3-Turbo",
+              "revision": "2f015e66b37c585cea9dc4ae6f1850ea8788e742",
+              "role": "lora",
+              "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8",
+              "size_bytes": 1956193000
+            },
+            {
+              "filename": "h3-realism-people-t2v-i2v-r2v.safetensors",
+              "sha256": "acc529601d2da117fb81179e76c56e488a3beab1171659d305f04fa3655b787e",
+              "strength": 1.0
+            }
+          ],
+          "filename": "a4v12_people10_fp32.safetensors",
+          "receipt_sha256": "0678473f515652c2d45a7d1beddea2edef6e2f9d19c722a53391749b60a15a59",
+          "role": "composed_lora",
+          "sha256": "5f7d9c69972d65c96438614af645b6d9e60f9a91daf1699179e2843e2de892fc",
+          "size_bytes": 4174773184
+        }
+      ]
+    },
+    {
+      "description": "OpenVDN stage_dmd_8nfe，固定结构底模例外和权重校验。",
+      "label": "B8 · OpenVDN 8步",
+      "metadata_files": [
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/adapters/default/adapter_config.json",
+          "sha256": "89e0ff8920b9629b826eb99ab6150cce6924a53aa445186d1b493225fd091b96"
+        },
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/metadata.json",
+          "sha256": "54054ceb1c91b3fdf7fa0278e4a8841c127e8cf666b5e240d69613661f9d3e9e"
+        },
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/linear_branch/config.json",
+          "sha256": "decb06ac7e664610f677fb445318502b3c51f9c1b8603a2cdd00b16042be5bc8"
+        },
+        {
+          "filename": "MODEL_MANIFEST.json",
+          "sha256": "87c8ff87cbe0464ab5849b0a09fec05ef584f167cd3aaaf1d2c1eb7f4e3bd438"
+        },
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/adapters/turbo/adapter_config.json",
+          "sha256": "627968f670747c29cd7a0d3f8c75166e501d70f9e829b5cd3242a8f14cefbc18"
+        },
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/model_spec.json",
+          "sha256": "4171f4384e952f1f73467981a893440c03298af4956b947e2c8a857ba9f5a62b"
+        }
+      ],
+      "people_lora_strength": 0.0,
+      "provenance": [
+        {
+          "path": "ivan:/mnt/ivan-ext4-offload/h3-fleet/evidence/optimization-20260909/B8-r3/workflow.json",
+          "sha256": "f4c8e156c1b100db7d65ebef4df6a95c94a9dd4654cf65e2116b2f09c2ba2623"
+        },
+        {
+          "path": "/home/ai/.local/state/h3-studio-ivan-production/deployment/optimization-20260909/B8-r3/report.json",
+          "sha256": "a093d9bade21a03a9e1c1f0db29aa75ed99d25554e952544233999573fd4e8f7"
+        }
+      ],
+      "recipe_id": "B8",
+      "runtime_qualification": "separate scheduling configuration; graph validation does not qualify hardware",
+      "runtime_source": {
+        "baseline_t8_revision": "5ff46c253192e9d8cae185280fd34f4b4add063b",
+        "core_revision": "250b2e9551a7bc7a8ebb5beb07e0fecd2983e04a",
+        "excluded_anywhere_directory_names": [
+          ".git",
+          "__pycache__",
+          ".pytest_cache",
+          "node_modules",
+          ".cache"
+        ],
+        "excluded_file_names": [
+          ".env",
+          "extra_model_paths.yaml"
+        ],
+        "excluded_root_directory_names": [
+          "models",
+          "output",
+          "user",
+          "input",
+          "temp",
+          "tmp",
+          "venv",
+          ".venv",
+          "env"
+        ],
+        "excluded_suffixes": [
+          ".safetensors",
+          ".ckpt",
+          ".pt",
+          ".pth",
+          ".gguf",
+          ".onnx",
+          ".pyc",
+          ".pyo"
+        ],
+        "package_installation": false,
+        "plugin_directory": "custom_nodes/h3_b_vdn_minimal",
+        "plugin_license_files": {
+          "LICENSE": "a47f0c61a1d085700264005ce6efb3bd7d82a44df4d9b58d95824b2c4bc307c1",
+          "THIRD_PARTY_NOTICES/OpenVDN-LICENSE.txt": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "THIRD_PARTY_NOTICES/OpenVDN-NOTICE.txt": "e405aa14841cd961902f59d509a30cf4176c2daaeb8dc11c5ebde8671ceaef64"
+        },
+        "plugin_python_files": {
+          "core.py": "04ef163f5c4fdbf289fb9277063967c705ea678ad9e680c28f32c71c6f3decdc",
+          "h3_core_compat.py": "9c1216297777799f4cb19e98f6de1408979be58274c929bed5f3bb5f2b2b623c",
+          "h3_lora_compat_advanced.py": "af8159ffe504aaad7bc73c557fcd281cc6e0eb28aab4146ad1ef8be15aa6dd84",
+          "nodes_vdn_h3_advanced.py": "af438bc7235eb1980cbbc7aa66825ee77f56ece471d22b6e04745530192aaf24",
+          "sampling.py": "b3c9649c00d0f89437a4d9433c6f7dd996e530a8a981eed91437c73c9bfe712a",
+          "vdn_attention_compat.py": "472d7ce4705bc83f20f1b99057188d84c6675a6a2d94b50440b47b9ceff0aefc",
+          "vdn_h3_advanced.py": "dea4cee80722d70752ea0bedf2cd402075388d5d62e8aa8fc7ece556030ccfb8",
+          "vdn_sdpa_backend.py": "ebd7198d5a68cd704ae3ca41f8780e1119070dc4e207c8307ff1131ad0bb38df"
+        },
+        "runtime_launch": false,
+        "schema": "h3.b_vdn.runtime_source.v2",
+        "shared_model_categories": [
+          "diffusion_models",
+          "text_encoders",
+          "vae",
+          "loras"
+        ],
+        "vdn_t8_revision": "e4ff8607a982ecea22d68347efc4bcc356b996ea"
+      },
+      "sampling": {
+        "plan_node": "7",
+        "sampler": "euler",
+        "sampler_node": "10",
+        "scheduler": "native_flow",
+        "shift_audio": 3.0,
+        "shift_video": 12.0,
+        "steps": 8
+      },
+      "shape": {
+        "actual_duration_seconds": 15.083333333333334,
+        "audio_mode": "native",
+        "duration_seconds": 15,
+        "fps": 24,
+        "frames": 362,
+        "height": 864,
+        "mode": "t2v",
+        "trim": false,
+        "width": 480
+      },
+      "status": "formal",
+      "structure_sha256": "27dca2e8c3a6094759ce0395e8843f53bf26ec78826db37f4743a98c9c2d114c",
+      "template": "recipes/B8.json",
+      "template_sha256": "b619557e7abefa4d0077469c5189d091293b9221de3b25b3e7f6c21b912d98d8",
+      "trigger": "",
+      "version": "20260910.1",
+      "weights": [
+        {
+          "filename": "minimax_h3_fl2va_int8_convrot.safetensors",
+          "hash_evidence": "experiments/optimization-20260909/c_realism/prepare.py",
+          "role": "base",
+          "sha256": "7ad4c73e6e378b822ffd1629f27f632d3787d95f5e468e3af958f98c58df96a5"
+        },
+        {
+          "filename": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "text_encoder",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_video_vae_fp16.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "video_vae",
+          "sha256": null
+        },
+        {
+          "filename": "minimax_h3_audio_vae_fp32.safetensors",
+          "hash_evidence": "full file hash not present in reviewed local evidence; runtime must independently pin",
+          "role": "audio_vae",
+          "sha256": null
+        },
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/linear_branch/model.safetensors",
+          "role": "vdn",
+          "sha256": "dec6981c7874f5b3bc92d1a02e256b673a3b3499dc1a124714bb3b19da602855",
+          "size_bytes": 4279428112
+        },
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/adapters/default/adapter_model.safetensors",
+          "role": "vdn",
+          "sha256": "58558fef506f88bb41649242de9b9b3a365da806b51b2e96afbbe1625222058a",
+          "size_bytes": 334026912
+        },
+        {
+          "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/adapters/turbo/adapter_model.safetensors",
+          "role": "vdn",
+          "sha256": "24fc93c82fe84dc45d0627f4e72c637bc387d282ba18f60ed3b7f8c81089392c",
+          "size_bytes": 851452696
+        }
+      ]
+    }
+  ],
+  "retired_recipe_ids": [
+    "R0",
+    "C0",
+    "C1",
+    "D4",
+    "A8",
+    "A4_C05"
+  ],
+  "schema_version": 1
+}

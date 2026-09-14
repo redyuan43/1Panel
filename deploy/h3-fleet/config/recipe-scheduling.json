@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "enabled": false,
+  "experimental_only": true,
+  "reclaim_factor": 0.5,
+  "stable_seconds": 60,
+  "global_margin_gib": 2,
+  "static_budget_gib": 18,
+  "idle_unload_seconds": 300,
+  "protected_wait_seconds": 900,
+  "backends": [],
+  "qualified_combinations": [],
+  "validation_combinations": [],
+  "note": "No runtime is promoted by a code release. Bind exact evidence and isolated runtime identities before enabling experimental dispatch."
+}

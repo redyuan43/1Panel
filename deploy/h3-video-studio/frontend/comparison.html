@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>H3 · 粉色广告对照实验</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; color: #162923; background: #eeede7; }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 28px; }
+    main { max-width: 1500px; margin: auto; }
+    header { border-bottom: 2px solid #173c32; padding-bottom: 20px; margin-bottom: 24px; }
+    h1 { font-size: clamp(24px, 4vw, 36px); margin: 8px 0; }
+    p { line-height: 1.6; }
+    .eyebrow { color: #087665; font-weight: 700; letter-spacing: .12em; }
+    .actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+    button, .back { padding: 10px 16px; border: 1px solid #648176; border-radius: 4px; cursor: pointer; background: white; color: #163c30; font: inherit; text-decoration: none; }
+    button:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid #b56922; outline-offset: 3px; }
+    #status { color: #526960; }
+    #execution { padding: 16px; border: 2px solid #087665; background: #e4f2ec; }
+    .run-state { font-weight: 600; color: #087665; overflow-wrap: anywhere; }
+    #cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr)); gap: 20px; }
+    article { background: #fff; border: 1px solid #bdc8c1; padding: 18px; min-width: 0; }
+    h2 { margin: 0 0 12px; font-size: 20px; }
+    video { display: block; width: 100%; height: min(66vh, 640px); object-fit: contain; background: #14201b; }
+    .pending { min-height: 160px; display: grid; place-items: center; background: #f3f4ef; color: #536a60; padding: 20px; }
+    .facts { font-variant-numeric: tabular-nums; color: #526960; }
+    details { border-top: 1px solid #d6ded9; padding-top: 12px; margin-top: 12px; }
+    summary { cursor: pointer; }
+    .note { padding: 14px; border-left: 3px solid #ad6a20; background: #fff9ec; }
+    @media (max-width: 600px) { body { padding: 16px; } video { height: min(70vh, 560px); } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="eyebrow">H3 / CONTROLLED COMPARISON</div>
+    <h1>15秒粉色广告 · 配方对照</h1>
+    <p>保留原有7项对照，新增3项 A4 人物增强实验：仅触发词、人物 LoRA 0.5、人物 LoRA 1.0。以原有 A4 为共同参照，保持提示词正文、Seed、时长和分辨率不变。生成成功不等于画质胜出。状态每5秒刷新，不会自动替换正在播放的视频。</p>
+    <p class="note" id="human-review">效果评审：待你人工确认。系统仅验证生成成功、时长及音视频可解码；不自动评价画质、选优或替换默认方案。人工评审不阻塞其余方案生成与技术验证。</p>
+    <div class="actions">
+      <button id="refresh" type="button">刷新结果</button>
+      <button id="play" type="button">从头播放全部</button>
+      <a class="back" href="/">返回工作室</a>
+    </div>
+    <p id="status" role="status" aria-live="polite">正在读取实验结果…</p>
+    <p id="execution" role="status" aria-live="polite">正在核对后台执行状态…</p>
+    <p class="note">预览目标15秒，原始成片按模型帧网格约15.08秒。耗时为实际工作流执行时间，不含下载；不同显卡和分辨率不能直接比较。多片播放时仅第一条有声音。</p>
+  </header>
+  <section id="cards" aria-label="视频对照结果"></section>
+</main>
+<script>
+  const cards = document.querySelector('#cards');
+  const status = document.querySelector('#status');
+  const labels = {};
+  const admissionLabels = {
+    awaiting_60s_stable_baseline: '等待内存稳定60秒',
+    awaiting_continuous_resource_observation: '等待连续资源观察',
+    waiting_for_prior_task_admission: '等待前一路进入运行',
+    admission_cgroup_remaining_peak_budget: '计算组内存不足以预留下一路峰值',
+    admission_host_remaining_peak_budget: '主机内存峰值余量不足',
+    admission_disk_budget: '产物磁盘余量不足',
+    candidate_full_vram_budget_unavailable: '目标显卡峰值显存余量不足',
+    no_active_owned_sampler_progress: '等待实际采样进度',
+    sampler_peak_observation_window_incomplete_or_stale: '等待采样阶段稳定观察',
+    candidate_websocket_unavailable: '等待采样监测连接恢复',
+  };
+  const stateLabels = { running: '正在生成', queued: '已提交，等待执行', scheduled: '已排程，前一任务完成后执行', completed: '已成片，待你人工确认效果', finalizing: '生成结束，正在校验', failed: '本次执行失败', needs_reconciliation: '状态待核对', reconciling: '状态待核对', waiting_stable_idle_swap: '等待内存稳定窗口', prepared: '待安排生成', preflight: '执行前检查', freeing_fast_cache: '准备显存' };
+  stateLabels.not_run = '本轮未提交、未运行；所属并发批次失败';
+  async function updateExecution() {
+    try {
+      const response = await fetch('comparison-results/live.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error('状态暂不可用');
+      const data = await response.json();
+      if (!data.available || Date.now() / 1000 - data.observed_at > 30) throw new Error('监控数据过期，不能确认正在运行的任务');
+      const active = data.cases.filter(record => ['running', 'queued', 'finalizing', 'preflight', 'freeing_fast_cache', 'waiting_stable_idle_swap'].includes(record.status));
+      document.querySelector('#execution').textContent = active.length
+        ? active.map(record => `当前：${record.id}${record.replica ? '（复验）' : ''} · ${labels[record.id] || record.id} · ${stateLabels[record.status]} · ${workerLabel(record)} · 已用时 ${record.started_at ? Math.floor((Date.now() / 1000 - record.started_at) / 60) + '分' + Math.floor((Date.now() / 1000 - record.started_at) % 60) + '秒' : '待计时'} · 任务 ${record.prompt_id}`).join('；')
+        : '当前没有确认正在生成的视频；待生成项目不代表已经提交队列。';
+      for (const article of cards.querySelectorAll('article')) {
+        const record = data.cases.find(item => item.id === article.dataset.case);
+        const line = article.querySelector('.run-state');
+        line.textContent = record ? `${stateLabels[record.status] || record.status}${record.error ? '：' + record.error : ''}` : '待安排生成';
+        if (record?.admission_reason && record.status === 'prepared') {
+          const reasons = record.admission_reason.split(';').map(reason => {
+            const separator = reason.indexOf(':');
+            const key = separator < 0 ? reason : reason.slice(separator + 1);
+            return (separator < 0 ? '' : reason.slice(0, separator) + '：') + (admissionLabels[key] || key);
+          });
+          line.textContent = `等待资源准入：${reasons.join('；')}`;
+        }
+        if (record?.status === 'completed' && !article.querySelector('video')) {
+          line.textContent = '生成已结束，预览尚未载入；请点击“刷新结果”';
+          article.querySelector('.pending').textContent = '等待成片发布或刷新结果，不代表仍在验证内核';
+        }
+        if (record?.retained_from_failed_batch && record.batch_status === 'failed') {
+          line.textContent = article.querySelector('video')
+            ? '本条成片已保留；所属并发批次失败'
+            : '本条已成片，待单独发布；所属并发批次失败';
+        }
+        if (record) line.textContent += ` · ${workerLabel(record)}`;
+        if (record?.replica) line.textContent += ' · 本次为复验，仅保留独立证据；本卡预览仍为原成片，不代表本轮结果';
+      }
+    } catch (error) {
+      document.querySelector('#execution').textContent = '无法确认实时状态：' + error.message;
+      for (const line of cards.querySelectorAll('.run-state')) line.textContent = '实时状态暂不可用';
+    }
+  }
+  function workerLabel(record) {
+    return `${record.lane || '未确认通道'} · GPU ${record.gpu_uuid || '未确认'}`;
+  }
+  function textElement(tag, value, className) {
+    const element = document.createElement(tag);
+    element.textContent = value;
+    if (className) element.className = className;
+    return element;
+  }
+  async function load() {
+    document.querySelector('#refresh').disabled = true;
+    try {
+      const response = await fetch('comparison-results/index.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error('结果清单暂不可用');
+      const data = await response.json();
+      if (!Array.isArray(data.cases)) throw new Error('结果清单格式错误');
+      const plannedResponse = await fetch('comparison-planned.json', { cache: 'no-store' });
+      if (!plannedResponse.ok) throw new Error('新增实验清单暂不可用');
+      const planned = await plannedResponse.json();
+      const existing = new Set(data.cases.map(record => record.id));
+      data.cases.push(...planned.cases.filter(record => !existing.has(record.id)));
+      const fragment = document.createDocumentFragment();
+      let ready = 0;
+      for (const [index, record] of data.cases.entries()) {
+        const article = document.createElement('article');
+        article.dataset.case = record.id;
+        labels[record.id] = record.label;
+        article.append(textElement('h2', `${record.id} · ${record.label}`));
+        article.append(textElement('p', '正在核对后台状态…', 'run-state'));
+        if (typeof record.video === 'string' && /^comparison-results\/[A-Z0-9_-]+\.mp4$/.test(record.video)) {
+          const video = document.createElement('video');
+          video.controls = true;
+          video.playsInline = true;
+          video.preload = 'metadata';
+          video.muted = ready > 0;
+          video.src = record.video;
+          video.setAttribute('aria-label', '样片 ' + (index + 1));
+          article.append(video);
+          article.append(textElement('p', '效果：待人工确认（不阻塞其他任务）', 'facts'));
+          ready += 1;
+          article.append(textElement('p', `${record.width} × ${record.height} · ${record.duration_seconds}秒 · ${record.worker_seconds}秒执行`, 'facts'));
+        } else {
+          article.append(textElement('div', record.state || '等待验证', 'pending'));
+        }
+        const details = document.createElement('details');
+        details.append(textElement('summary', '查看配方与验证状态'));
+        details.append(textElement('p', `${record.id} · ${record.label}`));
+        details.append(textElement('p', record.state || '等待验证'));
+        if (record.note) details.append(textElement('p', record.note));
+        article.append(details);
+        fragment.append(article);
+      }
+      cards.replaceChildren(fragment);
+      updateExecution();
+      status.textContent = `共 ${data.cases.length} 项对照 · 已有预览 ${ready} 条 · 待出片 ${data.cases.length - ready} 条。原有视频保留；新视频发布后点击“刷新结果”加载，播放中的视频不会被自动替换。`;
+    } catch (error) {
+      status.textContent = '读取失败：' + error.message + '。请稍后点击刷新。';
+    } finally {
+      document.querySelector('#refresh').disabled = false;
+    }
+  }
+  document.querySelector('#refresh').addEventListener('click', load);
+  document.querySelector('#play').addEventListener('click', async () => {
+    const videos = [...cards.querySelectorAll('video')];
+    const results = await Promise.allSettled(videos.map((video, index) => {
+      video.currentTime = 0;
+      video.muted = index > 0;
+      return video.play();
+    }));
+    if (results.some(result => result.status === 'rejected')) status.textContent = '部分视频需要手动点击播放。';
+  });
+  load();
+  setInterval(updateExecution, 5000);
+</script>
+</body>
+</html>

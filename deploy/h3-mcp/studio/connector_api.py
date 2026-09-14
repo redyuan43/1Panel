@@ -71,7 +71,7 @@ TOOL_DEFINITIONS = [
           "expected_revision; edits require both. Original prompt is immutable. Omitted edit options are preserved.",
           {**WRITE_FIELDS, "original_prompt": PROMPT, "prompt": PROMPT,
            "recipe_id": {"type": "string", "enum": list(RECIPE_IDS), "default": "A4"},
-           "preview_recipe_id": {"type": "string", "enum": ["A4", "A4_C0", "A4_C1", "B8"], "description": "Explicit first-frame comparison recipe; requires separate runtime qualification."},
+           "preview_recipe_id": {"anyOf": [{"type": "string", "enum": ["A4", "A4_C0", "A4_C1", "B8"]}, {"type": "null"}], "description": "Explicit first-frame recipe; null selects the original 14-step profile. Requires separate runtime qualification."},
            "name": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": r"\S"},
            "seed": {"type": "integer", "minimum": -1, "maximum": 2**63 - 2},
            "verbatim": {"type": "boolean", "description": "Require prompt to equal original_prompt exactly."},
@@ -94,7 +94,9 @@ TOOL_DEFINITIONS = [
           (*WRITE_FIELDS, "expected_output_id")),
     _tool("h3_start_preview", "Explicitly start preview through Studio/Fleet, or reconcile the existing unknown "
           "execution. Never starts a later stage; both write and generation gates are required.",
-          {**WRITE_FIELDS, "expected_output_id": IDENTIFIER, "expected_run_id": RUN_ID},
+          {**WRITE_FIELDS, "expected_output_id": IDENTIFIER, "expected_run_id": RUN_ID,
+           "target_node": {"type": "string", "enum": ["auto", "ivan", "ivan-u24", "edge"],
+                           "description": "Optional execution device; omitted preserves an existing target, otherwise auto. Unknown submissions stay on their original device."}},
           (*WRITE_FIELDS, "expected_output_id", "expected_run_id")),
     _tool("h3_list_tasks", "List only projects owned by this connector client, newest first.",
           {"limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
@@ -522,7 +524,7 @@ class ConnectorAPI:
         inputs["assets"] = assets
         if "preview_recipe_id" in arguments:
             inputs["preview_recipe_id"] = arguments["preview_recipe_id"]
-        elif project and project.get("preview_recipe_id"):
+        elif project and project.get("preview_recipe_id") and project["mode"] == inputs["mode"] == "i2v":
             inputs["preview_recipe_id"] = project["preview_recipe_id"]
         if inputs.get("preview_recipe_id") and inputs["mode"] != "i2v":
             raise ConnectorError(400, "accelerated first-frame recipe requires i2v")
@@ -574,6 +576,8 @@ class ConnectorAPI:
             item["execution_profile"] = recipe if inputs["mode"] != "t2v" else None
             if inputs.get("preview_recipe_id"):
                 item["preview_recipe_id"] = inputs["preview_recipe_id"]
+            else:
+                item.pop("preview_recipe_id", None)
             self.module.validate_project_config(item)
             if "name" in arguments:
                 item["name"] = arguments["name"]
@@ -639,7 +643,7 @@ class ConnectorAPI:
                 raise ConnectorError(409, "recipe version changed; save and confirm a new draft")
         elif not preview.get("execution_id"):
             raise ConnectorError(409, "unknown execution requires reconciliation")
-        options = {"new_seed": False}
+        options = {"new_seed": False, "target_node": arguments.get("target_node", preview.get("target_node", "auto"))}
         if project["mode"] == "t2v":
             options["recipe_id"] = project["recipe_id"]
         self.module.start_stage(project["id"], "preview", options)

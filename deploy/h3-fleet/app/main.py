@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .multimodal_catalog import MultimodalCatalog
+
 import asyncio
 import hashlib
 import hmac
@@ -10,6 +12,7 @@ import shutil
 import sqlite3
 import time
 import uuid
+from contextlib import suppress
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,11 +20,13 @@ from typing import Any
 
 import httpx
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .workflow_builder import SUPPORTED_MODES, build_workflow
 from .admission import BUSY, CapacityPolicy, InstanceLock, SwapRecovery, resource_snapshot
+from .recipes import RecipeCatalog
+from .recipe_dispatch import RecipeDispatcher, backend_identity
 
 
 ACTIVE_STATUSES = {"queued", *BUSY}
@@ -110,6 +115,14 @@ class JobStore:
                 ("admission_reason", "TEXT"),
                 ("submission_started_at", "REAL"),
                 ("failure_reason", "TEXT"),
+                ("recipe_id", "TEXT"),
+                ("recipe_version", "TEXT"),
+                ("backend_json", "TEXT"),
+                ("admission_json", "TEXT"),
+                ("reconciliation_json", "TEXT"),
+                ("worker_peak_bytes", "INTEGER"),
+                ("execution_seconds", "REAL"),
+                ("progress_json", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
@@ -120,6 +133,7 @@ class JobStore:
                 """
             )
             connection.execute("CREATE TABLE IF NOT EXISTS controls (name TEXT PRIMARY KEY, value TEXT NOT NULL)")
+            connection.execute("CREATE TABLE IF NOT EXISTS recipe_audit (id INTEGER PRIMARY KEY, timestamp REAL NOT NULL, event TEXT NOT NULL, details_json TEXT NOT NULL)")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=30)
@@ -220,6 +234,10 @@ class JobStore:
             job = dict(connection.execute("SELECT * FROM jobs WHERE prompt_id = ?", (prompt_id,)).fetchone())
             if job["status"] != "queued":
                 return False
+            if self.release_gate_reason(job.get("execution_id"), connection):
+                connection.execute("UPDATE jobs SET admission_reason=? WHERE prompt_id=?",
+                                   ("release_validation_gate", prompt_id))
+                return False
             demand = json.loads(job["demand_json"])
             lease = self.validation_lease()
             experiment = lease.get("experiment") if lease and (job.get("execution_id") or "").startswith(lease["owner"] + "_") else None
@@ -247,10 +265,10 @@ class JobStore:
                 reason = "lane_reserved"
             # FIFO prevents a stream of short requests starving an older long job.
             older = connection.execute(
-                "SELECT 1 FROM jobs WHERE status = 'queued' AND (created_at < ? OR (created_at = ? AND prompt_id < ?)) LIMIT 1",
+                "SELECT execution_id FROM jobs WHERE status = 'queued' AND (created_at < ? OR (created_at = ? AND prompt_id < ?))",
                 (job["created_at"], job["created_at"], prompt_id),
-            ).fetchone()
-            if older:
+            ).fetchall()
+            if any(not self.release_gate_reason(item["execution_id"], connection) for item in older):
                 reason = "earlier_job_queued"
             if reason:
                 connection.execute("UPDATE jobs SET admission_reason = ? WHERE prompt_id = ?", (reason, prompt_id))
@@ -261,6 +279,42 @@ class JobStore:
             )
         return True
 
+    def release_validation_gate(self, connection=None) -> dict[str, Any]:
+        if connection is None:
+            with self._connect() as connection:
+                return self.release_validation_gate(connection)
+        row = connection.execute("SELECT value FROM controls WHERE name='release_validation_gate'").fetchone()
+        return json.loads(row[0]) if row else {"enabled": False, "allow_execution_prefixes": []}
+
+    def release_gate_reason(self, execution_id: str | None, connection=None) -> str | None:
+        gate = self.release_validation_gate(connection)
+        if gate.get("enabled") is False:
+            return None
+        if not isinstance(execution_id, str) or not any(
+            re.fullmatch(r"studio_[0-9a-f]{12}_", prefix) and execution_id.startswith(prefix)
+            and len(execution_id) > len(prefix) for prefix in gate.get("allow_execution_prefixes", [])
+        ):
+            return "release_validation_gate"
+        return None
+
+    def set_release_validation_gate(self, body: dict[str, Any]) -> dict[str, Any]:
+        if (not isinstance(body, dict) or set(body) != {"enabled", "allow_execution_prefixes"}
+                or type(body["enabled"]) is not bool or not isinstance(body["allow_execution_prefixes"], list)):
+            raise ValueError("expected enabled and allow_execution_prefixes")
+        prefixes = body["allow_execution_prefixes"]
+        if (len(prefixes) > 32 or any(not isinstance(prefix, str) or not re.fullmatch(
+                r"studio_[0-9a-f]{12}_", prefix) for prefix in prefixes)
+                or len(set(prefixes)) != len(prefixes) or (not body["enabled"] and prefixes)):
+            raise ValueError("prefixes must be unique studio_<12 lowercase hex project id>_; disable requires []")
+        gate = {**body, "updated_at": time.time()}
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute("INSERT OR REPLACE INTO controls(name,value) VALUES ('release_validation_gate',?)",
+                               (json.dumps(gate),))
+            connection.execute("INSERT INTO recipe_audit(timestamp,event,details_json) VALUES (?,?,?)",
+                               (gate["updated_at"], "release_validation_gate_updated", json.dumps(gate)))
+        return gate
+
     def validation_lease(self) -> dict[str, Any] | None:
         with self._connect() as connection:
             row = connection.execute("SELECT value FROM controls WHERE name = 'validation_lease'").fetchone()
@@ -269,11 +323,45 @@ class JobStore:
             return lease
         return None
 
+    def studio_batch(self) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT value FROM controls WHERE name='studio_batch'").fetchone()
+        batch = json.loads(row[0]) if row else None
+        if batch and (batch["expires_at"] > time.time() or self.active()):
+            return batch
+        return None
+
+    def reserve_studio_batch(self, owner: str) -> dict[str, Any]:
+        if not re.fullmatch(r"studio_batch_[A-Za-z0-9_-]{1,100}", owner):
+            raise HTTPException(400, "Invalid Studio batch owner")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = self.studio_batch()
+            if self.validation_lease() or (existing and existing["owner"] != owner):
+                raise HTTPException(409, "Another exclusive execution window is active")
+            if any(not (job.get("execution_id") or "").startswith(owner + "_") for job in self.active()):
+                raise HTTPException(409, "Existing fleet jobs must finish before a Studio batch")
+            batch = {"owner": owner, "expires_at": time.time() + 21600}
+            connection.execute("INSERT OR REPLACE INTO controls VALUES ('studio_batch', ?)", (json.dumps(batch),))
+        return batch
+
+    def release_studio_batch(self, owner: str) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            batch = self.studio_batch()
+            if batch and batch["owner"] != owner:
+                raise HTTPException(409, "Studio batch owner differs")
+            if batch and self.active():
+                raise HTTPException(409, "Studio tasks must reach terminal states before release")
+            connection.execute("DELETE FROM controls WHERE name='studio_batch'")
+
     def set_validation_lease(self, owner: str, ttl: int, experiment: dict[str, Any] | None = None) -> dict[str, Any]:
         if experiment is not None:
             CapacityPolicy.validate_experiment(experiment)
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if self.studio_batch():
+                raise HTTPException(status_code=409, detail="Studio batch window is active")
             lease = self.validation_lease()
             if lease and lease["owner"] != owner:
                 raise HTTPException(status_code=409, detail="another validation window is active")
@@ -327,6 +415,8 @@ class JobStore:
                 f"UPDATE jobs SET {assignments}, version = version + 1 WHERE prompt_id = ?",
                 (*values.values(), prompt_id),
             )
+            from .backend_residue import record_terminal
+            record_terminal(connection, prompt_id)
         return self.get(prompt_id)
 
 
@@ -342,12 +432,15 @@ class Fleet:
                 )
             )
         )
-        self.client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, read=300.0))
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(180.0, read=300.0), trust_env=False)
         self.assignment_lock = asyncio.Lock()
         self.policy = CapacityPolicy()
         self.swap_recovery = SwapRecovery(self.policy.data["resources"].get("swap_idle_stable_seconds", 60))
         self.instance_lock = InstanceLock(self.store.path)
         self.draining = False
+        self.recipes = RecipeDispatcher(self, MultimodalCatalog(RecipeCatalog(os.environ.get("H3_BASE_RECIPE_CATALOG")), os.environ.get("H3_MULTIMODAL_CATALOG")), Path(os.environ.get(
+            "H3_RECIPE_POLICY", str(Path(__file__).resolve().parents[1] / "config/recipe-scheduling.json"))))
+        self.scheduler_task = None
 
     @property
     def lane_data_root(self) -> Path:
@@ -359,7 +452,28 @@ class Fleet:
         )
 
     async def close(self) -> None:
+        if self.scheduler_task:
+            self.scheduler_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.scheduler_task
+        await self.recipes.close()
         await self.client.aclose()
+
+    async def scheduling_loop(self) -> None:
+        while True:
+            try:
+                await self.refresh_active()
+                if not self.recipes.enabled:
+                    async with self.assignment_lock:
+                        await self.recipes.sample()
+                        await self.recipes.hard_protection(self.store.active())
+                await self.recipes.idle_cleanup()
+            except Exception as error:
+                self.recipes.last_error = str(error)
+            await asyncio.sleep(5)
+
+    async def cancel_owned_recipe_job(self, prompt_id: str) -> dict[str, Any]:
+        return await _cancel_job_locked(prompt_id, {})
 
     async def capacity_snapshot(self, queues: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         try:
@@ -391,7 +505,16 @@ class Fleet:
         if job["status"] in TERMINAL_STATUSES:
             return job
         if job["status"] == "queued":
+            if job.get("recipe_id"):
+                if not getattr(self, "backend_lifecycle", None):
+                    await self.recipes.tick()
+                return self.store.get(job["prompt_id"])
             return await self.dispatch_queued(job)
+        if job.get("backend_json"):
+            try:
+                backend_identity(json.loads(job["backend_json"])["identity"])
+            except (OSError, ValueError, KeyError):
+                return self.store.update(job["prompt_id"], status="reconciling", failure_reason="bound_runtime_identity_changed")
         if job["status"] in {"reserved", "reconciling"}:
             if (job["status"] == "reserved" and job.get("demand_json")
                     and not job.get("submission_started_at") and not job["upstream_prompt_id"]):
@@ -400,7 +523,7 @@ class Fleet:
                     return self.store.update(job["prompt_id"], lane_id="", status="queued")
                 return job
             return await self.reconcile_submission(job)
-        lane = self.lanes_by_id[job["lane_id"]]
+        lane = self.recipes.lane_for(job)
         try:
             response = await self.client.get(
                 f"{lane.url}/history/{job['upstream_prompt_id']}",
@@ -412,6 +535,7 @@ class Fleet:
                 status = record.get("status", {})
                 if status.get("status_str") == "error":
                     updated = self.store.update(job["prompt_id"], status="error")
+                    await self.recipes.completed(updated, record)
                     self.cleanup_job_inputs(updated)
                     return updated
                 output = find_video_output(record)
@@ -423,10 +547,12 @@ class Fleet:
                         output_subfolder=output["subfolder"],
                         output_type=output["type"],
                     )
+                    await self.recipes.completed(updated, record)
                     self.cleanup_job_inputs(updated)
                     return updated
                 if status.get("completed"):
                     updated = self.store.update(job["prompt_id"], status="error")
+                    await self.recipes.completed(updated, record)
                     self.cleanup_job_inputs(updated)
                     return updated
             queue_response = await self.client.get(f"{lane.url}/queue", timeout=30)
@@ -454,11 +580,17 @@ class Fleet:
             if job["status"] in BUSY:
                 await self.refresh_job(job)
         for job in jobs:
-            if job["status"] == "queued":
+            if job["status"] == "queued" and not job.get("recipe_id"):
                 await self.refresh_job(job)
+        await self.recipes.tick()
 
     async def reconcile_submission(self, job: dict[str, Any]) -> dict[str, Any]:
-        lane = self.lanes_by_id[job["lane_id"]]
+        if job.get("backend_json"):
+            try:
+                backend_identity(json.loads(job["backend_json"])["identity"])
+            except (OSError, ValueError, KeyError):
+                return self.store.update(job["prompt_id"], status="reconciling", failure_reason="bound_runtime_identity_changed")
+        lane = self.recipes.lane_for(job)
         try:
             response = await self.client.get(f"{lane.url}/queue", timeout=30)
             response.raise_for_status()
@@ -512,6 +644,12 @@ class Fleet:
         for lane in self.lanes:
             if not lane.enabled:
                 continue
+            lifecycle = getattr(self, 'backend_lifecycle', None)
+            if lifecycle and await lifecycle.inactive_lane(lane):
+                result.append({'lane_id': lane.id, 'queued_or_running': 0,
+                               'running_count': 0, 'pending_count': 0,
+                               'untracked_count': 0, 'managed_worker_stopped': True})
+                continue
             response = await self.client.get(f"{lane.url}/queue", timeout=10)
             response.raise_for_status()
             records = [item for key in ("queue_running", "queue_pending") for item in response.json().get(key, [])]
@@ -526,6 +664,10 @@ class Fleet:
             job = self.store.get(job["prompt_id"])
             if job["status"] != "queued":
                 return job
+            lifecycle = getattr(self, "backend_lifecycle", None)
+            reason = "backend_disabled" if lifecycle and not lifecycle.policy()["enabled"] else "fleet_draining" if self.draining else self.store.release_gate_reason(job.get("execution_id"))
+            if reason:
+                return self.store.update(job["prompt_id"], admission_reason=reason)
             demand = json.loads(job["demand_json"]) if job.get("demand_json") else self.policy.demand(
                 json.loads(job.get("request_json") or "{}"), job["profile"]
             )
@@ -551,7 +693,12 @@ class Fleet:
         payload: dict[str, Any],
         lane: Lane,
     ) -> dict[str, Any]:
+        reason = "fleet_draining" if self.draining else self.store.release_gate_reason(job.get("execution_id"))
+        if reason:
+            return self.store.update(job["prompt_id"], status="queued", lane_id="", admission_reason=reason)
         payload = json.loads(json.dumps(payload))
+        if job.get("recipe_id"):
+            payload["client_id"] = job["prompt_id"]
         payload.setdefault("extra_data", {}).setdefault("h3", {})["fleet_prompt_id"] = job["prompt_id"]
         self.store.update(job["prompt_id"], submission_started_at=time.time())
         try:
@@ -570,11 +717,13 @@ class Fleet:
             upstream_prompt_id = ""
         if not upstream_prompt_id:
             return self.store.update(job["prompt_id"], status="reconciling", failure_reason="submission_response_unknown")
-        return self.store.update(
+        updated = self.store.update(
             job["prompt_id"],
             upstream_prompt_id=upstream_prompt_id,
             status="submitted",
         )
+        self.recipes.bind_progress(updated)
+        return updated
 
     def cleanup_input_files(self, filenames: list[str]) -> None:
         for filename in filenames:
@@ -666,6 +815,8 @@ async def lifespan(_: FastAPI):
     fleet.instance_lock.acquire()
     try:
         fleet.store.initialize()
+        if fleet.recipes.enabled or any(job.get("recipe_id") and job["status"] in BUSY for job in fleet.store.active()):
+            fleet.scheduler_task = asyncio.create_task(fleet.scheduling_loop())
         yield
     finally:
         await fleet.close()
@@ -714,6 +865,7 @@ def execution_public(job: dict[str, Any]) -> dict[str, Any]:
     }.get(job["status"], "running")
     contract = json.loads(job["execution_json"]) if job.get("execution_json") else {}
     lane = fleet.lanes_by_id.get(job["lane_id"])
+    backend = json.loads(job.get("backend_json") or "{}")
     result = {
         "execution_id": job["execution_id"],
         "status": status,
@@ -728,6 +880,11 @@ def execution_public(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job["updated_at"],
         "admission_reason": job.get("admission_reason"),
         "reconciliation_required": job["status"] == "reconciling",
+        "recipe_id": job.get("recipe_id"),
+        "recipe_version": job.get("recipe_version"),
+        "backend_id": backend.get("id"),
+        "runtime_version": backend.get("runtime_version"),
+        "execution_seconds": job.get("execution_seconds"),
     }
     if status == "failed":
         result["error"] = "Ivan H3 execution failed."
@@ -755,16 +912,31 @@ async def replicate_input(
     overwrite: str = "true",
 ) -> list[dict[str, Any]]:
     async def upload(lane: Lane) -> dict[str, Any]:
+        backends = [backend for backend in fleet.recipes.backends.values()
+                    if backend.get('unified_memory') and backend['lane_id'] == lane.id]
+        if backends:
+            if len(backends) != 1:
+                raise HTTPException(409, 'edge_input_backend_ambiguous')
+            from .edge_inputs import stage_input
+            try:
+                receipt = await asyncio.to_thread(stage_input, backends[0]['input_root'], filename, content)
+            except (ValueError, OSError) as error:
+                raise HTTPException(409, 'edge_input_staging_rejected:' + type(error).__name__) from error
+            return {'lane': lane.id, 'status_code': 200, 'ok': True, 'detail': None, 'staged': receipt}
         response = await fleet.client.post(
             f"{lane.url}/upload/image",
             data={"type": "input", "overwrite": overwrite},
             files={"image": (filename, content, content_type)},
         )
+        exact_name = True
+        if response.is_success and overwrite == "false":
+            uploaded = response.json()
+            exact_name = uploaded.get("name") == filename and not uploaded.get("subfolder")
         return {
             "lane": lane.id,
             "status_code": response.status_code,
-            "ok": response.is_success,
-            "detail": response.text[:500] if not response.is_success else None,
+            "ok": response.is_success and exact_name,
+            "detail": "Immutable input name changed" if not exact_name else response.text[:500] if not response.is_success else None,
         }
 
     results = await asyncio.gather(*(
@@ -795,6 +967,7 @@ async def router_options(request: Request) -> dict[str, Any]:
             for profile in ("preview", "quality")
         },
         "capacity_policy": fleet.policy.data,
+        "recipe_catalog": fleet.recipes.public(),
         "required_assets": {
             "i2v": ["first_frame"],
             "l2v": ["last_frame"],
@@ -818,14 +991,66 @@ async def router_drain(request: Request) -> dict[str, Any]:
     return {"draining": True, "active": active}
 
 
+@app.get("/api/router/release-validation-gate")
+async def get_release_validation_gate(request: Request) -> dict[str, Any]:
+    router_protected(request)
+    return fleet.store.release_validation_gate()
+
+
+@app.post("/api/router/release-validation-gate")
+async def set_release_validation_gate(request: Request) -> dict[str, Any]:
+    router_protected(request)
+    body = await request.json()
+    async with fleet.assignment_lock:
+        try:
+            return fleet.store.set_release_validation_gate(body)
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+
+
 @app.get("/api/router/capacity")
 async def router_capacity(request: Request) -> dict[str, Any]:
     router_protected(request)
     queues = await fleet.inspect_queues()
-    return {"policy": fleet.policy.data, "resources": await fleet.capacity_snapshot(queues),
+    snapshot = await fleet.capacity_snapshot(queues)
+    active = fleet.store.active()
+    lease = fleet.store.validation_lease()
+    demands = [json.loads(job["demand_json"]) if job.get("demand_json") else {
+        "class": "long", "profile": job["profile"],
+        "memory_budget_bytes": fleet.policy.data["long"]["memory_budget_gib"] * 1024**3,
+        "disk_budget_bytes": fleet.policy.data["long"]["disk_budget_gib"] * 1024**3,
+    } for job in active if job["status"] != "queued"]
+    reason = ("release_validation_gate" if fleet.store.release_validation_gate().get("enabled") else
+              "controlled_validation" if lease else "studio_batch_active" if fleet.store.studio_batch()
+              else "fleet_draining" if fleet.draining else "earlier_job_queued" if any(job["status"] == "queued" for job in active)
+              else "untracked_upstream_work" if any(item["untracked_count"] for item in queues) else None)
+    occupied = {job["lane_id"] for job in active if job["status"] != "queued"}
+    idle_lanes = [lane.id for lane in fleet.lanes if lane.enabled and lane.id not in occupied
+                  and any(item["lane_id"] == lane.id and not item["queued_or_running"] for item in queues)]
+    lifecycle = getattr(fleet, 'backend_lifecycle', None)
+    model_lifecycle = lifecycle.edge.public() if lifecycle and lifecycle.edge else None
+    preparation_guard = await lifecycle.preparation_guard() if model_lifecycle else None
+    return {"policy": fleet.policy.data, "resources": snapshot, "model_lifecycle": model_lifecycle,
+            "preparation_guard": preparation_guard,
             "active": [{"execution_id": job.get("execution_id"), "status": job["status"], "lane_id": job["lane_id"]}
-                       for job in fleet.store.active()],
-            "queues": queues, "validation_lease": fleet.store.validation_lease()}
+                       for job in active],
+            "queues": queues, "validation_lease": lease, "release_validation_gate": fleet.store.release_validation_gate(),
+            "studio_preview": fleet.policy.studio_preview_capacity(demands, snapshot, idle_lanes, reason),
+            "recipe_capacity": await fleet.recipes.capacity()}
+
+
+@app.post("/api/router/recipe-workflow")
+async def recipe_workflow(request: Request) -> dict[str, Any]:
+    router_protected(request)
+    body = await request.json()
+    if not isinstance(body, dict) or set(body) - {"recipe_id", "prompt", "seed", "filename_prefix"}:
+        raise HTTPException(400, "invalid recipe workflow request")
+    try:
+        graph, binding = fleet.recipes.catalog.build(body.get("recipe_id", "A4"), body.get("prompt", ""),
+                                                     body.get("seed", 0), body.get("filename_prefix", "h3-recipe"))
+    except (ValueError, TypeError) as error:
+        raise HTTPException(400, str(error)) from error
+    return {"prompt": graph, "recipe_binding": binding, "enabled": fleet.recipes.enabled}
 
 
 @app.post("/api/router/validation-lease")
@@ -894,13 +1119,15 @@ async def router_create_execution(request: Request) -> dict[str, Any]:
                 fields[name] = str(value)
         allowed = {
             "operation_id", "profile", "mode", "prompt", "duration", "seed",
-            "audio_policy", "aspect_ratio", "watermark", "metadata",
+            "audio_policy", "aspect_ratio", "watermark", "metadata", "recipe_id",
         }
         if set(fields) - allowed:
             raise HTTPException(status_code=400, detail="invalid execution fields")
         execution_id = fields.get("operation_id", "")
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", execution_id):
             raise HTTPException(status_code=400, detail="invalid operation_id")
+        if fleet.store.release_gate_reason(execution_id):
+            raise HTTPException(503, "release_validation_gate")
         if fields.get("audio_policy", "native") != "native":
             raise HTTPException(status_code=400, detail="managed Ivan execution supports native audio only")
         if fields.get("watermark", "false") not in {"true", "false"}:
@@ -929,6 +1156,18 @@ async def router_create_execution(request: Request) -> dict[str, Any]:
             )
         except (FileNotFoundError, ValueError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        recipe_id = fields.get("recipe_id") or ("A4" if fields.get("profile", "preview") == "preview"
+                                                and fields.get("mode") == "t2v" and duration == 15
+                                                and fields.get("aspect_ratio") == "9:16" and not asset_names else None)
+        if recipe_id:
+            if (fields.get("profile", "preview") != "preview" or fields.get("mode") != "t2v"
+                    or duration != 15 or fields.get("aspect_ratio") != "9:16" or asset_names):
+                raise HTTPException(400, "recipes require 15s portrait native-audio T2V preview")
+            try:
+                workflow, recipe_binding = fleet.recipes.catalog.build(recipe_id, fields.get("prompt", ""), seed, "h3exec_" + prefix)
+                contract.update(recipe_binding)
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from error
         metadata = {}
         if fields.get("metadata"):
             try:
@@ -960,6 +1199,7 @@ async def router_create_execution(request: Request) -> dict[str, Any]:
                     "stage": "preview" if fields.get("profile", "preview") == "preview" else "local_768",
                     "profile": fields.get("profile", "preview"),
                     "contract": contract,
+                    **({"recipe_id": recipe_id} if recipe_id else {}),
                 },
             },
         })
@@ -1044,7 +1284,7 @@ async def health() -> dict[str, Any]:
             }
         )
     root = shutil.disk_usage("/")
-    offload = shutil.disk_usage("/mnt/ivan-ext4-offload")
+    offload = shutil.disk_usage(os.environ.get("H3_OFFLOAD_ROOT", "/mnt/ivan-ext4-offload"))
     meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
     available_kib = next(
         int(line.split()[1])
@@ -1078,10 +1318,19 @@ async def submit_prompt(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="H3 fleet is draining")
     if not isinstance(payload.get("prompt"), dict):
         raise HTTPException(status_code=400, detail="prompt must be an object")
+    if payload.get("extra_data", {}).get("h3", {}).get("recipe_id"):
+        return await fleet.recipes.submit(payload)
     stage, profile = classify(payload)
     execution_id, request_digest = execution_identity(payload)
     await fleet.refresh_active()
     async with fleet.assignment_lock:
+        if fleet.draining:
+            raise HTTPException(503, "H3 fleet is draining")
+        if fleet.store.release_gate_reason(execution_id):
+            raise HTTPException(503, "release_validation_gate")
+        studio_batch = fleet.store.studio_batch()
+        if studio_batch and not (execution_id or "").startswith(studio_batch["owner"] + "_"):
+            raise HTTPException(status_code=409, detail="Studio batch has an exclusive fleet window")
         lease = fleet.store.validation_lease()
         if (execution_id or "").startswith("h3val_") and not lease:
             raise HTTPException(status_code=409, detail="validation operation requires an active owned lease")
@@ -1151,7 +1400,16 @@ async def history(prompt_id: str) -> dict[str, Any]:
     job = await fleet.refresh_job(job)
     if job["status"] in {"queued", "reserved"} or not job["upstream_prompt_id"]:
         return {}
-    lane = fleet.lanes_by_id[job["lane_id"]]
+    lifecycle = getattr(fleet, 'backend_lifecycle', None)
+    if lifecycle and lifecycle.edge and job['status'] in TERMINAL_STATUSES:
+        receipt = lifecycle.edge.path.parent.parent / 'evidence' / job['prompt_id'] / 'terminal-runtime-receipt.json'
+        if receipt.is_file() and not receipt.is_symlink():
+            saved = json.loads(receipt.read_text())
+            if (saved['job']['prompt_id'] != job['prompt_id'] or
+                    saved['job']['upstream_prompt_id'] != job['upstream_prompt_id']):
+                raise HTTPException(409, 'terminal receipt identity mismatch')
+            return rewrite_record(saved['history'], job['upstream_prompt_id'], prompt_id)
+    lane = fleet.recipes.lane_for(job)
     response = await fleet.client.get(
         f"{lane.url}/history/{job['upstream_prompt_id']}",
         timeout=30,
@@ -1174,7 +1432,7 @@ async def queue() -> dict[str, Any]:
             continue
         if not job["lane_id"] or not job["upstream_prompt_id"]:
             continue
-        lane = fleet.lanes_by_id[job["lane_id"]]
+        lane = fleet.recipes.lane_for(job)
         response = await fleet.client.get(f"{lane.url}/queue", timeout=30)
         if not response.is_success:
             continue
@@ -1204,7 +1462,17 @@ async def view(
         job = fleet.store.find_output(filename, subfolder, type)
     if not job:
         raise HTTPException(status_code=404, detail="Output is not mapped to an H3 job")
-    lane = fleet.lanes_by_id[job["lane_id"]]
+    binding = json.loads(job.get('backend_json') or '{}')
+    backend = fleet.recipes.backends.get(binding.get('id'), {})
+    if backend.get('unified_memory'):
+        if job['status'] != 'completed' or type != 'output':
+            raise HTTPException(409, 'owned Edge output is not completed')
+        root = Path(backend['output_root']).resolve(strict=True)
+        target = root / subfolder / filename
+        if target.is_symlink() or not target.resolve().is_relative_to(root) or not target.is_file():
+            raise HTTPException(404, 'owned Edge output is unavailable')
+        return FileResponse(target, media_type='video/mp4', headers={'Cache-Control': 'private, no-store'})
+    lane = fleet.recipes.lane_for(job)
     request = fleet.client.build_request(
         "GET",
         f"{lane.url}/view",
@@ -1259,6 +1527,27 @@ async def list_jobs(limit: int = 100) -> dict[str, Any]:
     return {"jobs": fleet.store.list(limit=max(1, min(limit, 500)))}
 
 
+@app.post("/api/studio/batch-window")
+async def reserve_studio_batch(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    async with fleet.assignment_lock:
+        return fleet.store.reserve_studio_batch(str(body.get("owner", "")))
+
+
+@app.delete("/api/studio/batch-window")
+async def release_studio_batch(body: dict[str, Any] = Body(...)) -> dict[str, bool]:
+    async with fleet.assignment_lock:
+        fleet.store.release_studio_batch(str(body.get("owner", "")))
+    return {"ok": True}
+
+
+@app.get("/api/jobs/by-execution/{execution_id}")
+async def get_job_by_execution(execution_id: str) -> dict[str, Any]:
+    job = fleet.store.get_by_execution(execution_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown execution id")
+    return await fleet.refresh_job(job)
+
+
 @app.get("/api/jobs/{prompt_id}")
 async def get_job(prompt_id: str) -> dict[str, Any]:
     try:
@@ -1295,6 +1584,7 @@ async def _cancel_job_locked(prompt_id: str, body: dict[str, Any]) -> dict[str, 
             return job
     if job["status"] in {"queued", "reserved"} and not job.get("submission_started_at"):
         updated = fleet.store.update(prompt_id, status="cancelled")
+        await fleet.recipes.completed(updated, {})
         fleet.cleanup_job_inputs(updated)
         return updated
     expected_version = body.get("expected_version")
@@ -1303,7 +1593,7 @@ async def _cancel_job_locked(prompt_id: str, body: dict[str, Any]) -> dict[str, 
             raise HTTPException(status_code=400, detail="expected_version must be an integer")
         if expected_version != job["version"]:
             raise HTTPException(status_code=409, detail="stale H3 job version")
-    lane = fleet.lanes_by_id[job["lane_id"]]
+    lane = fleet.recipes.lane_for(job)
     queue_response = await fleet.client.get(f"{lane.url}/queue", timeout=30)
     if not queue_response.is_success:
         raise HTTPException(
@@ -1344,6 +1634,7 @@ async def _cancel_job_locked(prompt_id: str, body: dict[str, Any]) -> dict[str, 
             and queue_contains(queue_response.json(), job["upstream_prompt_id"]) is None
         ):
             updated = fleet.store.update(prompt_id, status="cancelled")
+            await fleet.recipes.completed(updated, {})
             fleet.cleanup_job_inputs(updated)
             return updated
         if time.monotonic() >= deadline:
@@ -1371,3 +1662,17 @@ async def upload_input(
         overwrite=overwrite,
     )
     return {"ok": True, "filename": filename, "lanes": results}
+
+from .multimodal_qualification import install as install_multimodal_qualification
+install_multimodal_qualification(fleet.recipes)
+from .backend_lifecycle import install as install_backend_lifecycle
+install_backend_lifecycle(fleet, app, router_protected)
+from .multimodal_api import install as install_multimodal_api
+install_multimodal_api(fleet, app, router_protected)
+
+import sys
+from .execution_phases import install as install_execution_phases
+install_execution_phases(sys.modules[__name__])
+
+from .backend_residue import install as install_backend_residue
+install_backend_residue(fleet)

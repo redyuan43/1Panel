@@ -1,0 +1,175 @@
+{
+  "schema": "h3.modelscope-mirror-audit.v1",
+  "checked_at_utc": "2026-09-09 14:30:18 UTC",
+  "scope": "Only A4 v1.2 / A8 v1.0 / original OpenVDN stage-dmd-step-250 three tensors / Kijai FastH3 INT8; no algorithm substitution",
+  "plan_source": "/home/ai/.local/share/h3-comparison-cache/20260909/download-report.json",
+  "verification_method": "Compared exact filename/path mapping, size bytes and full SHA256 from ModelScope official repo/files API against the pinned HF plan. Queried master for discovery, then re-queried each selected immutable revision.",
+  "summary": {
+    "matched_files": 6,
+    "unknown_files": 0,
+    "matched_bytes": 32275888640,
+    "group_bytes": {
+      "a_lightx2v": 3912386000,
+      "b_vdn": 5464907720,
+      "d_fasth3": 22898594920
+    },
+    "speed_verified": false,
+    "large_weight_bytes_downloaded": 0
+  },
+  "execution_boundaries": [
+    "This file is a read-only metadata audit, not a download or a source switch.",
+    "ModelScope published SHA256 and size match; downloaded bytes have not been hashed locally in this audit.",
+    "Parent downloader must pin ModelScope revision, keep the existing planned destination filename, and independently verify final byte count plus the original HF SHA256.",
+    "B ModelScope paths start at stage-dmd-step-250; map them to the longer diffusion_models/OpenVDN/vdn-minimax-h3/... destination from the plan.",
+    "Only replace the byte source. Keep current algorithms, quantization, adapters, base model and metadata/license requirements unchanged.",
+    "Do not overwrite or race existing .part downloads. Parent coordinates stopping or redirecting its own download jobs and validates range/Content-Range before any continuation.",
+    "No throughput, Range support, authentication behavior or final download reachability was benchmarked. Metadata success does not prove faster transfer."
+  ],
+  "download_url_format_source": "https://github.com/modelscope/modelscope/blob/master/modelscope/hub/file_download.py",
+  "records": [
+    {
+      "group": "a_lightx2v",
+      "planned_huggingface": {
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "revision": "2f015e66b37c585cea9dc4ae6f1850ea8788e742",
+        "filename": "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+        "size_bytes": 1956193000,
+        "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8"
+      },
+      "modelscope": {
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "revision": "c6ff59d4f054c70bee73cfbb2ee43505e18699f1",
+        "filename": "minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors",
+        "file_last_commit": "c6ff59d4f054c70bee73cfbb2ee43505e18699f1",
+        "size_bytes": 1956193000,
+        "sha256": "c8168ebc17bbacc4296103dda2fec1ba85b24392fa08cf2bfbcef0cff0dc3cc8",
+        "model_page": "https://modelscope.cn/models/lightx2v/Minimax-h3-Turbo",
+        "metadata_url": "https://modelscope.cn/api/v1/models/lightx2v/Minimax-h3-Turbo/repo/files?Revision=c6ff59d4f054c70bee73cfbb2ee43505e18699f1&Recursive=true",
+        "download_url": "https://modelscope.cn/api/v1/models/lightx2v/Minimax-h3-Turbo/repo?Revision=c6ff59d4f054c70bee73cfbb2ee43505e18699f1&FilePath=minimax_h3_fl2v_turbo_4step_v1.2_768p_comfyui_bf16.safetensors"
+      },
+      "status": "sha256_and_size_match",
+      "recommend_alternate_source": true,
+      "downloaded_or_measured": false
+    },
+    {
+      "group": "a_lightx2v",
+      "planned_huggingface": {
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "revision": "2f015e66b37c585cea9dc4ae6f1850ea8788e742",
+        "filename": "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+        "size_bytes": 1956193000,
+        "sha256": "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980"
+      },
+      "modelscope": {
+        "repo": "lightx2v/Minimax-h3-Turbo",
+        "revision": "c6ff59d4f054c70bee73cfbb2ee43505e18699f1",
+        "filename": "minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors",
+        "file_last_commit": "b9591d0cd28b7e64106551ac3843dcfee07d7785",
+        "size_bytes": 1956193000,
+        "sha256": "08cfe946033af7d27719b964b6e0a0e50c32138daabbd6ce4137e23df6bf9980",
+        "model_page": "https://modelscope.cn/models/lightx2v/Minimax-h3-Turbo",
+        "metadata_url": "https://modelscope.cn/api/v1/models/lightx2v/Minimax-h3-Turbo/repo/files?Revision=c6ff59d4f054c70bee73cfbb2ee43505e18699f1&Recursive=true",
+        "download_url": "https://modelscope.cn/api/v1/models/lightx2v/Minimax-h3-Turbo/repo?Revision=c6ff59d4f054c70bee73cfbb2ee43505e18699f1&FilePath=minimax_h3_fl2v_turbo_8step_v1.0_768p_comfyui_bf16.safetensors"
+      },
+      "status": "sha256_and_size_match",
+      "recommend_alternate_source": true,
+      "downloaded_or_measured": false
+    },
+    {
+      "group": "b_vdn",
+      "planned_huggingface": {
+        "repo": "t8star/Vdn-Minimax-H3-Comfy",
+        "revision": "d6aa5dfc669a749dc9364a36f3b6d4d1545a53e8",
+        "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/adapters/default/adapter_model.safetensors",
+        "size_bytes": 334026912,
+        "sha256": "58558fef506f88bb41649242de9b9b3a365da806b51b2e96afbbe1625222058a"
+      },
+      "modelscope": {
+        "repo": "OpenVDN/vdn-minimax-h3",
+        "revision": "3674e3a5183da3782bdd7e57b83adb8b99a759ba",
+        "filename": "stage-dmd-step-250/adapters/default/adapter_model.safetensors",
+        "file_last_commit": "fe0f5d1258e3cce0599489deb117b55abec2c4f0",
+        "size_bytes": 334026912,
+        "sha256": "58558fef506f88bb41649242de9b9b3a365da806b51b2e96afbbe1625222058a",
+        "model_page": "https://modelscope.cn/models/OpenVDN/vdn-minimax-h3",
+        "metadata_url": "https://modelscope.cn/api/v1/models/OpenVDN/vdn-minimax-h3/repo/files?Revision=3674e3a5183da3782bdd7e57b83adb8b99a759ba&Recursive=true",
+        "download_url": "https://modelscope.cn/api/v1/models/OpenVDN/vdn-minimax-h3/repo?Revision=3674e3a5183da3782bdd7e57b83adb8b99a759ba&FilePath=stage-dmd-step-250%2Fadapters%2Fdefault%2Fadapter_model.safetensors"
+      },
+      "status": "sha256_and_size_match",
+      "recommend_alternate_source": true,
+      "downloaded_or_measured": false
+    },
+    {
+      "group": "b_vdn",
+      "planned_huggingface": {
+        "repo": "t8star/Vdn-Minimax-H3-Comfy",
+        "revision": "d6aa5dfc669a749dc9364a36f3b6d4d1545a53e8",
+        "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/adapters/turbo/adapter_model.safetensors",
+        "size_bytes": 851452696,
+        "sha256": "24fc93c82fe84dc45d0627f4e72c637bc387d282ba18f60ed3b7f8c81089392c"
+      },
+      "modelscope": {
+        "repo": "OpenVDN/vdn-minimax-h3",
+        "revision": "3674e3a5183da3782bdd7e57b83adb8b99a759ba",
+        "filename": "stage-dmd-step-250/adapters/turbo/adapter_model.safetensors",
+        "file_last_commit": "fe0f5d1258e3cce0599489deb117b55abec2c4f0",
+        "size_bytes": 851452696,
+        "sha256": "24fc93c82fe84dc45d0627f4e72c637bc387d282ba18f60ed3b7f8c81089392c",
+        "model_page": "https://modelscope.cn/models/OpenVDN/vdn-minimax-h3",
+        "metadata_url": "https://modelscope.cn/api/v1/models/OpenVDN/vdn-minimax-h3/repo/files?Revision=3674e3a5183da3782bdd7e57b83adb8b99a759ba&Recursive=true",
+        "download_url": "https://modelscope.cn/api/v1/models/OpenVDN/vdn-minimax-h3/repo?Revision=3674e3a5183da3782bdd7e57b83adb8b99a759ba&FilePath=stage-dmd-step-250%2Fadapters%2Fturbo%2Fadapter_model.safetensors"
+      },
+      "status": "sha256_and_size_match",
+      "recommend_alternate_source": true,
+      "downloaded_or_measured": false
+    },
+    {
+      "group": "b_vdn",
+      "planned_huggingface": {
+        "repo": "t8star/Vdn-Minimax-H3-Comfy",
+        "revision": "d6aa5dfc669a749dc9364a36f3b6d4d1545a53e8",
+        "filename": "diffusion_models/OpenVDN/vdn-minimax-h3/stage-dmd-step-250/linear_branch/model.safetensors",
+        "size_bytes": 4279428112,
+        "sha256": "dec6981c7874f5b3bc92d1a02e256b673a3b3499dc1a124714bb3b19da602855"
+      },
+      "modelscope": {
+        "repo": "OpenVDN/vdn-minimax-h3",
+        "revision": "3674e3a5183da3782bdd7e57b83adb8b99a759ba",
+        "filename": "stage-dmd-step-250/linear_branch/model.safetensors",
+        "file_last_commit": "3674e3a5183da3782bdd7e57b83adb8b99a759ba",
+        "size_bytes": 4279428112,
+        "sha256": "dec6981c7874f5b3bc92d1a02e256b673a3b3499dc1a124714bb3b19da602855",
+        "model_page": "https://modelscope.cn/models/OpenVDN/vdn-minimax-h3",
+        "metadata_url": "https://modelscope.cn/api/v1/models/OpenVDN/vdn-minimax-h3/repo/files?Revision=3674e3a5183da3782bdd7e57b83adb8b99a759ba&Recursive=true",
+        "download_url": "https://modelscope.cn/api/v1/models/OpenVDN/vdn-minimax-h3/repo?Revision=3674e3a5183da3782bdd7e57b83adb8b99a759ba&FilePath=stage-dmd-step-250%2Flinear_branch%2Fmodel.safetensors"
+      },
+      "status": "sha256_and_size_match",
+      "recommend_alternate_source": true,
+      "downloaded_or_measured": false
+    },
+    {
+      "group": "d_fasth3",
+      "planned_huggingface": {
+        "repo": "Kijai/MiniMax-H3-experimental",
+        "revision": "f4cac997f880e93cf6940af61ee8d58ef31ff7f3",
+        "filename": "minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors",
+        "size_bytes": 22898594920,
+        "sha256": "7221ae65d78780354d51e5048d29728d9f1f8fb9baf50b1dd3df85f5101413d3"
+      },
+      "modelscope": {
+        "repo": "Kijai/MiniMax-H3-experimental",
+        "revision": "cf077746e92340c65cf13b54f6b4066b23a0b74b",
+        "filename": "minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors",
+        "file_last_commit": "cf077746e92340c65cf13b54f6b4066b23a0b74b",
+        "size_bytes": 22898594920,
+        "sha256": "7221ae65d78780354d51e5048d29728d9f1f8fb9baf50b1dd3df85f5101413d3",
+        "model_page": "https://modelscope.cn/models/Kijai/MiniMax-H3-experimental",
+        "metadata_url": "https://modelscope.cn/api/v1/models/Kijai/MiniMax-H3-experimental/repo/files?Revision=cf077746e92340c65cf13b54f6b4066b23a0b74b&Recursive=true",
+        "download_url": "https://modelscope.cn/api/v1/models/Kijai/MiniMax-H3-experimental/repo?Revision=cf077746e92340c65cf13b54f6b4066b23a0b74b&FilePath=minimax_h3_fastvideo_vsa_datafree_1300step_4step_int8_convrot.safetensors"
+      },
+      "status": "sha256_and_size_match",
+      "recommend_alternate_source": true,
+      "downloaded_or_measured": false
+    }
+  ]
+}

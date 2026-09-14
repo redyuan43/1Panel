@@ -1,0 +1,17 @@
+[Unit]
+Description=Edge qualified H3 A4 I2V managed worker
+After=network.target
+[Service]
+Type=simple
+User=admin
+Slice=h3-edge-compute.slice
+WorkingDirectory=/home/admin/.local/state/h3-edge-fleet-20260914/runtime
+Environment=CUDA_VISIBLE_DEVICES=GPU-95675338-26b9-4ddf-1cc9-e449db82e19e
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/admin/github/comfyui/.venv/bin/python /home/admin/.local/state/h3-edge-fleet-20260914/runtime/main.py --listen 127.0.0.1 --port 19188 --reserve-vram 16 --disable-pinned-memory --disable-auto-launch --input-directory /home/admin/.local/state/h3-edge-fleet-20260914/input --output-directory /home/admin/.local/state/h3-edge-fleet-20260914/output --temp-directory /home/admin/.local/state/h3-edge-fleet-20260914/temp --user-directory /home/admin/.local/state/h3-edge-fleet-20260914/user --database-url sqlite:////home/admin/.local/state/h3-edge-fleet-20260914/user/comfyui.db --extra-model-paths-config /home/admin/.local/state/h3-edge-fleet-20260914/runtime/extra_model_paths.yaml --disable-all-custom-nodes --whitelist-custom-nodes minimax-h3-audio-T8
+Restart=no
+TimeoutStopSec=120
+KillMode=control-group
+MemoryAccounting=yes
+MemoryMax=96G
+MemorySwapMax=8G

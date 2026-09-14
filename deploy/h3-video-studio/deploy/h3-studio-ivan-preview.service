@@ -1,0 +1,19 @@
+[Unit]
+Description=H3 Studio (synthetic video, read-only text planning)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/github/1Panel/deploy/h3-video-studio
+EnvironmentFile=%h/.config/h3-studio-ivan/preview.env
+ExecStart=%h/.local/state/h3-studio-ivan-runtime/venv/bin/python scripts/preview.py --state-dir %h/.local/state/h3-studio-ivan-preview --port 14829
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+MemoryMax=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=default.target

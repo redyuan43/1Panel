@@ -130,6 +130,34 @@ def check_graph_assets(graph, project):
         raise HTTPException(409, "uploaded asset is disconnected from video output")
 
 
+def native_hybrid_asset_links(graph, conditioner_id):
+    """Recognize the exact native reference + first/last guide composition."""
+    condition = graph[conditioner_id]["inputs"]
+    guides = {key: node["inputs"] for key, node in graph.items()
+              if node.get("class_type") == "MiniMaxH3AddGuide"}
+    first = [(key, item) for key, item in guides.items() if type(item.get("frame_idx")) is int and item["frame_idx"] == 0]
+    last = [(key, item) for key, item in guides.items() if type(item.get("frame_idx")) is int and item["frame_idx"] == -1]
+    if len(guides) != 2 or len(first) != 1 or len(last) != 1:
+        raise HTTPException(409, "native hybrid requires exactly first-frame and last-frame guides")
+    first_id, first = first[0]
+    last_id, last = last[0]
+    if (first.get("positive") != [conditioner_id, 0] or last.get("positive") != [first_id, 0]
+            or any(item.get("latent") != [conditioner_id, 1] or item.get("vae") != condition.get("vae")
+                   or "audio" in item for item in (first, last))
+            or [node["inputs"].get("conditioning") for node in graph.values()
+                if node.get("class_type") == "BasicGuider"] != [[last_id, 0]]):
+        raise HTTPException(409, "native hybrid guide chain is disconnected or ambiguous")
+    scale_link = first.get("image")
+    scale = graph.get(scale_link[0], {}) if isinstance(scale_link, list) and len(scale_link) == 2 and isinstance(scale_link[0], str) and scale_link[1] == 0 else {}
+    scale_inputs = scale.get("inputs", {})
+    if (scale.get("class_type") != "ImageScale" or scale_inputs.get("upscale_method") != "lanczos"
+            or scale_inputs.get("crop") != "disabled"
+            or (scale_inputs.get("width"), scale_inputs.get("height")) != (condition["width"], condition["height"])):
+        raise HTTPException(409, "native hybrid first frame must preserve canvas stretch geometry")
+    return {"first_frame": first.get("image"), "last_frame": last.get("image"),
+            "reference_image": condition.get("ref_images.ref_image_0")}
+
+
 def bind_graph_assets(graph, project):
     validate(project)
     conditioners = [entry for entry in graph.values() if entry.get("class_type") in {
@@ -160,10 +188,14 @@ def bind_graph_assets(graph, project):
             result.update(sources(value, expected, visited))
         return result
 
+    role_links = {role: inputs.get(field) for role, field in roles.items()}
+    if project["mode"] == "hybrid" and conditioners[0]["class_type"] == "MiniMaxH3ReferenceToVideo":
+        conditioner_id = next(key for key, node in graph.items() if node is conditioners[0])
+        role_links = native_hybrid_asset_links(graph, conditioner_id)
     assigned = set()
     for role, asset in project["assets"].items():
         node_type, field = loaders[role]
-        matches = sources(inputs.get(roles[role]), node_type)
+        matches = sources(role_links.get(role), node_type)
         if len(matches) != 1 or assigned.intersection(matches):
             raise HTTPException(409, "asset role is disconnected or ambiguous: " + role)
         identifier = next(iter(matches))

@@ -27,6 +27,27 @@ def recovery_sample(timestamp=100, **updates):
                                 "cgroup_some_avg10": 0, "cgroup_full_avg10": 0}, **updates}
 
 
+def test_mixed_lease_is_fixed_one_long_quality_and_one_short_preview(tmp_path):
+    policy = load_module(tmp_path).fleet.policy
+    experiment = {"profile": "mixed", "frame_count": 362, "max_parallel": 2}
+    policy.validate_experiment(experiment)
+    quality = {"known_shape": True, "class": "long", "profile": "quality", "frame_count": 362,
+               "width": 768, "height": 1344, "steps": 14, "memory_budget_bytes": 24 * GIB, "disk_budget_bytes": GIB}
+    preview = {"known_shape": True, "class": "short", "profile": "preview", "frame_count": 124,
+               "width": 864, "height": 480, "steps": 4, "memory_budget_bytes": 8 * GIB, "disk_budget_bytes": GIB}
+    sample = recovery_sample(time.time(), swap_used_bytes=0, cgroup_swap_bytes=0)
+    assert policy.rule(quality, experiment)["lanes"] == ["fast"]
+    assert policy.rule(preview, experiment)["lanes"] == ["main"]
+    assert policy.blocked(preview, [quality], sample, experiment) is None
+    assert policy.blocked(quality, [preview], sample, experiment) is None
+    assert policy.blocked(preview, [quality], sample) == "exclusive_workload_active"
+    assert policy.blocked(preview, [preview], sample, experiment) == "mixed_profile_slot_full"
+    assert not policy.matches_experiment({**preview, "frame_count": 362}, experiment)
+    assert policy.blocked(preview, [quality], {**sample, "swap_used_bytes": 2 * GIB}, experiment) == "swap_recovery_single_only"
+    with pytest.raises(ValueError):
+        policy.validate_experiment({**experiment, "max_parallel": 3})
+
+
 def test_residual_swap_requires_full_quiet_window_then_single_known_workload(tmp_path):
     module = load_module(tmp_path)
     guard = SwapRecovery()
@@ -42,8 +63,64 @@ def test_residual_swap_requires_full_quiet_window_then_single_known_workload(tmp
     assert module.fleet.policy.blocked(demand, [], ready) == "ram_headroom"
 
 
+def studio_parallel_policy(tmp_path):
+    policy = load_module(tmp_path).fleet.policy
+    policy.data["studio_preview"] = {"max_frames": 362, "steps": 4, "max_parallel": 3,
+        "lanes": ["fast", "main", "preview"], "memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "reviewed-report"}
+    return policy
+
+
+def studio_parallel_demand(policy, **updates):
+    return policy.studio_demand({"prompt": {
+        "1": {"class_type": "MiniMaxH3AudioConditioningT8", "inputs": {
+            "width": 480, "height": 864, "length": 362, "task_type": "T2VA", "audio_mode": "native", **updates}},
+        "2": {"class_type": "MiniMaxH3DualClockSamplerT8", "inputs": {"steps": 4}},
+    }}, "preview")
+
+
+def test_reviewed_studio_preview_capacity_does_not_open_other_long_work(tmp_path):
+    policy = studio_parallel_policy(tmp_path)
+    demand = studio_parallel_demand(policy)
+    sample = recovery_sample(time.time(), swap_used_bytes=0, cgroup_swap_bytes=0)
+    assert policy.blocked(demand, [demand, demand], sample) is None
+    assert policy.blocked(demand, [demand] * 3, sample) == "capacity_full"
+    unverified = studio_parallel_demand(policy, task_type="I2VA")
+    assert not policy.parallel_studio_preview(unverified)
+    assert policy.blocked(unverified, [demand], sample) == "exclusive_workload_active"
+    assert policy.blocked(demand, [unverified], sample) == "exclusive_workload_active"
+    assert policy.rule(unverified)["lanes"] == ["fast"]
+    assert not policy.parallel_studio_preview(studio_parallel_demand(policy, audio_mode="reference"))
+    assert policy.blocked(demand, [demand], {**sample, "memory_available_bytes": 20 * GIB}) == "ram_headroom"
+
+
+def test_available_capacity_uses_resource_reservations_and_not_idle_card_count(tmp_path):
+    policy = studio_parallel_policy(tmp_path)
+    sample = recovery_sample(time.time(), swap_used_bytes=0, cgroup_swap_bytes=0)
+    lanes = ["fast", "main", "preview"]
+    assert policy.studio_preview_capacity([], sample, lanes)["available"] == 3
+    limited = policy.studio_preview_capacity([], {**sample, "memory_available_bytes": 35 * GIB}, lanes)
+    assert limited["available"] == 1
+    assert limited["reason"] == "ram_headroom"
+    assert policy.studio_preview_capacity([], sample, lanes, "controlled_validation")["available"] == 0
+    assert policy.studio_preview_capacity([], {"ok": False}, lanes)["available"] == 0
+    demand = studio_parallel_demand(policy)
+    assert policy.studio_preview_capacity([demand], sample, ["main", "preview"])["available"] == 2
+    assert policy.studio_preview_capacity([], sample, ["main"])["available"] == 1
+    swapped = {**sample, "swap_used_bytes": 2 * GIB, "swap_recovery": {"ready": True}}
+    assert policy.studio_preview_capacity([], swapped, ["main"])["available"] == 0
+    assert policy.studio_preview_capacity([], swapped, lanes)["available"] == 1
+
+
+def test_unpromoted_capacity_keeps_full_duration_preview_on_fast(tmp_path):
+    policy = load_module(tmp_path).fleet.policy
+    policy.data.pop("studio_preview", None)
+    sample = recovery_sample(time.time(), swap_used_bytes=0, cgroup_swap_bytes=0)
+    result = policy.studio_preview_capacity([], sample, ["fast", "main", "preview"])
+    assert result["available"] == result["max_parallel"] == 1
+    assert not result["validated_parallel"]
+
+
 @pytest.mark.parametrize("updates", [
-    {"swap_io_pages": {"pswpin": 11, "pswpout": 20}},
     {"swap_io_pages": {"pswpin": 10, "pswpout": 21}},
     {"memory_pressure": {"host_some_total": 51, "host_some_avg10": 0}},
     {"memory_pressure": {"host_some_total": 50, "host_some_avg10": 0.01}},
@@ -57,6 +134,91 @@ def test_swap_activity_pressure_or_counter_reset_invalidates_quiet_window(update
     result = guard.observe(recovery_sample(165, **updates), idle=True)
     assert not result["swap_recovery"]["ready"]
     assert result["swap_recovery"]["reason"] == "active_swap_io_or_memory_pressure"
+
+
+def test_recovery_swapin_growth_preserves_full_idle_window_and_raw_telemetry():
+    guard = SwapRecovery()
+    for timestamp, pswpin in ((100, 10), (120, 11), (159, 13), (160, 14), (170, 15)):
+        sample = recovery_sample(timestamp, swap_io_pages={"pswpin": pswpin, "pswpout": 20})
+        original = json.dumps(sample, sort_keys=True)
+        result = guard.observe(sample, idle=True)
+        recovery = result["swap_recovery"]
+        assert recovery["ready"] == (timestamp >= 160)
+        assert recovery["stable_seconds_observed"] == timestamp - 100
+        assert result["swap_io_pages"]["pswpin"] == pswpin
+        assert json.dumps(sample, sort_keys=True) == original
+    assert recovery["baseline"]["timestamp"] == 100
+
+
+@pytest.mark.parametrize("section,key,before,after", [
+    ("swap_io_pages", "pswpout", 20, 21),
+    ("swap_io_pages", "pswpout", 20, 19),
+    ("swap_io_pages", "pswpin", 10, 9),
+    ("memory_pressure", "host_some_total", 50, 51),
+    ("memory_pressure", "host_full_total", 50, 51),
+    ("memory_pressure", "cgroup_some_total", 0, 1),
+    ("memory_pressure", "cgroup_full_total", 0, 1),
+    ("memory_pressure", "host_some_total", 50, 49),
+    ("cgroup_events", "high", 0, 1),
+    ("cgroup_events", "high", 1, 0),
+    ("cgroup_events", "oom", 0, 1),
+    ("cgroup_events", "oom_kill", 0, 1),
+    (None, "boot_id", "same-boot", "new-boot"),
+])
+def test_recovery_new_events_or_counter_resets_require_new_full_window(section, key, before, after):
+    def sample(timestamp, value):
+        snapshot = recovery_sample(timestamp)
+        target = snapshot if section is None else snapshot[section]
+        target[key] = value
+        return snapshot
+
+    guard = SwapRecovery()
+    guard.observe(sample(100, before), idle=True)
+    baseline = guard.observe(sample(160, before), idle=True)["swap_recovery"]["baseline"]
+    reset = guard.observe(sample(165, after), idle=True)["swap_recovery"]
+    assert not reset["ready"]
+    assert guard.candidate is None
+    assert reset["baseline"] == baseline
+    for timestamp in (170, 229, 230):
+        recovery = guard.observe(sample(timestamp, after), idle=True)["swap_recovery"]
+        assert recovery["ready"] == (timestamp == 230)
+        assert recovery["stable_seconds_observed"] == timestamp - 170
+    assert recovery["baseline"]["timestamp"] == 170
+
+
+@pytest.mark.parametrize("key", ["host_some_avg10", "host_full_avg10", "cgroup_some_avg10", "cgroup_full_avg10"])
+def test_pressure_decay_is_not_a_new_event_but_nonzero_average_still_blocks(key):
+    guard = SwapRecovery()
+    for timestamp, average in ((100, 4.6), (150, 0.01), (160, 0)):
+        sample = recovery_sample(timestamp)
+        sample["memory_pressure"][key] = average
+        result = guard.observe(sample, idle=True)
+        assert not result["swap_recovery"]["ready"]
+        if timestamp == 100:
+            signature = guard.last_signature
+        assert guard.last_signature == signature
+        if average > 0:
+            assert guard.candidate is None
+    assert guard.candidate["timestamp"] == 160
+    assert not guard.observe(recovery_sample(219), idle=True)["swap_recovery"]["ready"]
+    assert guard.observe(recovery_sample(220), idle=True)["swap_recovery"]["ready"]
+
+
+def test_swapin_during_external_busy_does_not_rebase_or_reuse_idle_time():
+    guard = SwapRecovery()
+    guard.observe(recovery_sample(100), idle=True)
+    baseline = guard.observe(recovery_sample(160), idle=True)["swap_recovery"]["baseline"]
+    for timestamp, pswpin in ((200, 11), (500, 12)):
+        result = guard.observe(recovery_sample(timestamp, swap_used_bytes=3 * GIB,
+                               swap_io_pages={"pswpin": pswpin, "pswpout": 20}), idle=False)
+        assert not result["swap_recovery"]["ready"]
+        assert result["swap_recovery"]["baseline"] == baseline
+        assert result["swap_recovery"]["growth_bytes"] == 3 * GIB - baseline["host_bytes"]
+        assert guard.candidate is None
+    for timestamp, pswpin in ((600, 13), (659, 14), (660, 15)):
+        result = guard.observe(recovery_sample(timestamp, swap_io_pages={"pswpin": pswpin, "pswpout": 20}), idle=True)
+        assert result["swap_recovery"]["ready"] == (timestamp == 660)
+    assert result["swap_recovery"]["baseline"]["timestamp"] == 600
 
 
 def test_swap_baseline_is_frozen_for_busy_and_unknown_work_then_reobserved(tmp_path):

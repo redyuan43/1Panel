@@ -1,0 +1,21 @@
+.prompt-skills { border: 1px solid var(--line); border-radius: 6px; background: #f7faf7; padding: 18px; min-width: 0; }
+.prompt-skills [hidden] { display: none !important; }
+.prompt-skills-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 8px 0 12px; }
+.prompt-skills-toolbar > strong { flex: 1; }
+.prompt-skills button:not(.primary-small) { padding: 9px 12px; border: 1px solid var(--line); background: white; color: var(--ink); border-radius: 4px; }
+.prompt-skills button:disabled { opacity: .5; cursor: not-allowed; }
+.prompt-skills-note { color: var(--muted); font-size: 13px; line-height: 1.7; }
+.prompt-skills-warning { padding: 12px; background: var(--amber-soft); border-left: 3px solid var(--amber); font-size: 13px; line-height: 1.7; }
+.prompt-skills-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.prompt-skills-chips span { color: var(--green); background: var(--green-soft); padding: 6px 9px; border-radius: 4px; font-size: 12px; }
+.prompt-skills-chips span[data-baseline="true"] { color: var(--muted); background: #e9ece8; }
+.prompt-skills summary { cursor: pointer; font-size: 13px; padding: 10px 0; }
+.prompt-skills .field { margin: 12px 0; }
+.prompt-skills .field textarea { min-height: 70px; }
+.prompt-skills-shots { display: grid; gap: 10px; }
+.prompt-skills-shot { border: 1px solid var(--line); background: white; padding: 12px; border-radius: 4px; }
+.prompt-skills-shot p { margin: 6px 0; line-height: 1.7; }
+.prompt-skills pre, .prompt-skills textarea[readonly] { background: white; border: 1px solid var(--line); border-radius: 4px; padding: 12px; width: 100%; max-height: 320px; overflow: auto; font-size: 12px; line-height: 1.7; white-space: pre-wrap; }
+.prompt-skills p, .prompt-skills li, .prompt-skills pre, #scriptSourceNotice { overflow-wrap: anywhere; }
+@media (min-width: 981px) { .project-form.has-script-plan { align-items: start; } .project-form.has-script-plan .setup-rail { position: sticky; top: 84px; } }
+@media (max-width: 700px) { .prompt-skills { padding: 12px; } .prompt-skills-toolbar { align-items: stretch; } .prompt-skills-toolbar > strong, .prompt-skills-toolbar > button { width: 100%; flex: auto; } }

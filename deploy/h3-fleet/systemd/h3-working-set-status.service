@@ -1,0 +1,17 @@
+[Unit]
+Description=H3 read-only comparison status publisher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/github/1Panel
+ExecStart=/usr/bin/python3 -B %h/github/1Panel/deploy/h3-fleet/scripts/sync_comparison_status.py --output %h/.local/state/h3-studio-ivan-production/comparison/results/live.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

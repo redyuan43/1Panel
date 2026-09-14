@@ -56,6 +56,7 @@
       body.skill_sources = [{name: `Studio 已确认脚本 ${plan.id} v${plan.revision}`, source: "server_guidance"}];
     }
     if (mode === "t2v") body.recipe_id = form.get("recipe_id") || "A4";
+    body.preview_recipe_id = mode === "i2v" ? form.get("preview_recipe_id") || null : null;
     if (editing) Object.assign(body, {task_id: editing.id, expected_revision: editing.connector_revision,
       verbatim: prompt === editing.prompt_original && editing.connector_verbatim === true});
     const seedText = String(form.get("seed") ?? "").trim();
@@ -106,7 +107,7 @@
       state.mode = project.mode; state.audioPolicy = project.audio_policy; state.strategy = "fast";
       const form = document.getElementById("projectForm");
       for (const [name, value] of Object.entries({name: project.name, prompt: project.prompt_ir, duration: project.duration,
-        orientation: project.orientation, recipe_id: project.recipe_id, prompt_processing: "manual"})) {
+        orientation: project.orientation, recipe_id: project.recipe_id, preview_recipe_id: project.preview_recipe_id || "", prompt_processing: "manual"})) {
         if (value != null && form.elements.namedItem(name)) form.elements.namedItem(name).value = value;
       }
       for (const role of roles) if (form.elements.namedItem(role)) form.elements.namedItem(role).value = "";

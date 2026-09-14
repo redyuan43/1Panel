@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>H3 Video Studio</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./prompt-skills.css" />
+    <script src="./lucide.min.js" defer></script>
+    <script src="./prompt-skills.js" defer></script>
+    <script src="./app.js" defer></script>
+    <script src="./comparison-status.js" defer></script>
+  </head>
+  <body>
+    <div id="executionMode" role="status" style="padding:8px 24px;background:#241d0e;color:#e8c982;text-align:center">正在读取执行模式</div>
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark">H3</div>
+        <div>
+          <strong>Video Studio</strong>
+          <span>AI · H3 视频工作室</span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <a class="icon-text-button" href="./comparison.html">四方案视频对比 · 实时进度</a>
+        <a id="scriptStudioLink" class="icon-text-button hidden" href="./script-studio.html">Skills 脚本策划</a>
+        <div id="healthBadge" class="health-badge">
+          <span class="health-dot"></span>
+          <span>检查执行服务</span>
+        </div>
+        <button id="historyButton" class="icon-text-button" type="button">
+          <i data-lucide="history"></i>
+          历史任务
+        </button>
+        <button id="queueButton" class="icon-text-button queue-top-button" type="button">
+          <i data-lucide="calendar-clock"></i>
+          768P队列
+          <span id="queueBadge" class="queue-badge hidden">0</span>
+        </button>
+        <button id="newProjectButton" class="primary-small" type="button">
+          <i data-lucide="plus"></i>
+          新建项目
+        </button>
+      </div>
+    </header>
+
+    <main>
+      <section class="fleet-capacity" aria-label="四方案生成进度">
+        <a id="comparisonLive" href="./comparison.html" role="status" aria-live="polite">正在核对四方案视频生成进度…</a>
+      </section>
+      <section id="fleetCapacity" class="fleet-capacity" aria-label="设备算力状态">
+        <strong id="capacitySummary">正在读取设备状态</strong>
+        <span id="capacityUpdated"></span>
+        <div id="capacityLanes" class="capacity-lanes"></div>
+        <p id="capacityPolicy">空闲显存不等于可并行任务数，实际提交由调度器准入。</p>
+      </section>
+      <section id="setupView" class="setup-view">
+        <div class="setup-title">
+          <div>
+            <span class="section-index">01</span>
+            <h1>创建视频任务</h1>
+          </div>
+          <span class="availability">按节点资源准入</span>
+        </div>
+
+        <form id="projectForm" class="project-form">
+          <div class="form-main">
+            <p id="scriptSourceNotice" class="hidden" role="status"></p>
+            <label class="field">
+              <span>项目名称</span>
+              <input id="projectName" name="name" value="H3 视频项目" maxlength="80" />
+            </label>
+
+            <fieldset class="field">
+              <legend>生成模式</legend>
+              <div id="modeControl" class="segmented modes">
+                <button type="button" data-value="t2v" class="active">文生视频</button>
+                <button type="button" data-value="i2v">首帧</button>
+                <button type="button" data-value="l2v">尾帧</button>
+                <button type="button" data-value="fl2v">首尾帧</button>
+                <button type="button" data-value="reference">参考素材</button>
+                <button type="button" data-value="hybrid">Hybrid</button>
+              </div>
+            </fieldset>
+
+            <fieldset class="field">
+              <legend>生产策略</legend>
+              <div id="strategyControl" class="strategy-control">
+                <button type="button" data-value="fast" class="strategy-option active">
+                  <strong>快速</strong>
+                  <span>4步预览 / 本地768P / 2K</span>
+                </button>
+                <button type="button" data-value="safe" class="strategy-option">
+                  <strong>稳妥</strong>
+                  <span>增加480P完整模型验证</span>
+                </button>
+                <button type="button" data-value="cloud" class="strategy-option">
+                  <strong>云端加速</strong>
+                  <span>官方768P / 官方2K</span>
+                </button>
+              </div>
+            </fieldset>
+
+            <div id="assetFields" class="asset-fields"></div>
+
+            <label class="field prompt-field">
+              <span>原始提示词</span>
+              <textarea
+                id="promptInput"
+                name="prompt"
+                rows="8"
+                placeholder="直接说你想拍什么，再点下方自动选择 Skills：例如，两个人、六个镜头的15秒音箱广告，先悬疑后反转，最后3秒展示产品。"
+                required
+              ></textarea>
+              <small><span id="promptCount">0</span> 字符</small>
+            </label>
+            <section id="promptSkills" class="prompt-skills" aria-label="原始提示词 Skills 策划">
+              <div class="prompt-skills-toolbar">
+                <strong>把原始需求变成可执行脚本</strong>
+                <button id="promptSkillsStart" type="button" class="primary-small" disabled>自动选择 Skills 并生成脚本</button>
+              </div>
+              <p id="promptSkillsCapability" class="prompt-skills-note" role="status">正在检查策划服务；不会自动调用模型或生成视频。</p>
+              <details><summary>补充素材用途与已知事实（可选）</summary><label class="field"><span>只发送文字说明与已选文件名，不上传或解析素材</span><textarea id="promptSkillsNotes" rows="2" maxlength="2000" placeholder="例如：女主灰夹克、右腕红绳；产品为黑色圆柱形音箱，不编造续航等参数。"></textarea></label></details>
+              <div id="promptSkillsError" class="form-error" role="alert"></div>
+              <p id="promptSkillsStale" class="prompt-skills-warning" role="status" hidden>原始需求或生成设置已改变。请重新策划，旧脚本不会被自动用于生成。</p>
+              <div id="promptSkillsResult" hidden>
+                <div class="prompt-skills-toolbar">
+                  <strong id="promptSkillsStatus" role="status"></strong>
+                  <button id="promptSkillsRefresh" type="button">刷新状态</button>
+                  <button id="promptSkillsRetry" type="button" hidden>重试原请求</button>
+                  <button id="promptSkillsCancel" type="button" hidden>取消本轮</button>
+                </div>
+                <div id="promptSkillsSelected" class="prompt-skills-chips"></div>
+                <p id="promptSkillsReason" class="prompt-skills-note"></p>
+                <div id="promptSkillsDraft" hidden>
+                  <h3 id="promptSkillsTitle"></h3>
+                  <p id="promptSkillsSummary"></p>
+                  <div id="promptSkillsShots" class="prompt-skills-shots"></div>
+                  <p id="promptSkillsMusic"></p>
+                  <ul id="promptSkillsContinuity"></ul>
+                  <div id="promptSkillsQuestions" class="prompt-skills-warning" hidden><strong>需要补充的信息</strong><ul></ul></div>
+                  <div id="promptSkillsAssumptions" hidden><strong>请核对创作假设</strong><ul></ul></div>
+                  <details><summary>生成用提示词预览（确认前不覆盖原文）</summary><textarea id="promptSkillsCompiled" rows="6" readonly aria-label="生成用提示词预览"></textarea></details>
+                </div>
+                <label class="field"><span>继续用自然语言补充或修改</span><textarea id="promptSkillsInstruction" rows="2" maxlength="4000" placeholder="例如：把反转推迟到第9秒，保留原人物和最后3秒产品展示。"></textarea></label>
+                <div class="prompt-skills-toolbar">
+                  <button id="promptSkillsRevise" type="button">按要求修改脚本</button>
+                  <button id="promptSkillsApply" type="button" class="primary-small">确认脚本并填入提示词</button>
+                  <button id="promptSkillsDiscard" type="button">恢复原始需求，不使用此脚本</button>
+                </div>
+                <p id="promptSkillsApproval" class="prompt-skills-note"></p>
+                <details><summary>原始需求与模型调用记录</summary><pre id="promptSkillsEvidence"></pre></details>
+              </div>
+            </section>
+          </div>
+
+          <aside class="setup-rail">
+            <label class="field">
+              <span>画面方向</span>
+              <select id="orientationInput" name="orientation">
+                <option value="landscape">横版 · 预览 864×480</option>
+                <option value="portrait">竖版 · 预览 480×864</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>提示词处理</span>
+              <select id="promptProcessingInput" name="prompt_processing">
+                <option value="cloud">官方 Context IR 优化（API 调用）</option>
+                <option value="manual">直接使用原文（不调用 API）</option>
+              </select>
+            </label>
+            <div class="rail-group">
+              <span class="rail-label">时长</span>
+              <div class="duration-line">
+                <input id="durationInput" name="duration" type="range" min="4" max="15" value="15" />
+                <output id="durationOutput">15 秒</output>
+              </div>
+            </div>
+            <div class="rail-group">
+              <span class="rail-label">Seed</span>
+              <div id="seedModeControl" class="seed-mode-control">
+                <button type="button" data-seed-mode="random" class="active">
+                  <i data-lucide="shuffle"></i>
+                  随机并锁定
+                </button>
+                <button type="button" data-seed-mode="manual">
+                  <i data-lucide="sliders-horizontal"></i>
+                  手动设置
+                </button>
+              </div>
+              <div id="manualSeedLine" class="seed-line hidden">
+                <input id="manualSeedInput" type="number" value="20260810" min="0" />
+                <button id="randomSeedButton" class="icon-button" type="button" title="换一个随机数">
+                  <i data-lucide="dice-5"></i>
+                </button>
+              </div>
+            </div>
+            <input id="seedInput" name="seed" type="hidden" value="-1" />
+            <label class="field">
+              <span>生成配方 · 15秒竖版文生视频预览</span>
+              <select id="recipeInput" name="recipe_id" aria-describedby="recipeHint"></select>
+              <small id="recipeHint" role="status"></small>
+            </label>
+            <label id="previewRecipeField" class="field hidden">
+              <span>首帧生成配方</span>
+              <select id="previewRecipeInput" name="preview_recipe_id" aria-describedby="previewRecipeHint">
+                <option value="">完整模型 · 14步</option>
+                <option value="A4">A4 · 首帧4步</option>
+                <option value="A4_C0">A4_C0 · 写实首帧4步</option>
+                <option value="A4_C1">A4_C1 · 人像写实首帧4步</option>
+                <option value="B8">B8 · 首帧8步</option>
+              </select>
+              <small id="previewRecipeHint" role="status"></small>
+            </label>
+            <input name="watermark" type="hidden" value="false" />
+            <input id="modeInput" name="mode" type="hidden" value="t2v" />
+            <input id="strategyInput" name="strategy" type="hidden" value="fast" />
+            <input id="audioPolicyInput" name="audio_policy" type="hidden" value="native" />
+            <button id="createButton" class="create-button" type="submit">
+              <i data-lucide="sparkles"></i>
+              <span id="createButtonLabel">创建并运行 Context IR</span>
+            </button>
+            <div id="formError" class="form-error" role="alert"></div>
+          </aside>
+        </form>
+      </section>
+
+      <section id="studioView" class="studio-view hidden">
+        <div class="project-strip">
+          <div>
+            <span id="projectMode" class="project-mode"></span>
+            <h1 id="projectTitle"></h1>
+          </div>
+          <div class="project-facts">
+            <span id="projectStrategy"></span>
+            <span id="projectDuration"></span>
+            <span id="projectEstimate"></span>
+            <span id="projectSeed"></span>
+          </div>
+        </div>
+
+        <div class="pipeline-shell">
+          <div id="pipeline" class="pipeline" aria-label="视频生成流程"></div>
+        </div>
+
+        <section class="stage-workspace">
+          <div class="stage-heading">
+            <div>
+              <span id="stageIndex" class="section-index"></span>
+              <h2 id="stageTitle"></h2>
+            </div>
+            <span id="stageStatus" class="status-pill"></span>
+          </div>
+          <div id="stageMetrics" class="stage-metrics"></div>
+          <div id="commonStageError" class="common-stage-error hidden"></div>
+
+          <div id="contextPanel" class="context-panel hidden">
+            <label>
+              <span>原始提示词</span>
+              <textarea id="originalPrompt" rows="14"></textarea>
+            </label>
+            <label>
+              <span>Context IR 优化结果</span>
+              <textarea id="optimizedPrompt" rows="14"></textarea>
+            </label>
+          </div>
+
+          <div id="mediaPanel" class="media-panel hidden">
+            <div class="player-area">
+              <video id="stageVideo" controls playsinline></video>
+              <div id="videoPlaceholder" class="video-placeholder">
+                <i data-lucide="film"></i>
+                <span>等待生成视频</span>
+              </div>
+            </div>
+            <aside class="stage-inspector">
+              <dl id="stageFacts"></dl>
+              <div class="progress-block">
+                <div class="progress-header">
+                  <span id="stageDetail">等待开始</span>
+                  <strong id="stageProgress">0%</strong>
+                </div>
+                <div class="progress-track"><span id="progressFill"></span></div>
+              </div>
+            </aside>
+          </div>
+
+          <div id="stageActions" class="stage-actions"></div>
+        </section>
+      </section>
+
+      <section id="queueView" class="queue-view hidden">
+        <div class="queue-page-head">
+          <div>
+            <span class="section-index">夜间生产</span>
+            <h1>本地768P队列</h1>
+          </div>
+          <button id="newScheduleButton" class="primary-small" type="button">
+            <i data-lucide="plus"></i>
+            新建计划
+          </button>
+        </div>
+
+        <div class="queue-builder-layout">
+          <section class="candidate-pane">
+            <div class="queue-section-head">
+              <div>
+                <span class="section-index">01</span>
+                <h2>选择低清成片</h2>
+              </div>
+              <button id="selectAllCandidates" class="text-button" type="button">全选</button>
+            </div>
+            <div id="candidateList" class="candidate-list"></div>
+          </section>
+
+          <form id="scheduleForm" class="schedule-form">
+            <div class="queue-section-head">
+              <div>
+                <span class="section-index">02</span>
+                <h2 id="scheduleFormTitle">安排运行</h2>
+              </div>
+              <button id="cancelScheduleEdit" class="text-button hidden" type="button">取消编辑</button>
+            </div>
+
+            <label class="field compact-field">
+              <span>计划名称</span>
+              <input id="scheduleName" value="夜间768P批次" maxlength="80" />
+            </label>
+
+            <fieldset class="field compact-field">
+              <legend>定时方式</legend>
+              <div id="scheduleKindControl" class="segmented two">
+                <button type="button" data-schedule-kind="once" class="active">单次指定时间</button>
+                <button type="button" data-schedule-kind="daily">每天固定时间</button>
+              </div>
+            </fieldset>
+
+            <label id="onceTimeField" class="field compact-field">
+              <span>开始日期和时间</span>
+              <input id="onceTimeInput" type="datetime-local" />
+            </label>
+            <label id="dailyTimeField" class="field compact-field hidden">
+              <span>每天开始时间</span>
+              <input id="dailyTimeInput" type="time" value="23:00" />
+            </label>
+
+            <div class="selected-queue-head">
+              <span>执行顺序</span>
+              <strong id="selectedCount">0 项</strong>
+            </div>
+            <div id="selectedQueueList" class="selected-queue-list"></div>
+
+            <div class="queue-estimate">
+              <span>预计总耗时</span>
+              <strong id="queueEstimate">尚未选择项目</strong>
+              <small id="queueFinishEstimate"></small>
+            </div>
+
+            <button id="saveScheduleButton" class="create-button" type="submit">
+              <i data-lucide="calendar-check"></i>
+              保存定时计划
+            </button>
+            <div id="scheduleError" class="form-error" role="alert"></div>
+          </form>
+        </div>
+
+        <section class="schedule-monitor">
+          <div class="queue-section-head">
+            <div>
+              <span class="section-index">03</span>
+              <h2>计划与运行状态</h2>
+            </div>
+            <span class="availability">单GPU严格串行</span>
+          </div>
+          <div id="scheduleList" class="schedule-list"></div>
+        </section>
+      </section>
+    </main>
+
+    <aside id="historyDrawer" class="history-drawer" aria-hidden="true">
+      <div class="drawer-head">
+        <div>
+          <span class="section-index">任务</span>
+          <h2>历史项目</h2>
+        </div>
+        <button id="closeHistoryButton" class="icon-button" type="button" title="关闭">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <div id="historyList" class="history-list"></div>
+    </aside>
+    <div id="drawerBackdrop" class="drawer-backdrop hidden"></div>
+  </body>
+</html>

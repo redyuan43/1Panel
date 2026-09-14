@@ -1,0 +1,16 @@
+[Unit]
+Description=Edge H3 Fleet with explicit Qwen mutual exclusion
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=simple
+User=admin
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+WorkingDirectory=/home/admin/.local/state/h3-edge-fleet-20260914/fleet
+EnvironmentFile=/home/admin/.local/state/h3-edge-fleet-20260914/fleet.env
+ExecStart=/home/admin/.local/state/h3-edge-fleet-20260914/fleet-venv/bin/python -m uvicorn app.main:app --host 100.101.54.115 --port 18789
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=120
+[Install]
+WantedBy=multi-user.target

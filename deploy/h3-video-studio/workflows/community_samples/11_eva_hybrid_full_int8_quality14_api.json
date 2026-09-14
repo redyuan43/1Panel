@@ -1,0 +1,243 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_ref2va_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "type": "minimax",
+      "device": "default"
+    }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    }
+  },
+  "4": {
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "20": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "asset_6e2b5db54c1c487bb4c7b0e2b9e859c8.jpeg"
+    }
+  },
+  "21": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "asset_76bbc69df2b3425ead9a26eab293b939.png"
+    }
+  },
+  "22": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "asset_5f373d830c4741ae998c3a52dacb01e4.png"
+    }
+  },
+  "5": {
+    "class_type": "MiniMaxH3ReferenceToVideo",
+    "inputs": {
+      "clip": [
+        "2",
+        0
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "prompt": "生成一段 15秒、9:16竖屏、4K超写实真人实拍视频。\n\n画面中是一名明确成年东亚女性，自然清冷型东方面孔，小巧自然鹅蛋脸，柔和下颌线，五官比例真实，不追求网红模板式完美。\n\n人物拥有乌黑自然长发，头发随意披散，部分黑色发丝落在额头、眼睛和脸颊附近。发丝必须根根清晰，存在真实粗细差异、凌乱碎发和细小绒毛。\n\n整体为极淡的清透裸妆。\n\n自然原生眉毛，可以清晰看到眉毛毛流。\n\n深棕黑色眼睛，眼球湿润，瞳孔和虹膜具有真实反射；非常自然的细眼线与睫毛，不使用夸张假睫毛。\n\n鼻梁纤细自然，鼻尖具有明显阳光高光。\n\n嘴唇为自然饱满的淡珊瑚粉色，覆盖少量透明水润唇釉，保留完整真实唇纹。\n\n最重要的是皮肤。\n\n禁止把人物生成成传统AI美女的无瑕皮肤。\n\n脸颊、鼻翼、鼻梁必须清楚看到：\n\n真实毛孔\n细小皮肤纹理\n轻微凹凸\n少量浅色雀斑\n细小色素点\n自然小痣\n轻微肤色不均\n鼻翼真实纹理\n眼下细纹\n皮脂产生的自然高光\n面部细小绒毛\n\n皮肤具有真实成年女性状态，但整体仍然干净、健康、清透。\n\n⸻\n\n光线\n\n使用非常强烈的自然太阳直射光。\n\n阳光从人物面部侧前方照射，形成明显的高光和阴影分界。\n\n鼻梁、鼻尖、颧骨、嘴唇以及额头出现真实镜面高光。\n\n随着人物与镜头产生轻微位移，阳光被周围物体或发丝遮挡，在脸上形成不断变化的细碎光影纹理。\n\n部分画面允许出现轻微过曝高光，这是手机近距离拍摄的重要真实感来源。\n\n禁止影棚柔光。\n\n禁止完美均匀打光。\n\n⸻\n\n0–3秒｜开场怼脸\n\n直接从极端面部大特写开始。\n\n摄影机距离人物面部约 10–20cm。\n\n采用接近手机主摄或轻微长焦裁切的视觉效果。\n\n人物面部几乎占满整个9:16画面。\n\n镜头从略微侧面的角度拍摄，重点同时看到：\n\n一侧眼睛\n鼻梁\n鼻尖\n双唇\n部分脸颊\n\n人物安静看向镜头。\n\n嘴唇微微分开。\n\n没有说话。\n\n只有非常轻微的呼吸。\n\n眼球自然转动。\n\n偶尔轻微眨眼。\n\n摄影机出现非常轻微的手持漂移。\n\n⸻\n\n3–6秒｜眼睛与皮肤微距\n\n摄影机进一步靠近人物。\n\n画面开始进入真正的Macro Beauty Close-up。\n\n镜头缓慢横向移动。\n\n从眼睛移动到鼻梁，再经过脸颊。\n\n不要快速运镜。\n\n速度非常慢。\n\n此时重点不是人物动作，而是展示真实皮肤。\n\n阳光扫过脸颊后，毛孔、雀斑、细小色素点和皮肤纹理被明显照亮。\n\n人物轻微眯眼。\n\n眼皮自然下降。\n\n随后缓慢重新睁开。\n\n眼球反射出摄影设备与周围环境的自然高光。\n\n⸻\n\n6–10秒｜鼻子嘴唇超级特写\n\n镜头继续缓慢向下移动。\n\n构图逐渐变成：\n\n鼻尖 + 鼻翼 + 上唇 + 下唇 + 单侧脸颊\n\n占据几乎整个画面。\n\n此时可以裁掉部分额头和眼睛。\n\n这是原视频非常关键的构图特点：\n\n允许五官被画面边缘切掉。\n\n不要强迫完整脸部始终处于画面中央。\n\n摄影机非常靠近皮肤。\n\n清晰展示鼻翼附近的真实毛孔、脸颊细小雀斑以及皮肤表面的自然油脂。\n\n嘴唇微微张开。\n\n可以短暂露出一点牙齿。\n\n嘴唇进行非常轻微的自然运动。\n\n透明唇釉随着阳光产生湿润高光。\n\n⸻\n\n10–13秒｜镜头重新向眼睛移动\n\n摄影机沿人物脸部缓慢向上移动。\n\n从嘴唇经过鼻梁重新移动至眼睛。\n\n人物头部轻微转动约 5–10度。\n\n不是摆拍式转头。\n\n而是非常自然的小幅调整。\n\n几根黑色碎发进入镜头。\n\n部分头发覆盖眼睛附近。\n\n人物视线先看向镜头旁边。\n\n随后重新看向镜头。\n\n脸部光影发生变化。\n\n部分区域进入阴影。\n\n部分区域重新被阳光照亮。\n\n⸻\n\n13–15秒｜眼睛收尾\n\n最后停留在人物一侧眼睛和鼻梁附近的超级近距离特写。\n\n一只眼睛成为视觉中心。\n\n瞳孔中具有清晰真实的环境倒影。\n\n黑色发丝从画面上方自然垂落。\n\n阳光穿过发丝，在眼睛周围和脸颊形成细碎的条纹状阴影。\n\n人物最后轻微眨一次眼。\n\n嘴角出现几乎不可察觉的自然变化。\n\n镜头保持约1秒。\n\n结束。\n\n运镜锁定\n\n整个视频不要传统意义上的“推拉摇移大运镜”，而采用 贴着人物脸部缓慢探索的微距摄影方式。",
+      "width": 480,
+      "height": 864,
+      "length": 362,
+      "ref_image_size": "match",
+      "ref_images.ref_image_0": [
+        "22",
+        0
+      ]
+    }
+  },
+  "30": {
+    "class_type": "MiniMaxH3SigmaShift",
+    "inputs": {
+      "model": [
+        "1",
+        0
+      ],
+      "shift_video": 12.0,
+      "shift_audio": 3.0
+    }
+  },
+  "6": {
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 66125663
+    }
+  },
+  "7": {
+    "class_type": "BasicScheduler",
+    "inputs": {
+      "model": [
+        "30",
+        0
+      ],
+      "scheduler": "simple",
+      "steps": 14,
+      "denoise": 1.0
+    }
+  },
+  "8": {
+    "class_type": "KSamplerSelect",
+    "inputs": {
+      "sampler_name": "res_multistep"
+    }
+  },
+  "9": {
+    "class_type": "BasicGuider",
+    "inputs": {
+      "model": [
+        "30",
+        0
+      ],
+      "conditioning": [
+        "42",
+        0
+      ]
+    }
+  },
+  "10": {
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "noise": [
+        "6",
+        0
+      ],
+      "guider": [
+        "9",
+        0
+      ],
+      "sampler": [
+        "8",
+        0
+      ],
+      "sigmas": [
+        "7",
+        0
+      ],
+      "latent_image": [
+        "5",
+        1
+      ]
+    }
+  },
+  "11": {
+    "class_type": "MiniMaxH3AVDecodeT8",
+    "inputs": {
+      "av_latent": [
+        "10",
+        0
+      ],
+      "video_vae": [
+        "3",
+        0
+      ],
+      "audio_vae": [
+        "4",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "images": [
+        "11",
+        0
+      ],
+      "audio": [
+        "11",
+        1
+      ],
+      "fps": 24.0,
+      "bit_depth": 8
+    }
+  },
+  "14": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "video": [
+        "13",
+        0
+      ],
+      "filename_prefix": "video/h3-video-studio/6af89b2547df/proof",
+      "format": "auto",
+      "codec": "auto"
+    }
+  },
+  "40": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "20",
+        0
+      ],
+      "upscale_method": "lanczos",
+      "width": 480,
+      "height": 864,
+      "crop": "disabled"
+    }
+  },
+  "41": {
+    "class_type": "MiniMaxH3AddGuide",
+    "inputs": {
+      "positive": [
+        "5",
+        0
+      ],
+      "latent": [
+        "5",
+        1
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "image": [
+        "40",
+        0
+      ],
+      "frame_idx": 0
+    }
+  },
+  "42": {
+    "class_type": "MiniMaxH3AddGuide",
+    "inputs": {
+      "positive": [
+        "41",
+        0
+      ],
+      "latent": [
+        "5",
+        1
+      ],
+      "vae": [
+        "3",
+        0
+      ],
+      "image": [
+        "21",
+        0
+      ],
+      "frame_idx": -1
+    }
+  }
+}

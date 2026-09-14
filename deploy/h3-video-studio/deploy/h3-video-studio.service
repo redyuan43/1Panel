@@ -1,0 +1,20 @@
+[Unit]
+Description=H3 Video Studio on DGX Spark edge
+After=network-online.target comfyui-edge.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/admin/github/h3-video-studio
+Environment=PYTHONUNBUFFERED=1
+Environment=H3_STUDIO_ROOT=/home/admin/github/h3-video-studio
+Environment=H3_WORKFLOW_ROOT=/home/admin/github/minimax_h3/optimized_workflows
+Environment=COMFY_INPUT_DIR=/home/admin/github/comfyui/input
+Environment=COMFY_URL=http://127.0.0.1:8188
+EnvironmentFile=-/home/admin/.config/minimax/credentials.env
+ExecStart=/home/admin/github/h3-video-studio/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8789
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

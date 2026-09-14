@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>自然语言脚本 · H3 Studio</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="./script-studio.css" />
+  <script src="./script-studio.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand-block"><div class="brand-mark">H3</div><div><strong>Script Studio</strong><span>自然语言 → Skills → 声画脚本</span></div></div>
+    <a class="icon-text-button" href="./">返回视频工作室</a>
+  </header>
+  <main class="script-layout">
+    <section class="script-intro">
+      <span class="section-index">创作前置 / 01</span>
+      <h1>先把想法，写成好脚本。</h1>
+      <p>描述需求，模型按创作意图选用你已有 Skills 的安全提炼规则。讨论、修改、确认，再进入视频生成。</p>
+      <div id="capability" class="script-notice" role="status">正在检查文字策划能力；尚未调用模型。</div>
+      <div id="error" class="form-error" role="alert"></div>
+    </section>
+    <aside class="script-inputs">
+      <form id="briefForm" class="script-panel">
+        <h2>你的原始需求</h2>
+        <label class="field"><span>想拍什么？</span><textarea id="brief" rows="7" maxlength="8000" required placeholder="帮我做一条15秒的咖啡杯种草视频。面向通勤人群，开头用清晨赶路的情境吸引注意；画面温暖自然，有一句中文旁白，结尾展示产品，不编造保温效果。"></textarea></label>
+        <div class="script-columns">
+          <label class="field"><span>单条时长（秒）</span><input id="duration" type="number" min="4" max="15" value="15" required /></label>
+          <label class="field"><span>素材模式</span><select id="mode"><option value="t2v">文生视频</option><option value="i2v">首帧</option><option value="l2v">尾帧</option><option value="fl2v">首尾帧</option><option value="reference">参考素材</option><option value="hybrid">Hybrid</option></select></label>
+        </div>
+        <label class="field"><span>声音</span><select id="audio"><option value="native">原生生成</option><option value="reference">参考音频</option><option value="lock_source">锁定源音频（首帧模式）</option></select></label>
+        <label class="field"><span>素材与已知事实（可选）</span><textarea id="assetNotes" rows="3" maxlength="2000" placeholder="例如：白色杯身、木质杯盖；我会在生成页上传产品图。此处不会读取或上传文件。"></textarea></label>
+        <details><summary>Skills 选择与来源</summary><p class="script-muted">默认由模型选择；手选最多6项。基础 H3 与镜头规则始终启用。仅归档的执行工具不会运行。</p><div id="skillOptions"></div></details>
+        <button id="createScript" class="create-button" type="submit" disabled>用 Skills 策划脚本</button>
+        <p class="script-muted">每轮最多2次文字模型调用。不会自动生成视频，不执行第三方脚本。</p>
+      </form>
+      <section class="script-panel"><h2>最近脚本</h2><div id="history" class="script-history"></div><button id="refreshHistory" type="button">刷新列表</button></section>
+    </aside>
+    <section class="script-output" aria-label="脚本工作区">
+      <div id="empty" class="script-panel script-empty"><h2>从一句话开始</h2><p>这里会出现可编辑的分镜、镜头、对白、环境声和音乐，以及所用 Skills 的依据。</p><p>脚本确认 ≠ 立即生成。你仍然掌握每一阶段的启动与确认。</p></div>
+      <article id="workspace" class="script-panel hidden">
+        <div class="script-toolbar"><h2 id="planTitle">脚本</h2><span id="status" role="status"></span><button id="cancel" type="button" hidden>取消本轮策划</button></div>
+        <p id="planBrief" class="script-muted"></p>
+        <div id="selectedSkills" class="script-chips"></div><p id="selectionReason" class="script-muted"></p>
+        <div id="planError" class="form-error" role="alert"></div>
+        <form id="editor" hidden>
+          <fieldset id="draftFields">
+            <label class="field"><span>脚本标题</span><input id="title" maxlength="120" required /></label>
+            <label class="field"><span>创意概要</span><textarea id="summary" rows="3" maxlength="4000" required></textarea></label>
+            <div class="script-toolbar"><h3>逐镜脚本</h3><button id="addShot" type="button">添加分镜</button></div>
+            <div id="shots"></div>
+            <label class="field"><span>音乐</span><textarea id="music" rows="2" maxlength="2000"></textarea></label>
+            <label class="field"><span>连续性约束（每行一项）</span><textarea id="continuity" rows="3"></textarea></label>
+            <label class="field"><span>待补充问题（解决后清空，再保存）</span><textarea id="questions" rows="2"></textarea></label>
+            <label class="field"><span>创作假设（确认前请核对）</span><textarea id="assumptions" rows="2"></textarea></label>
+          </fieldset>
+          <div class="script-toolbar"><button id="save" type="submit">保存手动修改</button><span id="dirty" class="script-muted"></span></div>
+        </form>
+        <form id="revisionForm" class="script-revision">
+          <label class="field"><span>继续用自然语言修改</span><textarea id="instruction" rows="3" maxlength="4000" required placeholder="节奏再快一点，第二镜改成产品特写，旁白更口语化。"></textarea></label>
+          <button id="revise" type="submit">按要求修改脚本</button>
+        </form>
+        <div class="script-toolbar script-approval"><button id="approve" class="primary-small" type="button">确认当前脚本</button><a id="handoff" class="primary-small" hidden>带入视频生成设置 →</a></div>
+        <p id="approvalHint" class="script-muted"></p>
+        <details><summary>H3 生成提示词</summary><pre id="generationPrompt"></pre></details>
+        <div class="script-toolbar"><a id="exportMarkdown">下载脚本 Markdown</a><a id="exportJson">下载结构化 JSON</a></div>
+        <details><summary>模型调用与版本记录</summary><pre id="evidence"></pre></details>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

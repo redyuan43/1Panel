@@ -41,9 +41,19 @@ def test_real_quality_templates_consume_inputs_without_turbo_sampling(mode, role
         "MiniMaxH3ImageToVideo", "MiniMaxH3ReferenceToVideo", "MiniMaxH3AudioConditioningT8"))
     assert conditioning["prompt"] == project["prompt_approved"]
     assert (conditioning["width"], conditioning["height"]) == (480, 864)
+    role_links = {}
+    if mode == "hybrid" and any(entry["class_type"] == "MiniMaxH3AddGuide" for entry in graph.values()):
+        conditioner_id = next(identifier for identifier, entry in graph.items()
+                              if entry["inputs"] is conditioning)
+        role_links = contract.native_hybrid_asset_links(graph, conditioner_id)
     for role in ("first_frame", "last_frame"):
         if role in roles:
-            assert graph[conditioning[role][0]]["inputs"]["image"] == project["assets"][role]["comfy_name"]
+            link = role_links.get(role, conditioning.get(role))
+            node = graph[link[0]]
+            while node["class_type"] != "LoadImage":
+                link = node["inputs"]["image"]
+                node = graph[link[0]]
+            assert node["inputs"]["image"] == project["assets"][role]["comfy_name"]
     tampered = copy.deepcopy(graph)
     next(entry for entry in tampered.values() if entry["class_type"] == "BasicScheduler")["inputs"]["steps"] = 4
     with pytest.raises(Exception, match="14 steps"):

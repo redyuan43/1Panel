@@ -1,0 +1,22 @@
+{
+  "cases": [
+    {
+      "id": "A4_C0",
+      "label": "A4＋人物触发词",
+      "state": "待生成：仅增加 r34l1sm，不加载人物 LoRA",
+      "note": "以现有 A4 为参照；提示词正文、Seed、15秒、480×864、四步采样不变。A4 加速 LoRA 强度保持 1.0。"
+    },
+    {
+      "id": "A4_C05",
+      "label": "A4＋人物 LoRA 0.5",
+      "state": "待生成：r34l1sm＋Realism People LoRA，人物强度 0.5",
+      "note": "人物权重：fal/MiniMax-H3-Realism-People-LoRA；不是指定人物身份。A4 加速 LoRA 强度保持 1.0，需验证组合加载，避免相互覆盖。其余条件与 A4 相同。"
+    },
+    {
+      "id": "A4_C1",
+      "label": "A4＋人物 LoRA 1.0",
+      "state": "待生成：r34l1sm＋Realism People LoRA，人物强度 1.0",
+      "note": "人物权重：fal/MiniMax-H3-Realism-People-LoRA。A4 加速 LoRA 强度保持 1.0，需验证组合加载，避免相互覆盖。其余条件与 A4 相同；效果由你人工评判。"
+    }
+  ]
+}

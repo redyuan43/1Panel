@@ -1,10 +1,20 @@
 # H3 Fleet
 
+## Original Studio migration candidate
+
+The isolated AI Studio uses authenticated `/prompt`, immutable input uploads,
+execution-ID lookup, and owned cancellation. `/api/studio/batch-window` grants
+a persisted exclusive batch window; validation windows and other submissions
+cannot enter it. A window is renewed between items and cannot be released
+while work is active. This is candidate source, not evidence that Ivan is running it.
+Reference/hybrid/audio-lock workloads use conservative long-job admission;
+no new concurrency or actual inference result is implied by the migration tests.
+
 Private ComfyUI-compatible scheduler for the Ivan three-GPU MiniMax H3 host.
 
 The service exposes the ComfyUI endpoints used by H3 Video Studio and assigns
-each prompt to one single-GPU ComfyUI lane. The third lane is installed as a
-preview-only short-job lane. It was enabled only after the measured memory gate
+each prompt to one single-GPU ComfyUI lane. The third lane is preview-only;
+full-duration eligibility follows the reviewed profiles below. It was initially enabled after the measured memory gate
 and a real three-job validation passed.
 
 Public Router APIs remain unchanged. AI Router calls this service directly
@@ -22,7 +32,7 @@ simultaneously enter a bad offload path.
 | --- | --- | --- | --- | --- |
 | `fast` | RTX 4060 Ti 16 GB | `GPU-0befdd20-6ea9-4e7e-3378-635e20f42536` | `8188` | enabled |
 | `main` | RTX 3060 12 GB | `GPU-08c21842-c266-7f7d-6e5d-d494d4c20c4f` | `8189` | enabled |
-| `preview` | RTX 3060 12 GB | `GPU-b9ca94d5-6180-2d81-bb33-5ad04722f492` | `8190` | short jobs only |
+| `preview` | RTX 3060 12 GB | `GPU-b9ca94d5-6180-2d81-bb33-5ad04722f492` | `8190` | preview profiles only |
 
 ComfyUI lanes bind to loopback. The fleet scheduler binds to the Ivan
 Tailscale address at `100.96.79.21:8789`.
@@ -30,15 +40,69 @@ Tailscale address at `100.96.79.21:8789`.
 The third lane is preview-only. The measured two-lane peak left more than
 68 GiB `MemAvailable` with less than 1 MiB swap in use, and the three-lane
 6-step validation completed without SSH loss, OOM, Xid, or service restart.
-Three simultaneous quality jobs remain prohibited. Production long-duration
-jobs remain serial; explicit owned validation leases can test long preview concurrency.
+Three simultaneous quality jobs remain prohibited. Other production long-duration
+jobs remain serial; reviewed Studio Turbo4 previews have a separate bounded rule.
 
 ## Measured concurrency
 
+The reviewed Studio Turbo4 full-duration preview now supports up to three lanes.
+Two triple batches produced six complete 15-second portrait videos without
+swap growth or OOM. Other long/mixed profiles remain restricted. Measurements,
+exact run IDs and rollback scope: [full-duration validation](docs/full15-validation-20260909.md).
+
+### Studio matrix validation candidate (2026-09-09)
+
+`scripts/validate_studio_matrix.py` runs the original Studio Turbo four-step
+and 14-step quality graphs, rather than assuming the six-step Router evidence
+also validates every Studio path. The full-duration revision reuses the existing
+single-lane 15-second evidence instead of repeating each GPU separately:
+
+- 362-frame portrait preview: two jobs, then three jobs under an experimental lease.
+- One 362-frame 768P quality job on `fast` plus one 362-frame preview on `main`.
+- One exploratory batch by default; `--repetitions 2` repeats a candidate maximum
+  before any production promotion. `--case` selects an individual gate.
+
+The mixed lease accepts exactly `profile=mixed`, a fixed long quality frame
+count, and `max_parallel=2`. It pins quality to `fast` and preview to `main` and
+rejects another same-profile slot. `preview_frame_count` explicitly selects 362
+frames; omission retains the legacy 124-frame limit. Without the owned lease,
+production long/mixed restrictions
+remain unchanged. All normal RAM, swap, disk and cgroup gates still apply.
+Studio long-preview RAM reservations now use the same configured preview
+budget as the Router contract, rather than incorrectly using quality's budget.
+
+The validator uses a renewable exclusive window, persists IDs before POST,
+never retries generation POSTs, records GPU/host samples, checks actual worker
+queue overlap, and requires video dimensions/frame count/audio validation.
+Every execution gets an independently seeded graph and unique output prefix.
+Worker histories must show successful non-cached sampling; model-loading cache
+is permitted. The report records execution overlap, worker duration and queue
+time separately. `--memory-bandwidth` samples the available Intel memory-controller
+counters through noninteractive sudo; unavailable counters are reported as such.
+Host/cgroup memory, reclaim, swap, per-worker RSS and GPU PCIe transfers are saved
+alongside the counters. Worker logs are retained for allocation-failure diagnosis.
+On failure it cancels only owned IDs; unknown outcomes retain reservations.
+Its total default budget is six hours, and it never promotes production policy.
+Two long quality jobs, three quality jobs, and untested reference/audio modes
+are not authorized by this mixed experiment. Historical short-quality evidence
+does not establish long-quality or arbitrary mixed-mode capacity.
+
+The 2026-09-09 run uses system unit `h3-studio-matrix-validation.service` on Ivan;
+reports and metrics are under
+`/mnt/ivan-ext4-offload/h3-fleet/evidence/studio-matrix-20260909/`.
+Run `h3val_6c9dadca1aca4dca` was started after cancelling the two user-authorized
+Studio jobs, releasing idle model caches and restarting only the idle fast/main
+H3 workers to reclaim residual swap. Production policy was not raised.
+That run stopped on its second single-preview batch: an identical graph reused
+the cached sampler output, so it did not validate additional concurrency.
+The revised full-duration runs use evidence directory `studio-full15-20260909`;
+their reports, not an active service or queue entry, determine which gates passed.
+Fleet unit tests after the reviewed capacity update: 120 passed.
+
 - Three concurrent 6-step jobs at 864x480, 124 frames: passed.
 - Two concurrent 14-step jobs at 1344x768, 124 frames: passed.
-- Jobs over 124 frames run exclusively on `fast`, with one active execution
-  across the entire fleet. They cannot overlap short jobs or other long jobs.
+- Except for the reviewed native-audio Studio T2VA Turbo4 profile, jobs over
+  124 frames run exclusively on `fast` and cannot overlap other jobs.
 - Short preview and short quality jobs do not overlap across profiles. The
   configured resource guards can reduce concurrency below these historical
   maxima. Missing resource telemetry keeps new work queued.

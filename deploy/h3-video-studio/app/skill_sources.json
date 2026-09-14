@@ -1,0 +1,129 @@
+{
+  "source": "1Panel distilled prompt_profiles.json",
+  "source_commit": "ddd42ae67",
+  "source_sha256": "56c88f13a01f58f8f519a1e161d190d07474e0c248c4124574cd63e969e2b93e",
+  "archive_manifest_sha256": "e24fadb28a4753a0581789ee8c00417fbd6b8d2af0c8fd821954c88fcf1341e1",
+  "runtime_archive_execution": false,
+  "skills": [
+    {
+      "directory": "h3-prompt-writing",
+      "display_name": "MiniMax H3 提示词编写",
+      "version": "1.0.0",
+      "tree_sha256": "066d04d2ed9a5fac1032267815cb51657eff0ccb51250337c9e5495f20f7eff6"
+    },
+    {
+      "directory": "minimax-h3",
+      "display_name": "MiniMax H3 视频生成",
+      "version": "1.0.0",
+      "tree_sha256": "72a890ec6a8666f5e71510017348a068adf7cc4d4dbc767b80aaed163f988a05"
+    },
+    {
+      "directory": "video-generation",
+      "display_name": "AI 视频生成",
+      "version": "1.0.0",
+      "tree_sha256": "b5c5bf9a59ddb1d6e5394b2733a18122671e5f8306f166a2fae458d5f22c57aa"
+    },
+    {
+      "directory": "cinematic-shot-prompt-expert",
+      "display_name": "电影级镜头提示词专家",
+      "version": "1.0.0",
+      "tree_sha256": "4eabb196287df382194acb8089e291a0637c1fe5bd81c4567ba470edc82ecf22"
+    },
+    {
+      "directory": "image-to-video",
+      "display_name": "图生视频",
+      "version": "1.0.0",
+      "tree_sha256": "523291a3ac0dc9f7925bafd51e57bf04ee0c1c51dfb11a0bdf7dab1e529bda52"
+    },
+    {
+      "directory": "minimax-h3-video-generation-and-editing",
+      "display_name": "Minimax H3 视频生成与编辑",
+      "version": "1.0.0",
+      "tree_sha256": "52d5906eefc7fe9f5fdc6c862cf4a2f614f41f93d1b63ca62b4f01563b3f5244"
+    },
+    {
+      "directory": "image-reference-to-video",
+      "display_name": "参考图生视频",
+      "version": "1.0.0",
+      "tree_sha256": "d201327950fdea8f3b402991749fb981fb296a7fce8f7f698ca9bc1872bb21f0"
+    },
+    {
+      "directory": "minimax-h3-image-reference-to-video",
+      "display_name": "MiniMax H3 参考图生视频",
+      "version": "1.0.0",
+      "tree_sha256": "b3a5ece1225693da676136635c2190c7a92f3389884642199fd78d0881f8fcb5"
+    },
+    {
+      "directory": "seeding-video",
+      "display_name": "种草视频",
+      "version": "1.0.0",
+      "tree_sha256": "79b308d601e4ee3983dec692e03863767d8ac84e94c1d54e033a167ebb33707a"
+    },
+    {
+      "directory": "minimax-h3-seeding-video",
+      "display_name": "MiniMax H3 种草视频",
+      "version": "1.0.0",
+      "tree_sha256": "0f143647a6c07fa39bf9d9168141cce49fc951a5fafd18692ed1c9a43c8fac7a"
+    },
+    {
+      "directory": "social-commerce-video",
+      "display_name": "带货视频",
+      "version": "1.0.0",
+      "tree_sha256": "7532ec97d3f16917b542d767666a243c04a7ddd746a45bdcd6679928b8b6ef4e"
+    },
+    {
+      "directory": "minimax-h3-social-commerce-video",
+      "display_name": "MiniMax H3 带货视频",
+      "version": "1.0.0",
+      "tree_sha256": "5968887095215a535b432866ce44ef62cc509270c096d01b765dc5910d74bb05"
+    },
+    {
+      "directory": "short-drama-video",
+      "display_name": "短剧视频",
+      "version": "1.0.0",
+      "tree_sha256": "a41a903b9f46ad48949acda672ec1e7ee4672c1a57fa6183cb81a123dd1d4b8b"
+    },
+    {
+      "directory": "dynamic-comic-video",
+      "display_name": "动态漫画",
+      "version": "1.0.0",
+      "tree_sha256": "8611bb931b5fbf4cd85e9c1e1d7355b38194c8c318d4cd294b8c4401c47eb1ab"
+    },
+    {
+      "directory": "ecommerce-video",
+      "display_name": "电商视频",
+      "version": "1.0.0",
+      "tree_sha256": "b9a221b584c5194d74b93b887bb3bd21d992349d0e57702b1c97430d3e573e4f"
+    },
+    {
+      "directory": "tvc-video",
+      "display_name": "TVC 广告片",
+      "version": "1.0.0",
+      "tree_sha256": "73c55e232c755eb69bfdb5c6a5b520f373b31075c27d10fbe15ccb0dd07633ae"
+    },
+    {
+      "directory": "ai-ad-video",
+      "display_name": "AI 广告视频",
+      "version": "1.0.0",
+      "tree_sha256": "a401b86400687258adc956ea28134d467a68cffae3623a925e3e8c8bf98a7c76"
+    },
+    {
+      "directory": "first-last-frame-to-video",
+      "display_name": "首尾帧生视频",
+      "version": "1.0.0",
+      "tree_sha256": "e3629fe42979fbd0ae3441dbf98312d327153bb4c1336ff0869408dac2df7ab6"
+    },
+    {
+      "directory": "image-prompt-skill__skillhub",
+      "display_name": "提示词生成大师",
+      "version": "1.0.15",
+      "tree_sha256": "e403e58ff7eb3b73c6cac8cf68c65d2535dbe97865b870a948bee158113031f7"
+    },
+    {
+      "directory": "minimax-h3-image-to-video",
+      "display_name": "MiniMax H3 图生视频",
+      "version": "1.0.0",
+      "tree_sha256": "16db0cb4484fcc9f99c6d05ddc731f8aa626ed7aa8efe58926278b2f99b26e38"
+    }
+  ]
+}

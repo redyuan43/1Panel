@@ -1,0 +1,205 @@
+{
+  "1": {
+    "_meta": {
+      "title": "Load H3 video VAE"
+    },
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    }
+  },
+  "10": {
+    "_meta": {
+      "title": "Sample B8 AV latent at eight steps"
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "guider": [
+        "9",
+        0
+      ],
+      "latent_image": [
+        "6",
+        1
+      ],
+      "noise": [
+        "8",
+        0
+      ],
+      "sampler": [
+        "7",
+        1
+      ],
+      "sigmas": [
+        "7",
+        2
+      ]
+    }
+  },
+  "11": {
+    "_meta": {
+      "title": "Decode generated video and audio"
+    },
+    "class_type": "MiniMaxH3AVDecodeT8",
+    "inputs": {
+      "audio_vae": [
+        "2",
+        0
+      ],
+      "av_latent": [
+        "10",
+        0
+      ],
+      "video_vae": [
+        "1",
+        0
+      ]
+    }
+  },
+  "12": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "audio": [
+        "11",
+        1
+      ],
+      "bit_depth": 8,
+      "fps": 24.0,
+      "images": [
+        "11",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "codec": "auto",
+      "filename_prefix": "video/router/recipe-template",
+      "format": "auto",
+      "video": [
+        "12",
+        0
+      ]
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Load H3 audio VAE"
+    },
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Load H3 CLIP"
+    },
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "device": "default",
+      "type": "minimax"
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Load native H3 diffusion model"
+    },
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "5": {
+    "_meta": {
+      "title": "B8 pinned VDN Composer; verified structural exception"
+    },
+    "class_type": "MiniMaxH3VDNModelComposerT8Advanced",
+    "inputs": {
+      "allow_structural_base": true,
+      "model": [
+        "4",
+        0
+      ],
+      "stage": "stage_dmd_8nfe",
+      "vdn_root": "OpenVDN/vdn-minimax-h3",
+      "verify_hashes": true
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Official 15s H3 Context IR text-to-video-and-audio"
+    },
+    "class_type": "MiniMaxH3AudioConditioningT8",
+    "inputs": {
+      "add_source_as_reference": false,
+      "audio_denoise_strength": 1.0,
+      "audio_mode": "native",
+      "audio_vae": [
+        "2",
+        0
+      ],
+      "clip": [
+        "3",
+        0
+      ],
+      "height": 864,
+      "length": 362,
+      "prompt": "__RECIPE_PROMPT__",
+      "prompt_primary_audio_ordinal": 0,
+      "ref_image_size": "match",
+      "reference_video_policy": "official_2_to_15s",
+      "strict_prompt_tags": true,
+      "task_type": "T2VA",
+      "video_vae": [
+        "1",
+        0
+      ],
+      "width": 480
+    }
+  },
+  "7": {
+    "_meta": {
+      "title": "B8 author-enforced 8 NFE / native-flow / shifts 12,3"
+    },
+    "class_type": "MiniMaxH3VDNExecutionPlanT8Advanced",
+    "inputs": {
+      "av_latent": [
+        "6",
+        1
+      ],
+      "model": [
+        "5",
+        0
+      ]
+    }
+  },
+  "8": {
+    "_meta": {
+      "title": "Noise"
+    },
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 0
+    }
+  },
+  "9": {
+    "_meta": {
+      "title": "Basic guider"
+    },
+    "class_type": "BasicGuider",
+    "inputs": {
+      "conditioning": [
+        "6",
+        0
+      ],
+      "model": [
+        "7",
+        0
+      ]
+    }
+  }
+}

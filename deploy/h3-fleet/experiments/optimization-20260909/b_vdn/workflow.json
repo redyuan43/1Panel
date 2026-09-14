@@ -1,0 +1,205 @@
+{
+  "1": {
+    "_meta": {
+      "title": "Load H3 video VAE"
+    },
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_video_vae_fp16.safetensors"
+    }
+  },
+  "10": {
+    "_meta": {
+      "title": "Sample B8 AV latent at eight steps"
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "inputs": {
+      "guider": [
+        "9",
+        0
+      ],
+      "latent_image": [
+        "6",
+        1
+      ],
+      "noise": [
+        "8",
+        0
+      ],
+      "sampler": [
+        "7",
+        1
+      ],
+      "sigmas": [
+        "7",
+        2
+      ]
+    }
+  },
+  "11": {
+    "_meta": {
+      "title": "Decode generated video and audio"
+    },
+    "class_type": "MiniMaxH3AVDecodeT8",
+    "inputs": {
+      "audio_vae": [
+        "2",
+        0
+      ],
+      "av_latent": [
+        "10",
+        0
+      ],
+      "video_vae": [
+        "1",
+        0
+      ]
+    }
+  },
+  "12": {
+    "class_type": "CreateVideo",
+    "inputs": {
+      "audio": [
+        "11",
+        1
+      ],
+      "bit_depth": 8,
+      "fps": 24.0,
+      "images": [
+        "11",
+        0
+      ]
+    }
+  },
+  "13": {
+    "class_type": "SaveVideo",
+    "inputs": {
+      "codec": "auto",
+      "filename_prefix": "video/h3-comparison/B8/pink-20260909",
+      "format": "auto",
+      "video": [
+        "12",
+        0
+      ]
+    }
+  },
+  "2": {
+    "_meta": {
+      "title": "Load H3 audio VAE"
+    },
+    "class_type": "VAELoader",
+    "inputs": {
+      "vae_name": "minimax_h3_audio_vae_fp32.safetensors"
+    }
+  },
+  "3": {
+    "_meta": {
+      "title": "Load H3 CLIP"
+    },
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors",
+      "device": "default",
+      "type": "minimax"
+    }
+  },
+  "4": {
+    "_meta": {
+      "title": "Load native H3 diffusion model"
+    },
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "minimax_h3_fl2va_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    }
+  },
+  "5": {
+    "class_type": "MiniMaxH3VDNModelComposerT8Advanced",
+    "inputs": {
+      "model": [
+        "4",
+        0
+      ],
+      "vdn_root": "OpenVDN/vdn-minimax-h3",
+      "stage": "stage_dmd_8nfe",
+      "verify_hashes": true,
+      "allow_structural_base": true
+    },
+    "_meta": {
+      "title": "B8 pinned VDN Composer; verified structural exception"
+    }
+  },
+  "6": {
+    "_meta": {
+      "title": "Official 15s H3 Context IR text-to-video-and-audio"
+    },
+    "class_type": "MiniMaxH3AudioConditioningT8",
+    "inputs": {
+      "add_source_as_reference": false,
+      "audio_denoise_strength": 1.0,
+      "audio_mode": "native",
+      "audio_vae": [
+        "2",
+        0
+      ],
+      "clip": [
+        "3",
+        0
+      ],
+      "height": 864,
+      "length": 362,
+      "prompt": "integrated_multimodal_description:\n[Shot 1] Ultra-realistic cinematic fashion commercial, vertical composition. A cozy feminine bedroom is decorated in pastel pink: floral wallpaper, a pink bed, an oval vanity mirror, a vintage pink telephone, a pink tumbler, small accessories and translucent curtains. Warm morning sunlight falls across the bed, forming soft shadows. A wide overhead establishing shot drifts very slowly with small amplitude. Dreamy nostalgic 1990s film photography, delicate film grain, soft glow, subtle lens flare and realistic material textures. No titles, captions, logos or watermarks.\n[Shot 2] At 00:02.000, a gentle cut to a medium overhead view of an adult woman in her twenties reclining comfortably on the same pink bed. She has shoulder-length softly waved brown hair and wears a coordinated pastel-pink sleepwear set and a pink sleep mask. She holds the pink telephone handset beside her face. The pink tumbler remains on the bedside table. The camera slowly pushes in with small amplitude. Her relaxed posture, hands, hair and sleepwear remain natural and consistent.\n[Shot 3] At 00:04.000, a close-up beauty shot with shallow depth of field. The same woman lifts the sleep mask just above her eyes with her free hand while keeping the handset at her ear. Warm light reveals natural skin texture, subtle makeup and a gentle expression. In a quiet, cheerful voice the woman (S1) says: <d>[English] Good morning. See you soon.</d> Her mouth follows the brief words naturally. The camera holds steady with a slight slow push forward.\n[Shot 4] At 00:06.000, cut to a medium tracking shot. She has returned the handset to its cradle and removed the mask. In the same sleepwear she rises from the bed and walks toward the vanity. The camera tracks smoothly beside her at walking speed, keeping her face and body coherent. The floral walls, bed and warm window light establish the same room and continuous morning.\n[Shot 5] At 00:08.000, she sits at the vintage vanity before the large oval mirror. Perfume bottles, makeup, hair accessories and jewelry are arranged neatly on its surface. An elegant close view shows her brushing her hair; a brief matching close view shows her gently applying makeup. Her reflection corresponds to her real movements and appearance, without extra people or duplicated limbs. The light remains warm and soft, the palette pastel pink, with shallow depth of field and restrained camera motion.\n[Shot 6] At 00:11.000, a medium shot follows her glance toward the bedroom door. Still in the same sleepwear, she steps to the door and opens it slightly, playfully peeking outside. The camera tracks with small amplitude and settles as she pauses. The hallway remains an indistinct background; the woman is the only visible character.\n[Shot 7] At 00:13.000, an intentional fashion-commercial edit reveals the same woman now fully dressed in a stylish pastel-pink daytime outfit: a tailored pink jacket and matching skirt, with delicate jewelry. This is the planned outfit change from sleepwear, not a change of identity. She stands confidently at the vanity mirror in an elegant relaxed pose. Her hair, facial identity and reflected appearance remain consistent. A very slow push-in emphasizes her finished look in warm morning sunlight. Hold the dreamy romantic final pose until the video ends at 00:15.000. Preserve the refined film texture and premium fashion-commercial appearance without artificial skin smoothing.\noverall_soundscape:\nQuiet morning room ambience, soft fabric rustles, the brief clear female phone greeting in Shot 3, a gentle telephone cradle click before Shot 4, light footsteps, brushing and makeup handling, and a soft door movement. Keep sounds understated and synchronized to visible actions; no additional speakers, unintelligible dialogue or traffic noise.\nnon_diegetic_music:\nNone. Preserve the natural intimate room soundscape.\n",
+      "prompt_primary_audio_ordinal": 0,
+      "ref_image_size": "match",
+      "reference_video_policy": "official_2_to_15s",
+      "strict_prompt_tags": true,
+      "task_type": "T2VA",
+      "video_vae": [
+        "1",
+        0
+      ],
+      "width": 480
+    }
+  },
+  "7": {
+    "class_type": "MiniMaxH3VDNExecutionPlanT8Advanced",
+    "inputs": {
+      "model": [
+        "5",
+        0
+      ],
+      "av_latent": [
+        "6",
+        1
+      ]
+    },
+    "_meta": {
+      "title": "B8 author-enforced 8 NFE / native-flow / shifts 12,3"
+    }
+  },
+  "8": {
+    "_meta": {
+      "title": "Noise"
+    },
+    "class_type": "RandomNoise",
+    "inputs": {
+      "noise_seed": 1565559107914140700
+    }
+  },
+  "9": {
+    "_meta": {
+      "title": "Basic guider"
+    },
+    "class_type": "BasicGuider",
+    "inputs": {
+      "conditioning": [
+        "6",
+        0
+      ],
+      "model": [
+        "7",
+        0
+      ]
+    }
+  }
+}

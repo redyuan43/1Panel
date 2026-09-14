@@ -1,0 +1,6 @@
+[Unit]
+Description=Edge H3 single GPU aggregate
+[Slice]
+MemoryAccounting=yes
+MemoryMax=96G
+MemorySwapMax=8G

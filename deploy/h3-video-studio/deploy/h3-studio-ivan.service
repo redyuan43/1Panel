@@ -1,0 +1,19 @@
+[Unit]
+Description=H3 original Studio with Ivan Fleet backend
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/github/1Panel/deploy/h3-video-studio
+EnvironmentFile=%h/.config/h3-studio-ivan/production.env
+Environment=H3_STUDIO_COMPARISON_RESULTS=%h/.local/state/h3-studio-ivan-production/comparison/results
+Environment=H3_STUDIO_COMPARISON_PLANNED=%h/.local/state/h3-studio-ivan-production/comparison/planned.json
+ExecStart=%h/.local/state/h3-studio-ivan-runtime/venv/bin/python scripts/serve.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

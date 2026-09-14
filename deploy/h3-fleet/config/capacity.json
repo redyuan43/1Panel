@@ -5,8 +5,9 @@
     "quality": {"max_frames": 124, "steps": 14, "max_parallel": 2, "lanes": ["fast", "main"], "memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "20260907-233628/gate3-dual-14step-768-124/report.json"}
   },
   "long": {"max_parallel": 1, "lanes": ["fast"], "memory_budget_gib": 24, "preview_memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "preview 362 frames: 20260907-233628/custom-subway-winner-15s-turbo6/report.json; quality 362 frames: unvalidated"},
+  "studio_preview": {"max_frames": 362, "steps": 4, "max_parallel": 3, "lanes": ["fast", "main", "preview"], "memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "studio-full15-20260909/h3val_306ff5b26d804d43/report.json; studio-full15-20260909/h3val_73e47812fca04434/report.json (two triple batches, non-cached sampling, full media and memory telemetry)"},
   "mixed_profiles": false,
   "mixed_short_long": false,
   "resources": {"min_available_ram_gib": 16, "max_cgroup_gib": 72, "max_swap_gib": 1, "swap_idle_stable_seconds": 60, "swap_hard_limit_gib": 8, "swap_recovery_mode": "stable_idle_exclusive_fast_only", "min_root_free_gib": 25, "min_offload_free_gib": 40},
-  "promotion": "Manual reviewed change only; require 1 -> 2 -> 3 staircase within authorized scope, two successful batches at every proposed maximum, full media validation and host telemetry. Long concurrency remains disabled."
+  "promotion": "Reviewed 2026-09-09: native-audio Studio T2VA Turbo4 preview up to 362 frames may run three lanes after dual plus two triple full-duration batches. Other long, reference, six-step and quality/mixed workflows retain their previous limits. No automatic promotion."
 }
