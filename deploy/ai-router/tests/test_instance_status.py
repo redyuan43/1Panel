@@ -41,7 +41,7 @@ def test_idle_heartbeat_recovers_after_store_failure_and_close_stays_stopped(mon
             ready.set()
         runtime = SimpleNamespace(draining=False, _publish_instance_state=publish,
                   health=SimpleNamespace(), evaluator=SimpleNamespace(), compactor=SimpleNamespace(),
-                  internal_client=None, prefix_prewarmer=None, privacy_reviewer=None,
+                  internal_client=None, prefix_prewarmer=None, privacy_reviewer=None, training=None,
                   track_instance=True, store=SimpleNamespace(close=AsyncMock()),
                   endpoint_token_counter=SimpleNamespace(close=AsyncMock()))
         runtime._instance_heartbeat = asyncio.create_task(RouterRuntime._heartbeat_instances(runtime))

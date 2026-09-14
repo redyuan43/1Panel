@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from .config import Registry, Settings
+from .context_policy import apply_context_policy
 from .errors import (
     NoCompatibleModelError,
     NoEligibleModelError,
@@ -485,6 +486,11 @@ class RoutingPolicy:
                 trace=trace,
                 trace_attempt=trace_attempt,
             )
+        if directed or requested_model != "auto":
+            adjusted = [apply_context_policy(self.settings, endpoint, statuses[endpoint.id])
+                        for endpoint in endpoints]
+            endpoints = [endpoint for endpoint, _status in adjusted]
+            statuses = {endpoint.id: status for endpoint, status in adjusted}
         candidates: list[Endpoint] = []
         rejections: list[str] = []
         rejection_reasons: list[str] = []

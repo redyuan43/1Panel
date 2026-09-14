@@ -456,6 +456,21 @@ function openClientDialog(clientId = null) {
   byId("client-parallel").value = client?.max_parallel_requests || 4;
   byId("client-routing-mode").value = client?.routing_mode || "inherit";
   byId("client-local-only").checked = Boolean(client?.local_only);
+  byId("client-history-recall").checked = client ? Boolean(client.history_recall_enabled) : true;
+  byId("client-history-cloud").checked = Boolean(client?.history_cloud_allowed);
+  byId("client-history-legacy-cloud").checked = Boolean(client?.history_legacy_cloud_allowed);
+  byId("client-history-status").textContent = "";
+  byId("client-history-source").textContent = "";
+  byId("client-history-source-id").value = "";
+  byId("client-history-conversation").value = "";
+  byId("client-compaction-jobs").textContent = "";
+  byId("client-compaction-request").value = "";
+  byId("client-compaction-job-id").value = "";
+  byId("client-compaction-operation").value = "";
+  byId("client-compaction-evidence").value = "";
+  byId("client-compaction-confirm-terminal").checked = false;
+  byId("client-compaction-target").value = state.settings?.context_policy?.endpoint_id || "";
+  syncHistoryGrants();
   byId("client-disclosure-mode").value = (
     client?.disclosure_mode || (client ? "internal" : "public")
   );
@@ -476,6 +491,9 @@ function collectClient() {
   return {
     routing_mode: byId("client-routing-mode").value,
     local_only: byId("client-local-only").checked,
+    history_recall_enabled: byId("client-history-recall").checked,
+    history_cloud_allowed: byId("client-history-cloud").checked,
+    history_legacy_cloud_allowed: byId("client-history-legacy-cloud").checked,
     id: byId("client-id").value.trim(),
     name: byId("client-name").value.trim(),
     enabled: byId("client-enabled").checked,
@@ -509,6 +527,108 @@ async function saveClient(event) {
   } catch (error) {
     notice(error.message, true);
   }
+}
+
+function syncHistoryGrants() {
+  const recall = byId("client-history-recall");
+  const cloud = byId("client-history-cloud");
+  recall.disabled = false;
+  cloud.disabled = !recall.checked || byId("client-local-only").checked;
+  if (cloud.disabled) cloud.checked = false;
+  const legacy = byId("client-history-legacy-cloud");
+  legacy.disabled = cloud.disabled || !cloud.checked;
+  if (legacy.disabled) legacy.checked = false;
+}
+
+async function refreshHistoryStatus() {
+  if (!state.editingClientId) { notice("请先保存账号。", true); return; }
+  try {
+    const result = await api(`/api/clients/${encodeURIComponent(state.editingClientId)}/history-memory`);
+    byId("client-history-status").textContent = result.state === "not_initialized"
+      ? "索引尚未建立；开启授权后由后台处理。"
+      : `已索引 ${result.chunks} 段，来自 ${result.conversations} 个会话；排除 ${result.excluded_conversations} 个会话。处理进度：${result.archive_cursor}`;
+    const progress = result.progress;
+    if (result.indexing_enabled === false) {
+      byId("client-history-status").textContent += " 后台整理已暂停；已有索引仍可查询。";
+    } else if (progress) {
+      const eta = progress.estimated_remaining_seconds;
+      byId("client-history-status").textContent += progress.caught_up
+        ? " 上次检查时已追平，后续只处理新增或更新记录。"
+        : ` 待处理约 ${progress.remaining_events} 条变更，${progress.events_per_second} 条/秒；${eta == null ? "剩余时间待采样" : `粗估剩余 ${Math.ceil(eta / 60)} 分钟`}。新记录优先，旧历史分批补齐。`;
+    }
+  } catch (error) { notice(error.message, true); }
+}
+
+async function setHistoryExclusion(excluded) {
+  const conversation = byId("client-history-conversation").value.trim();
+  if (!state.editingClientId || !conversation) { notice("请先保存账号并填写会话 ID。", true); return; }
+  try {
+    await api(`/api/clients/${encodeURIComponent(state.editingClientId)}/history-memory/exclusions`, {
+      method: "POST", body: JSON.stringify({conversation_id: conversation, excluded}),
+    });
+    notice(excluded ? "该会话已从历史找回中排除。" : "该会话已恢复历史找回。");
+    await refreshHistoryStatus();
+  } catch (error) { notice(error.message, true); }
+}
+
+async function viewHistorySource() {
+  const source = byId("client-history-source-id").value.trim();
+  if (!state.editingClientId || !source) { notice("请先保存账号并填写来源 ID。", true); return; }
+  byId("client-history-source").textContent = "";
+  try {
+    const result = await api(`/api/clients/${encodeURIComponent(state.editingClientId)}/history-memory/sources/${encodeURIComponent(source)}`);
+    byId("client-history-source").textContent = `会话：${result.source.conversation_id}\n请求：${result.source.request_id}\n\n${result.source.text}`;
+  } catch (error) { notice(error.message, true); }
+}
+
+async function refreshCompactionJobs() {
+  if (!state.editingClientId) { notice("请先保存账号。", true); return; }
+  try {
+    const result = await api(`/api/clients/${encodeURIComponent(state.editingClientId)}/compaction-jobs`);
+    const labels = {queued:"排队中", running:"压缩中", ready:"候选已就绪", failed:"失败", cancelled:"已取消", needs_context:"等待核对结果"};
+    byId("client-compaction-jobs").textContent = result.jobs.length ? result.jobs.map(job =>
+      `${job.id}\n${labels[job.state] || job.state} · ${job.calls} 次调用 · 输入 ${job.input_tokens} / 输出 ${job.output_tokens} token${job.error ? `\n原因：${job.error}` : ""}${job.unresolved_operation_ids?.length ? `\n待核对操作：${job.unresolved_operation_ids.join(", ")}` : ""}`
+    ).join("\n\n") : "暂无后台压缩任务。";
+  } catch (error) { notice(error.message, true); }
+}
+
+async function createCompactionJob() {
+  const requestId = byId("client-compaction-request").value.trim();
+  const target = byId("client-compaction-target").value.trim();
+  if (!state.editingClientId || !requestId || !target) { notice("请保存账号并填写归档请求和目标端点 ID。", true); return; }
+  try {
+    const result = await api(`/api/clients/${encodeURIComponent(state.editingClientId)}/compaction-jobs`, {
+      method:"POST", body:JSON.stringify({request_id:requestId, target_endpoint_id:target}),
+    });
+    byId("client-compaction-job-id").value = result.job.id;
+    await refreshCompactionJobs();
+  } catch (error) { notice(error.message, true); }
+}
+
+async function cancelCompactionJob() {
+  const jobId = byId("client-compaction-job-id").value.trim();
+  if (!state.editingClientId || !jobId) { notice("请填写任务 ID。", true); return; }
+  try {
+    await api(`/api/clients/${encodeURIComponent(state.editingClientId)}/compaction-jobs/${encodeURIComponent(jobId)}/cancel`, {method:"POST", body:"{}"});
+    await refreshCompactionJobs();
+  } catch (error) { notice(error.message, true); }
+}
+
+async function reconcileCompactionJob() {
+  const jobId = byId("client-compaction-job-id").value.trim();
+  const operation = byId("client-compaction-operation").value.trim();
+  const evidence = byId("client-compaction-evidence").value.trim();
+  if (!state.editingClientId || !jobId || !operation || evidence.length < 8 || !byId("client-compaction-confirm-terminal").checked) {
+    notice("请填写任务、操作和证据引用，并明确确认上游已结束。", true); return;
+  }
+  try {
+    await api(`/api/clients/${encodeURIComponent(state.editingClientId)}/compaction-jobs/${encodeURIComponent(jobId)}/reconcile`, {
+      method:"POST", body:JSON.stringify({operation_id:operation, evidence_reference:evidence,
+        upstream_terminal_confirmed:true, discard_result:true}),
+    });
+    byId("client-compaction-confirm-terminal").checked = false;
+    await refreshCompactionJobs();
+  } catch (error) { notice(error.message, true); }
 }
 
 async function toggleClient(clientId) {
@@ -3730,6 +3850,21 @@ function renderSettings() {
     "explicit_only",
   );
   byId("compaction-model").value = value("compaction.model_id");
+  byId("compaction-summary-reasoning").value = value("compaction.summary_reasoning", "provider_default");
+  byId("compaction-summary-output").value = value("compaction.summary_output_tokens", 8192);
+  byId("compaction-background").checked = Boolean(value("compaction.background_enabled", false));
+  byId("compaction-budget-seconds").value = value("compaction.background_limits.max_seconds", 600);
+  byId("compaction-budget-calls").value = value("compaction.background_limits.max_calls", 32);
+  byId("compaction-budget-input").value = value("compaction.background_limits.max_input_tokens", 1000000);
+  byId("compaction-budget-output").value = value("compaction.background_limits.max_output_tokens", 64000);
+  byId("history-query-rewrite").checked = Boolean(value("compaction.history_query_rewrite_enabled", false));
+  byId("history-index-enabled").checked = Boolean(value("compaction.history_indexing.enabled", true));
+  byId("history-index-records").value = value("compaction.history_indexing.batch_records", 8);
+  byId("history-index-seconds").value = value("compaction.history_indexing.max_batch_seconds", 0.25);
+  byId("history-index-duty").value = value("compaction.history_indexing.duty_cycle", 0.2) * 100;
+  byId("context-policy-mode").value = value("context_policy.mode", "legacy");
+  byId("context-policy-endpoint").value = value("context_policy.endpoint_id", "codex-pro-gpt-6-astra");
+  byId("context-policy-limit").value = value("context_policy.extended_context_tokens", 500000);
   byId("affinity-ttl-minutes").value = Math.round(
     value("affinity.ttl_seconds", 86400) / 60,
   );
@@ -4255,7 +4390,45 @@ function validateReviewBaseUrl(rawUrl, backend) {
 }
 
 function validateSettingsDraft(draft) {
+  const backgroundLimits = draft.compaction?.background_limits || {};
   const errors = [];
+  const summaryOutput = draft.compaction?.summary_output_tokens ?? 8192;
+  if (!Number.isInteger(summaryOutput) || summaryOutput < 1 || summaryOutput > 393216) {
+    errors.push("摘要单次生成额度须为 1–393216 的整数，且受模型及整任务预算限制");
+  }
+  if (!["provider_default", "disabled", "low"].includes(draft.compaction?.summary_reasoning ?? "provider_default")) {
+    errors.push("摘要思考模式须为跟随模型默认、关闭思考或低强度思考");
+  }
+  const indexing = draft.compaction?.history_indexing;
+  if (indexing) {
+    if (typeof indexing.enabled !== "boolean"
+        || !Number.isInteger(indexing.batch_records) || indexing.batch_records < 1 || indexing.batch_records > 32
+        || !Number.isFinite(indexing.max_batch_seconds) || indexing.max_batch_seconds < 0.01 || indexing.max_batch_seconds > 2
+        || !Number.isFinite(indexing.duty_cycle) || indexing.duty_cycle < 0.01 || indexing.duty_cycle > 0.5) {
+      errors.push("历史整理参数无效：每批 1–32 条、0.01–2 秒、工作时间占比 1%–50%");
+    }
+  }
+  for (const [field, minimum, maximum] of [
+    ["max_seconds", 1, 600], ["max_calls", 1, 32],
+    ["max_input_tokens", 1, 1000000], ["max_output_tokens", 8192, 64000],
+  ]) {
+    const value = backgroundLimits[field] ?? maximum;
+    if (!Number.isInteger(value) || value < minimum || value > maximum) {
+      errors.push(`后台压缩预算 ${field} 须为 ${minimum} 到 ${maximum} 的整数`);
+    }
+  }
+  const contextPolicy = draft.context_policy || {};
+  if (contextPolicy.mode && !["legacy", "compact", "extended"].includes(contextPolicy.mode)) {
+    errors.push("长上下文策略无效");
+  }
+  if (contextPolicy.mode && contextPolicy.mode !== "legacy" && !contextPolicy.endpoint_id?.trim()) {
+    errors.push("请填写长上下文策略的目标 Codex 端点 ID");
+  }
+  if (contextPolicy.extended_context_tokens !== undefined
+      && (!Number.isInteger(contextPolicy.extended_context_tokens)
+          || contextPolicy.extended_context_tokens < 1 || contextPolicy.extended_context_tokens > 1050000)) {
+    errors.push("扩展上下文预算须为 1 到 1050000 的整数");
+  }
   const lmcache = draft.lmcache || {};
   const l1Size = Number(lmcache.l1_size_gb);
   if (
@@ -4419,6 +4592,28 @@ function collectSettings() {
       enabled: byId("compaction-enabled").checked,
       mode: byId("compaction-mode").value,
       model_id: byId("compaction-model").value.trim(),
+      summary_reasoning: byId("compaction-summary-reasoning").value,
+      summary_output_tokens: Number(byId("compaction-summary-output").value),
+      background_enabled: byId("compaction-background").checked,
+      background_limits: {
+        max_seconds: Number(byId("compaction-budget-seconds").value),
+        max_calls: Number(byId("compaction-budget-calls").value),
+        max_input_tokens: Number(byId("compaction-budget-input").value),
+        max_output_tokens: Number(byId("compaction-budget-output").value),
+      },
+      history_query_rewrite_enabled: byId("history-query-rewrite").checked,
+      history_indexing: {
+        enabled: byId("history-index-enabled").checked,
+        batch_records: Number(byId("history-index-records").value),
+        max_batch_seconds: Number(byId("history-index-seconds").value),
+        duty_cycle: Number(byId("history-index-duty").value) / 100,
+      },
+    },
+    context_policy: {
+      ...state.settings.context_policy,
+      mode: byId("context-policy-mode").value,
+      endpoint_id: byId("context-policy-endpoint").value.trim(),
+      extended_context_tokens: Number(byId("context-policy-limit").value),
     },
     evaluator: {
       ...state.settings.evaluator,
@@ -5033,6 +5228,17 @@ byId("trace-fullscreen").addEventListener("click", async () => {
 byId("client-status-filter").addEventListener("change", renderClients);
 byId("create-client").addEventListener("click", () => openClientDialog());
 byId("client-form").addEventListener("submit", saveClient);
+for (const id of ["client-history-recall", "client-history-cloud", "client-local-only"]) {
+  byId(id).addEventListener("change", syncHistoryGrants);
+}
+byId("client-history-status-refresh").addEventListener("click", refreshHistoryStatus);
+byId("client-history-exclude").addEventListener("click", () => setHistoryExclusion(true));
+byId("client-history-restore").addEventListener("click", () => setHistoryExclusion(false));
+byId("client-history-source-view").addEventListener("click", viewHistorySource);
+byId("client-compaction-refresh").addEventListener("click", refreshCompactionJobs);
+byId("client-compaction-create").addEventListener("click", createCompactionJob);
+byId("client-compaction-cancel").addEventListener("click", cancelCompactionJob);
+byId("client-compaction-reconcile").addEventListener("click", reconcileCompactionJob);
 byId("client-disclosure-mode").addEventListener("change", (event) => {
   renderClientModels(
     event.target.value === "public"

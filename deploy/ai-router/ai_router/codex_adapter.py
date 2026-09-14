@@ -26,7 +26,19 @@ from .codex_auth import (
 DEFAULT_MODEL_IDS = ("gpt-5.6-sol", "gpt-6-astra")
 SAFE_CONTEXT_TOKENS = 272000
 CATALOG_TTL_SECONDS = 300
+CATALOG_REFRESH_TIMEOUT_SECONDS = 30.0
+CATALOG_RETRY_SECONDS = 30.0
+HEALTH_CATALOG_WAIT_SECONDS = 1.0
 ACCOUNT_HEADER = "x-1panel-codex-account"
+
+
+def _catalog_context_limits(model: dict[str, Any]) -> dict[str, int]:
+    default = model.get("context_window")
+    maximum = model.get("max_context_window", default)
+    return {
+        "default_context_tokens": default if type(default) is int and default > 0 else SAFE_CONTEXT_TOKENS,
+        "max_context_tokens": maximum if type(maximum) is int and maximum > 0 else SAFE_CONTEXT_TOKENS,
+    }
 
 
 class CodexGateway:
@@ -48,6 +60,8 @@ class CodexGateway:
         )
         self._owned_client = client is None
         self._catalog_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+        self._catalog_tasks: dict[str, asyncio.Task] = {}
+        self._catalog_failures: dict[str, tuple[float, str]] = {}
         self._locks: dict[str, asyncio.Semaphore] = {}
         configured_models = (
             model_ids
@@ -76,19 +90,37 @@ class CodexGateway:
         )
 
     async def close(self) -> None:
+        tasks = list(self._catalog_tasks.values())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         if self._owned_client:
             await self.client.aclose()
 
     async def status(self) -> dict[str, Any]:
+        aliases = self.accounts.aliases()
+        # Bound the whole health check, independently of inference timeouts.
+        # A cancelled health caller must not cancel the shared catalog refresh.
+        available = [alias for alias in aliases if self.accounts.available(alias)]
+        results = dict(zip(available, await asyncio.gather(
+            *(asyncio.wait_for(self.catalog(alias), HEALTH_CATALOG_WAIT_SECONDS)
+              for alias in available),
+            return_exceptions=True,
+        )))
         workers = []
-        for alias in self.accounts.aliases():
+        for alias in aliases:
             ready = False
             models: list[dict[str, Any]] = []
             entitled_models: list[str] = []
             error_code = None
             if self.accounts.available(alias):
                 try:
-                    models = await self.catalog(alias)
+                    result = results.get(alias)
+                    if isinstance(result, Exception):
+                        raise result
+                    if not isinstance(result, list):
+                        raise CodexAuthError("catalog unavailable", code="catalog_unavailable")
+                    models = result
                     entitled_models = sorted(
                         {
                             str(item.get("slug"))
@@ -101,6 +133,8 @@ class CodexGateway:
                         error_code = "model_not_entitled"
                 except CodexAuthError as exc:
                     error_code = exc.code
+                except asyncio.TimeoutError:
+                    error_code = "catalog_refresh_pending"
                 except Exception:
                     error_code = "catalog_unavailable"
             else:
@@ -124,6 +158,10 @@ class CodexGateway:
                     "models": [
                         model_id for model_id in entitled_models
                     ],
+                    "model_context_limits": {
+                        str(item["slug"]): _catalog_context_limits(item)
+                        for item in models if item.get("slug") in entitled_models
+                    },
                     "error_code": error_code,
                     "cooldown_until": float(
                         self.accounts.account_status(alias).get(
@@ -156,6 +194,36 @@ class CodexGateway:
         cached = self._cached_catalog(alias)
         if cached is not None:
             return cached
+        failure = self._catalog_failures.get(alias)
+        if failure is not None and time.monotonic() < failure[0]:
+            raise CodexAuthError("Codex catalog refresh failed", code=failure[1])
+        task = self._catalog_tasks.get(alias)
+        if task is None or task.done():
+            task = asyncio.create_task(self._refresh_catalog(alias))
+            self._catalog_tasks[alias] = task
+        await asyncio.shield(task)
+        cached = self._cached_catalog(alias)
+        if cached is not None:
+            return cached
+        failure = self._catalog_failures.get(alias)
+        raise CodexAuthError(
+            "Codex catalog refresh failed",
+            code=failure[1] if failure else "catalog_unavailable",
+        )
+
+    async def _refresh_catalog(self, alias: str) -> None:
+        # Consume failures here even when every health caller has disconnected.
+        try:
+            await asyncio.wait_for(
+                self._fetch_catalog(alias), CATALOG_REFRESH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            code = exc.code if isinstance(exc, CodexAuthError) else "catalog_unavailable"
+            self._catalog_failures[alias] = (time.monotonic() + CATALOG_RETRY_SECONDS, code)
+        else:
+            self._catalog_failures.pop(alias, None)
+
+    async def _fetch_catalog(self, alias: str) -> list[dict[str, Any]]:
         credentials = await asyncio.to_thread(
             self.accounts.credentials,
             alias,

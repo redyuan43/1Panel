@@ -17,6 +17,93 @@ from ai_router.health import HealthMonitor
 from ai_router.store import InMemoryStateStore
 
 
+def test_catalog_health_is_bounded_shared_and_recovers(tmp_path, monkeypatch):
+    monkeypatch.setattr("ai_router.codex_adapter.HEALTH_CATALOG_WAIT_SECONDS", 0.03)
+    _write_auth(tmp_path, access_token=_jwt(expires_at=int(time.time()) + 3600))
+
+    async def scenario():
+        release = asyncio.Event()
+        calls = 0
+
+        async def upstream(request):
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return httpx.Response(200, json={"models": [{"slug": "gpt-6-astra"}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            gateway = CodexGateway(accounts=CodexAccountStore(tmp_path / "accounts"), client=client)
+            try:
+                statuses = await asyncio.wait_for(asyncio.gather(
+                    *(gateway.status() for _ in range(8)),
+                ), 1)
+                assert calls == 1
+                assert all(not status["ok"] for status in statuses)
+                assert all(status["workers"][0]["error_code"] == "catalog_refresh_pending"
+                           for status in statuses)
+                release.set()
+                await gateway.catalog("primary")
+                assert (await gateway.status())["ok"] is True
+                assert calls == 1
+            finally:
+                await gateway.close()
+
+    asyncio.run(scenario())
+
+
+def test_catalog_refresh_timeout_backs_off_without_stale_entitlement(tmp_path, monkeypatch):
+    monkeypatch.setattr("ai_router.codex_adapter.CATALOG_REFRESH_TIMEOUT_SECONDS", 0.03)
+    _write_auth(tmp_path, access_token=_jwt(expires_at=int(time.time()) + 3600))
+
+    async def scenario():
+        calls = 0
+
+        async def upstream(request):
+            nonlocal calls
+            calls += 1
+            await asyncio.Event().wait()
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            gateway = CodexGateway(accounts=CodexAccountStore(tmp_path / "accounts"), client=client)
+            gateway._catalog_cache["primary"] = (time.monotonic() - 301, [{"slug": "gpt-6-astra"}])
+            try:
+                status = await asyncio.wait_for(gateway.status(), 1)
+                assert status["ok"] is False
+                assert status["workers"][0]["error_code"] == "catalog_unavailable"
+                assert (await gateway.status())["models"] == []
+                assert calls == 1
+                gateway._catalog_failures["primary"] = (0, "catalog_unavailable")
+                await gateway.status()
+                assert calls == 2
+            finally:
+                await gateway.close()
+
+    asyncio.run(scenario())
+
+
+def test_catalog_refresh_cancelled_on_shutdown(tmp_path, monkeypatch):
+    monkeypatch.setattr("ai_router.codex_adapter.HEALTH_CATALOG_WAIT_SECONDS", 0.03)
+    _write_auth(tmp_path, access_token=_jwt(expires_at=int(time.time()) + 3600))
+
+    async def scenario():
+        cancelled = asyncio.Event()
+
+        async def upstream(request):
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            gateway = CodexGateway(accounts=CodexAccountStore(tmp_path / "accounts"), client=client)
+            await gateway.status()
+            await gateway.close()
+            assert cancelled.is_set()
+            assert all(task.done() for task in gateway._catalog_tasks.values())
+
+    asyncio.run(scenario())
+
+
 def _jwt(*, expires_at: int, account_id: str = "acct-test") -> str:
     def encode(value: dict) -> str:
         raw = json.dumps(value, separators=(",", ":")).encode()

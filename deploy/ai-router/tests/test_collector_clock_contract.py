@@ -92,7 +92,7 @@ class OutputClockContractTests(unittest.TestCase):
             clock.feed(b'data: {"choices":[{"delta":{"reasoning_content":"fixture"}}]}\n\n')
         with mock.patch.object(audit.time, "monotonic", return_value=103):
             clock.feed(b'data: {"choices":[{"delta":{"content":"fixture"}}]}\n\n')
-        self.assertEqual(clock.values, {"ttft_ms": 1000, "first_text_ms": 3000})
+        self.assertEqual(clock.values, {"ttft_ms": 1000, "first_text_ms": 3000, "last_output_ms": 3000})
 
     def test_chunked_utf8_crlf_event_is_observed_once(self):
         clock = audit.OutputClock("chat", 100)
@@ -100,19 +100,19 @@ class OutputClockContractTests(unittest.TestCase):
         with mock.patch.object(audit.time, "monotonic", return_value=102):
             for byte in frame:
                 clock.feed(bytes([byte]))
-        self.assertEqual(clock.values, {"ttft_ms": 2000, "first_text_ms": 2000})
+        self.assertEqual(clock.values, {"ttft_ms": 2000, "first_text_ms": 2000, "last_output_ms": 2000})
 
     def test_responses_tool_output_counts_as_first_output_not_text(self):
         clock = audit.OutputClock("responses", 100)
         with mock.patch.object(audit.time, "monotonic", return_value=101):
             clock.feed(b'data: {"type":"response.function_call_arguments.delta","delta":"{}"}\n\n')
-        self.assertEqual(clock.values, {"ttft_ms": 1000})
+        self.assertEqual(clock.values, {"ttft_ms": 1000, "last_output_ms": 1000})
 
     def test_unusual_sse_values_do_not_break_later_output(self):
         clock = audit.OutputClock("chat", 100)
         with mock.patch.object(audit.time, "monotonic", return_value=101):
             clock.feed(b'data: {"choices":null}\n\ndata: null\n\ndata: [DONE]\n\ndata: {"choices":[{"delta":{"content":"ok"}}]}\n\n')
-        self.assertEqual(clock.values, {"ttft_ms": 1000, "first_text_ms": 1000})
+        self.assertEqual(clock.values, {"ttft_ms": 1000, "first_text_ms": 1000, "last_output_ms": 1000})
 
 
 if __name__ == "__main__":

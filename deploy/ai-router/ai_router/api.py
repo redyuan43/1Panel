@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from .compaction import extract_messages, replace_messages
+from .context_policy import request_strategy, strategy_for
 from .errors import (
     AllLocalCapacityBusyError,
     AuthenticationError,
@@ -35,6 +36,7 @@ from .errors import (
     NoEligibleModelError,
     PublicIdentityUnavailableError,
     QueueTimeoutError,
+    RouteDirectiveIncompatibleError,
     RouterError,
 )
 from .history import (
@@ -892,6 +894,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 received_body=received_body,
                 instance_id=current.instance_id,
                 boot_id=current.boot_id,
+                history_source_local_only=resolve_objectives(
+                    current.settings.section("routing"),
+                    authenticated.policy.routing_mode,
+                    authenticated.policy.local_only,
+                )["local_only"],
             )
     except BaseException as exc:
         await _finish_trace_exception(current, trace, exc)
@@ -1093,11 +1100,17 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             ):
                 effective_body.pop(key, None)
         has_tools = required_capabilities.tools
+        context_strategy = request_strategy(current.settings, current.registry, requested_model, evaluation)
         allow_compaction = _compaction_allowed(
             current,
             authenticated.policy.allow_compaction,
             request.headers.get("x-1panel-allow-compaction", ""),
+            context_strategy=context_strategy,
         )
+        trace.payload.setdefault("request", {})["context_policy"] = {
+            "mode": context_strategy,
+            "configured": current.settings.section("context_policy"),
+        }
         excluded: set[str] = {
             endpoint.id
             for endpoint in current.registry.responders()
@@ -1108,7 +1121,31 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             )
         }
         pre_route_capsule = None
+        background_capsule = None
+        summary_scope = None
         if allow_compaction:
+            from .background_context import apply_background, _candidate_branches
+            from .summary_provenance import request_scope
+            branches = await _candidate_branches(current, lineage.branch_id, lineage)
+            summary_scope = await request_scope(current, owner=authenticated.policy.id,
+                branch=lineage.branch_id, api_kind=api_kind, body=received_body, ancestors=branches[1:])
+            if (
+                api_kind == "chat"
+                and not client_compacted
+                and lineage.relation == "continuation"
+                and current.settings.section("compaction").get("background_enabled", False)
+            ):
+                effective_body = summary_scope.restore_chat_parent(effective_body, stored_conversation)
+                prompt_tokens = current.token_counter.count_request(
+                    identity.inject(effective_body, api_kind), api_kind,
+                )
+            effective_body, background_capsule = await apply_background(
+                current, effective_body, owner=authenticated.policy.id,
+                branch=lineage.branch_id, api_kind=api_kind, identity=identity, lineage=lineage,
+                summary_scope=summary_scope)
+            if background_capsule is not None:
+                prompt_tokens = background_capsule.after_tokens
+                trace.payload["background_compaction_applied_job_id"] = background_capsule.background_job_id
             (
                 effective_body,
                 prompt_tokens,
@@ -1129,7 +1166,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 conversation=routing_conversation,
                 excluded_endpoints=excluded,
                 identity=identity,
+                summary_scope=summary_scope,
             )
+            pre_route_capsule = pre_route_capsule or background_capsule
         trace.set_request_context(
             prompt_tokens=requested_prompt_tokens,
             output_reserve_tokens=reserve_tokens,
@@ -1310,6 +1349,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     route_attempt=attempt,
                     identity=identity,
                     allow_compaction=allow_compaction,
+                    summary_scope=summary_scope,
                     history_precompacted=(
                         pre_route_capsule is not None
                     ),
@@ -1342,6 +1382,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 decision.identity_revision = (
                     identity.revision if identity.enabled else None
                 )
+                if allow_compaction and capsule is None and pre_route_capsule is None:
+                    from .background_context import submit_background
+                    background_job_id = await submit_background(
+                        current, effective_body, owner=authenticated.policy.id,
+                        key_id=authenticated.key_id, branch=lineage.branch_id,
+                        api_kind=api_kind, decision=decision, summary_scope=summary_scope)
+                    if background_job_id:
+                        trace.payload["background_compaction_job_id"] = background_job_id
                 decision.legacy_model_alias_used = bool(
                     identity.enabled
                     and client_requested_model
@@ -1489,6 +1537,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current,
                     decision,
                 )
+                if current.training is not None:
+                    # Archive the final conversation context, not the earlier
+                    # pre-compaction body. Manual background jobs must use the
+                    # same history that is persisted after this response.
+                    # Recall and identity injection happen in _send_upstream
+                    # and must not become part of this reusable source.
+                    await current.training.set_effective_context(
+                        training_token,
+                        effective_body=routed_body,
+                    )
                 upstream = await _send_upstream(
                     current,
                     request,
@@ -1656,6 +1714,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 )
                 await current.budget.commit(budget_reservation)
                 budget_reservation = None
+                if summary_scope is not None:
+                    summary_messages = extract_messages(routed_body, api_kind)
+                    await summary_scope.remember(summary_messages, summary_scope.indices(summary_messages))
                 state = await _save_conversation(
                     current,
                     lineage=lineage,
@@ -2274,6 +2335,7 @@ async def _acquire_route_capacity(
     client_id: str = "",
     conversation_control: dict[str, Any] | None = None,
     routing_options: dict[str, Any] | None = None,
+    summary_scope=None,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -2478,7 +2540,7 @@ async def _acquire_route_capacity(
                     await current.scheduler.try_acquire_deployment_candidates(
                         lease,
                         deployment_ids,
-                        capacity=decision.endpoint.max_concurrency,
+                        capacity=_deployment_capacity(decision.endpoint),
                     )
                 )
                 if selected_deployment is None:
@@ -2500,7 +2562,7 @@ async def _acquire_route_capacity(
                                 "prefix-replica",
                                 "admin-pin",
                             },
-                            capacity=decision.endpoint.max_concurrency,
+                            capacity=_deployment_capacity(decision.endpoint),
                         )
                     )
                 except QueueTimeoutError as exc:
@@ -2651,6 +2713,7 @@ async def _acquire_route_capacity(
                 conversation=history_conversation,
                 allow_compaction=allow_compaction,
                 history_precompacted=history_precompacted,
+                summary_scope=summary_scope,
             )
         except HistoryMigrationRequiredError as exc:
             if trace:
@@ -2725,6 +2788,23 @@ async def _acquire_route_capacity(
                 await pool.release(request_id, trace)
             continue
         capsule = capsule or carried_capsule
+        if getattr(current, "history_memory", None) is not None:
+            from .memory_recall import prepare_recall
+            projection, recall_reason = await prepare_recall(
+                current, routed_body, api_kind=api_kind, decision=decision,
+                identity=identity, client_id=client_id,
+                key_id=str(trace.payload.get("key_id", "")) if trace else "",
+            )
+            decision.recall_projection = projection
+            if projection is not None:
+                decision.prompt_tokens = projection.prompt_tokens
+                decision.context_required = projection.prompt_tokens + decision.output_reserve_tokens
+            if trace:
+                trace.payload["history_recall"] = {
+                    "state": recall_reason,
+                    "sources": [hit.source_id for hit in projection.sources] if projection else [],
+                    "added_tokens": projection.added_tokens if projection else 0,
+                }
         if trace:
             trace.record(
                 route_attempt,
@@ -3060,7 +3140,13 @@ async def _send_upstream(
     decision: RouteDecision,
     identity: IdentityProfile,
 ) -> httpx.Response:
-    payload = identity.inject(body, api_kind)
+    inference_body = body
+    if getattr(decision, "recall_projection", None) is not None:
+        from .memory_recall import recall_for_send
+        inference_body, recall_reason = await recall_for_send(current, body, decision=decision)
+        if decision.trace:
+            decision.trace.payload.setdefault("history_recall", {})["state"] = recall_reason
+    payload = identity.inject(inference_body, api_kind)
     responses_adapter = (
         api_kind == "responses"
         and decision.native_or_adapter == "adapter"
@@ -3356,6 +3442,7 @@ async def _maybe_compact_for_route(
     conversation: ConversationState | None,
     excluded_endpoints: set[str],
     identity: IdentityProfile,
+    summary_scope=None,
 ) -> tuple[dict[str, Any], int, Any | None]:
     try:
         await current.policy.choose(
@@ -3372,7 +3459,7 @@ async def _maybe_compact_for_route(
             routing_key=f"{request_id}:preflight",
         )
         return body, prompt_tokens, None
-    except (NoCompatibleModelError, NoEligibleModelError) as original:
+    except (NoCompatibleModelError, NoEligibleModelError, RouteDirectiveIncompatibleError) as original:
         try:
             target = await current.policy.choose(
                 requested_model=requested_model,
@@ -3387,7 +3474,7 @@ async def _maybe_compact_for_route(
                 excluded_endpoint_ids=excluded_endpoints,
                 routing_key=f"{request_id}:compaction-target",
             )
-        except (NoCompatibleModelError, NoEligibleModelError):
+        except (NoCompatibleModelError, NoEligibleModelError, RouteDirectiveIncompatibleError):
             raise original
 
     target_context = (
@@ -3402,6 +3489,7 @@ async def _maybe_compact_for_route(
             request_id=request_id,
             target_context=target_context,
             identity=identity,
+            **({"summary_scope": summary_scope} if summary_scope is not None else {}),
         )
     )
     if compacted_prompt_tokens + output_reserve_tokens > target_context:
@@ -3422,6 +3510,7 @@ async def _prepare_routed_body(
     conversation: ConversationState | None = None,
     allow_compaction: bool = False,
     history_precompacted: bool = False,
+    summary_scope=None,
 ) -> tuple[dict[str, Any], Any | None]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -3446,9 +3535,15 @@ async def _prepare_routed_body(
         and target_provider
         and source_provider != target_provider
     )
+    # DeepSeek historically required reasoning_content on tool-call turns,
+    # but live probes (2026-09-11) show deepseek-v4-flash and deepseek-v4-pro
+    # both accept tool transactions with missing or empty reasoning_content.
+    # The preflight therefore only blocks when an endpoint explicitly declares
+    # the requirement via metadata (history_reasoning_required: true).
     deepseek_incompatible = (
         target_provider == "deepseek"
         and deepseek_history_requires_migration(body, api_kind)
+        and bool(decision.endpoint.metadata.get("history_reasoning_required"))
     )
     routed = (
         normalize_history_for_provider(body, api_kind)
@@ -3496,8 +3591,9 @@ async def _prepare_routed_body(
     if force_compaction or needs_context_compaction:
         compaction = current.settings.section("compaction")
         if (
-            not bool(compaction.get("enabled", True))
-            or compaction.get("mode", "explicit_only") == "disabled"
+            strategy_for(current.settings, decision.endpoint) != "compact"
+            and (not bool(compaction.get("enabled", True))
+                 or compaction.get("mode", "explicit_only") == "disabled")
         ):
             raise CompactionUnavailableError(
                 "explicitly requested compaction is disabled"
@@ -3510,6 +3606,7 @@ async def _prepare_routed_body(
                 request_id=request_id,
                 target_context=target_context,
                 identity=identity,
+                **({"summary_scope": summary_scope} if summary_scope is not None else {}),
             )
         )
         decision.history_mode = "capsule"
@@ -3577,26 +3674,47 @@ async def _compact_body_for_target(
     request_id: str,
     target_context: int,
     identity: IdentityProfile,
+    summary_scope=None,
 ) -> tuple[Any, dict[str, Any], int]:
+    from .summary_provenance import recover_legacy
+    from .summary_profile import summary_profile
+    await recover_legacy(current, summary_scope)
     compaction_lease = await current.scheduler.begin_request(None)
     try:
+        summary_endpoint = current.registry.by_id(current.compactor.model_id)
+        # Bind this foreground operation to one profile; settings reloads must
+        # not mutate the shared compactor midway through a multi-pass summary.
+        compactor = copy.copy(current.compactor)
+        try:
+            compactor.summary_profile = summary_profile(current.settings.section("compaction"), summary_endpoint)
+            compactor.summary_output_tokens = compactor.summary_profile.output_tokens
+        except ValueError as exc:
+            raise CompactionUnavailableError(str(exc)) from exc
+        summary_output = compactor.summary_output_tokens
+        summary_budget = summary_endpoint.safe_context_tokens - summary_output if summary_endpoint else 0
+        if summary_budget < 1024:
+            raise CompactionUnavailableError("the configured compaction model has insufficient context")
         compaction_target = await _acquire_internal_model(
             current,
             lease=compaction_lease,
             request_id=f"{request_id}:compactor",
             model_id=current.compactor.model_id,
-            prompt_tokens=current.token_counter.count_request(
+            prompt_tokens=summary_budget,
+            output_reserve_tokens=summary_output,
+        )
+        capsule = await asyncio.wait_for(
+            compactor.compact(
                 body,
-                api_kind,
+                api_kind=api_kind,
+                target_context_tokens=target_context,
+                target=compaction_target,
+                summary_input_tokens=summary_budget,
+                **({"summary_scope": summary_scope} if summary_scope is not None else {}),
             ),
-            output_reserve_tokens=2048,
+            timeout=180.0,
         )
-        capsule = await current.compactor.compact(
-            body,
-            api_kind=api_kind,
-            target_context_tokens=target_context,
-            target=compaction_target,
-        )
+    except asyncio.TimeoutError as exc:
+        raise CompactionUnavailableError("conversation compaction exceeded its 180 second time budget") from exc
     except QueueTimeoutError as exc:
         raise CompactionUnavailableError(
             "the compaction model queue did not become available in time"
@@ -3622,7 +3740,13 @@ def _compaction_allowed(
     current: RouterRuntime,
     client_allows: bool,
     header_value: str,
+    *,
+    context_strategy: str = "legacy",
 ) -> bool:
+    if context_strategy == "compact":
+        return True
+    if context_strategy == "extended":
+        return False
     compaction = current.settings.section("compaction")
     if (
         not bool(compaction.get("enabled", True))
@@ -3636,6 +3760,12 @@ def _compaction_allowed(
 
 def _truthy_header(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes"}
+
+
+def _deployment_capacity(endpoint):
+    # ai_pool candidates identify single-slot llama workers, not the aggregate
+    # pool. Other backends advertise capacity on the selected deployment.
+    return 1 if endpoint.backend_type == "ai_pool" else endpoint.max_concurrency
 
 
 async def _acquire_internal_model(
@@ -3697,14 +3827,14 @@ async def _acquire_internal_model(
                     )
                 ),
                 affinity_priority=False,
-                capacity=endpoint.max_concurrency,
+                capacity=_deployment_capacity(endpoint),
             )
         else:
             selected = (
                 await current.scheduler.try_acquire_deployment_candidates(
                     lease,
                     candidates,
-                    capacity=endpoint.max_concurrency,
+                    capacity=_deployment_capacity(endpoint),
                 )
             )
             if not selected:
