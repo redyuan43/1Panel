@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 import pytest
@@ -21,6 +22,7 @@ def test_candidate_preserves_live_features_and_only_applies_our_delta(tmp_path):
     (live / "app/main.py").chmod(0o444)
     (live / "app/firstframe.py").write_text("preserve = True\n")
     (live / "private.env").write_text("SECRET=do-not-copy")
+    (live / "multinode-manifest.json").write_text('{"stale": true}\n')
     output = tmp_path / "candidate"
     result = prepare(work, base, live, output)
     assert "our_change" in (output / "app/main.py").read_text()
@@ -28,7 +30,11 @@ def test_candidate_preserves_live_features_and_only_applies_our_delta(tmp_path):
     assert (output / "app/firstframe.py").exists()
     assert not (output / "private.env").exists()
     assert len(result["changes"]) == 1
-    assert not json.loads((output / "multinode-manifest.json").read_text())["deployed"]
+    manifest = json.loads((output / "multinode-manifest.json").read_text())
+    assert not manifest["deployed"]
+    assert "multinode-manifest.json" not in manifest["files"]
+    assert all(hashlib.sha256((output / name).read_bytes()).hexdigest() == digest
+               for name, digest in manifest["files"].items())
 
 
 def test_conflict_stops_candidate_instead_of_overwriting_live(tmp_path):

@@ -13,6 +13,7 @@ from pathlib import Path
 
 EXCLUDED = {"__pycache__", ".pytest_cache", ".git", ".venv", "venv", "data", "node_modules"}
 SOURCE_DIRS = {"app", "scripts", "frontend", "config", "multimodal", "workflows", "deploy", "systemd"}
+GENERATED_MANIFEST = "multinode-manifest.json"
 
 
 def source_file(path, root):
@@ -20,7 +21,7 @@ def source_file(path, root):
     return (path.is_file() and not EXCLUDED.intersection(relative.parts) and not path.is_symlink()
             and (len(relative.parts) == 1 or relative.parts[0] in SOURCE_DIRS)
             and path.suffix not in {".pyc", ".sqlite3", ".db", ".key"}
-            and not path.name.endswith(".env") and path.name != ".env")
+            and not path.name.endswith(".env") and path.name not in {".env", GENERATED_MANIFEST})
 
 
 def checksum(path):
@@ -123,7 +124,7 @@ def prepare(workspace, baseline, live, output):
     report = {"schema_version": 1, "workspace": str(workspace), "baseline": str(baseline),
               "live": str(live), "changes": changes, "adaptations": adaptations, "files": manifest,
               "deployed": False, "gpu_validated": False}
-    (output / "multinode-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
+    (output / GENERATED_MANIFEST).write_text(json.dumps(report, indent=2) + "\n")
     return report
 
 
