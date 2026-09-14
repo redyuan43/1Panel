@@ -13,6 +13,9 @@ x-router-environment: &router-environment
 x-host-service: &host-service
   build:
     context: .
+    args:
+      SOURCE_REVISION: ${AI_ROUTER_SOURCE_REVISION:-unknown}
+      SOURCE_TREE_SHA256: ${AI_ROUTER_SOURCE_TREE_SHA256:-unknown}
   env_file:
     - path: /opt/1panel/ai-router/router.env
       required: true

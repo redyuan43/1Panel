@@ -1,13 +1,16 @@
 [Unit]
-Description=H3 original Studio with Ivan Fleet backend
+Description=H3 Studio from verified immutable release
 After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/github/1Panel/deploy/h3-video-studio
+WorkingDirectory=%h/.local/state/1panel-runtime/current/h3-video-studio
 EnvironmentFile=%h/.config/h3-studio-ivan/production.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=H3_STUDIO_ROOT=/home/ai/.local/state/1panel-runtime/current/h3-video-studio
 Environment=H3_STUDIO_COMPARISON_RESULTS=%h/.local/state/h3-studio-ivan-production/comparison/results
 Environment=H3_STUDIO_COMPARISON_PLANNED=%h/.local/state/h3-studio-ivan-production/comparison/planned.json
+ExecStartPre=/usr/bin/python3 %h/.local/state/1panel-runtime/current/tools/release.py verify --release %h/.local/state/1panel-runtime/current --external-component h3-venv
 ExecStart=%h/.local/state/h3-studio-ivan-runtime/venv/bin/python scripts/serve.py
 Restart=on-failure
 RestartSec=5

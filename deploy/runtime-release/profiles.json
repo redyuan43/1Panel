@@ -1,0 +1,182 @@
+{
+  "schema_version": 1,
+  "bundles": {
+    "production": {
+      "components": [
+        {
+          "name": "release-tool",
+          "kind": "git",
+          "source": "deploy/runtime-release/release.py",
+          "target": "tools",
+          "include": ["release.py"],
+          "required_files": ["release.py"]
+        },
+        {
+          "name": "h3-studio",
+          "kind": "snapshot",
+          "source_key": "h3-studio",
+          "target": "h3-video-studio",
+          "include": [
+            "README.md",
+            "requirements.txt",
+            "app/*.py",
+            "app/*.json",
+            "frontend/*.html",
+            "frontend/*.css",
+            "frontend/*.js",
+            "frontend/lucide.min.js",
+            "scripts/preview.py",
+            "scripts/serve.py",
+            "workflows/*.json",
+            "workflows/**/*.json"
+          ],
+          "required_files": [
+            "requirements.txt",
+            "app/main.py",
+            "app/connector_api.py",
+            "app/multifleet.py",
+            "frontend/index.html",
+            "frontend/app.js",
+            "scripts/preview.py",
+            "scripts/serve.py",
+            "workflows/h3_quality_14step_15s_official_context_ir_api.json"
+          ]
+        },
+        {
+          "name": "h3-preview",
+          "kind": "git",
+          "source": "deploy/h3-video-studio",
+          "target": "h3-video-preview",
+          "include": [
+            "README.md",
+            "requirements.txt",
+            "app/*.py",
+            "app/*.json",
+            "frontend/*.html",
+            "frontend/*.css",
+            "frontend/*.js",
+            "frontend/lucide.min.js",
+            "scripts/preview.py",
+            "workflows/*.json",
+            "workflows/**/*.json"
+          ],
+          "required_files": [
+            "requirements.txt",
+            "app/main.py",
+            "app/clients.py",
+            "frontend/index.html",
+            "frontend/app.js",
+            "scripts/preview.py",
+            "workflows/h3_quality_14step_15s_official_context_ir_api.json"
+          ]
+        },
+        {
+          "name": "h3-working-set-status",
+          "kind": "git",
+          "source": "deploy/h3-fleet/scripts/sync_comparison_status.py",
+          "target": "h3-fleet/scripts",
+          "include": ["sync_comparison_status.py"],
+          "required_files": ["sync_comparison_status.py"]
+        },
+        {
+          "name": "qwen38-env",
+          "kind": "git",
+          "source": "deploy/qwen38-et-v100/env/qwen38-et-w4a16-mtp2.env",
+          "target": "qwen38/env",
+          "include": ["qwen38-et-w4a16-mtp2.env"],
+          "required_files": ["qwen38-et-w4a16-mtp2.env"]
+        },
+        {
+          "name": "qwen38-v100",
+          "kind": "snapshot",
+          "source_key": "qwen38",
+          "target": "qwen38",
+          "include": [
+            "config/lmcache.yaml",
+            "runtime/check-qwen38-v100-tp2-lmcache.py",
+            "runtime/lmcache_runtime.py",
+            "runtime/patch-vllm-cache-usage.py",
+            "runtime/resolve-qwen38-v100-tp2-lmcache.py",
+            "runtime/run-qwen38-v100-tp2-container.sh",
+            "runtime/run-qwen38-v100-tp2-lmcache-container.sh",
+            "runtime/run-qwen38-v100-tp2-vllm.sh"
+          ],
+          "required_files": [
+            "config/lmcache.yaml",
+            "runtime/check-qwen38-v100-tp2-lmcache.py",
+            "runtime/lmcache_runtime.py",
+            "runtime/patch-vllm-cache-usage.py",
+            "runtime/resolve-qwen38-v100-tp2-lmcache.py",
+            "runtime/run-qwen38-v100-tp2-container.sh",
+            "runtime/run-qwen38-v100-tp2-lmcache-container.sh",
+            "runtime/run-qwen38-v100-tp2-vllm.sh"
+          ]
+        },
+        {
+          "name": "h3-venv",
+          "kind": "external",
+          "source_key": "h3-venv",
+          "expected_root": "/home/ai/.local/state/h3-studio-ivan-runtime/venv",
+          "include": [
+            "pyvenv.cfg",
+            "lib/python3.10/site-packages/fastapi/*.py",
+            "lib/python3.10/site-packages/fastapi/**/*.py",
+            "lib/python3.10/site-packages/httpx/*.py",
+            "lib/python3.10/site-packages/httpx/**/*.py",
+            "lib/python3.10/site-packages/pydantic/*.py",
+            "lib/python3.10/site-packages/pydantic/**/*.py",
+            "lib/python3.10/site-packages/starlette/*.py",
+            "lib/python3.10/site-packages/starlette/**/*.py",
+            "lib/python3.10/site-packages/uvicorn/*.py",
+            "lib/python3.10/site-packages/uvicorn/**/*.py",
+            "lib/python3.10/site-packages/*-*.dist-info/METADATA"
+          ],
+          "required_files": [
+            "pyvenv.cfg",
+            "lib/python3.10/site-packages/fastapi/__init__.py",
+            "lib/python3.10/site-packages/uvicorn/__init__.py"
+          ]
+        },
+        {
+          "name": "qwen-python",
+          "kind": "external",
+          "source_key": "qwen-python",
+          "expected_root": "/home/ai/runtimes/python-3.12.14-20260901",
+          "include": [
+            "bin/python3.12",
+            "lib/libpython3.12.so.1.0"
+          ],
+          "required_files": [
+            "bin/python3.12",
+            "lib/libpython3.12.so.1.0"
+          ]
+        },
+        {
+          "name": "qwen-venv",
+          "kind": "external",
+          "source_key": "qwen-venv",
+          "expected_root": "/home/ai/venvs/1cat-vllm-1.5.0-lmcache",
+          "include": [
+            "pyvenv.cfg",
+            "lib/python3.12/site-packages/vllm/*.py",
+            "lib/python3.12/site-packages/vllm/**/*.py",
+            "lib/python3.12/site-packages/vllm/*.so",
+            "lib/python3.12/site-packages/vllm/**/*.so",
+            "lib/python3.12/site-packages/lmcache/*.py",
+            "lib/python3.12/site-packages/lmcache/**/*.py",
+            "lib/python3.12/site-packages/vllm-*.dist-info/METADATA",
+            "lib/python3.12/site-packages/lmcache-*.dist-info/METADATA",
+            "lib/python3.12/site-packages/torch/version.py",
+            "lib/python3.12/site-packages/torch-*.dist-info/METADATA"
+          ],
+          "required_files": [
+            "pyvenv.cfg",
+            "lib/python3.12/site-packages/vllm/__init__.py",
+            "lib/python3.12/site-packages/lmcache/__init__.py",
+            "lib/python3.12/site-packages/torch/version.py"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,13 +1,14 @@
 [Unit]
-Description=LMCache DRAM L1 for Qwen3.8 V100 TP2
+Description=LMCache DRAM L1 for Qwen3.8 V100 TP4 immutable release
 After=network-online.target
 Wants=network-online.target
 Before=qwen38-v100-tp2-vllm.service
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/1cat-vllm/qwen38-v100-tp2.env
-ExecStart=/home/ai/github/1Panel/deploy/ai-router/scripts/run-qwen38-v100-tp2-lmcache-container.sh
+EnvironmentFile=%h/.local/state/1panel-runtime/current/qwen38/env/qwen38-et-w4a16-mtp2.env
+ExecStartPre=/usr/bin/python3 %h/.local/state/1panel-runtime/current/tools/release.py verify --release %h/.local/state/1panel-runtime/current --external-component qwen-python --external-component qwen-venv
+ExecStart=%h/.local/state/1panel-runtime/current/qwen38/runtime/run-qwen38-v100-tp2-lmcache-container.sh
 ExecStop=-/usr/bin/docker stop --time 120 qwen38-v100-tp2-lmcache
 Restart=on-failure
 RestartSec=10

@@ -5,8 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/github/1Panel
-ExecStart=/usr/bin/python3 -B %h/github/1Panel/deploy/h3-fleet/scripts/sync_comparison_status.py --output %h/.local/state/h3-studio-ivan-production/comparison/results/live.json
+WorkingDirectory=%h/.local/state/1panel-runtime/current/h3-fleet
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/python3 %h/.local/state/1panel-runtime/current/tools/release.py verify --release %h/.local/state/1panel-runtime/current
+ExecStart=/usr/bin/python3 -B scripts/sync_comparison_status.py --output %h/.local/state/h3-studio-ivan-production/comparison/results/live.json
 Restart=always
 RestartSec=5
 NoNewPrivileges=true

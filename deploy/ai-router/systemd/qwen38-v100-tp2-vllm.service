@@ -1,5 +1,5 @@
 [Unit]
-Description=Qwen3.8 27B QUASAR TP2 on two V100 GPUs
+Description=Qwen3.8 EfficientThink TP4 from verified immutable release
 After=network-online.target qwen38-v100-tp2-lmcache.service
 Requires=qwen38-v100-tp2-lmcache.service
 BindsTo=qwen38-v100-tp2-lmcache.service
@@ -7,9 +7,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/1cat-vllm/qwen38-v100-tp2.env
-ExecStartPre=/home/ai/venvs/1cat-vllm-1.5.0-lmcache/bin/python /home/ai/github/1Panel/deploy/ai-router/scripts/check-qwen38-v100-tp2-lmcache.py --require-vllm-guards
-ExecStart=/home/ai/github/1Panel/deploy/ai-router/scripts/run-qwen38-v100-tp2-container.sh
+EnvironmentFile=%h/.local/state/1panel-runtime/current/qwen38/env/qwen38-et-w4a16-mtp2.env
+ExecStartPre=/usr/bin/python3 %h/.local/state/1panel-runtime/current/tools/release.py verify --release %h/.local/state/1panel-runtime/current --external-component qwen-python --external-component qwen-venv
+ExecStartPre=/home/ai/venvs/1cat-vllm-1.5.0-lmcache/bin/python %h/.local/state/1panel-runtime/current/qwen38/runtime/check-qwen38-v100-tp2-lmcache.py --config %h/.local/state/1panel-runtime/current/qwen38/config/lmcache.yaml --require-vllm-guards
+ExecStart=%h/.local/state/1panel-runtime/current/qwen38/runtime/run-qwen38-v100-tp2-container.sh
 ExecStop=-/usr/bin/docker stop --time 300 qwen38-v100-tp2-vllm
 Restart=on-failure
 RestartSec=15

@@ -4,8 +4,10 @@ After=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/github/1Panel/deploy/h3-video-studio
+WorkingDirectory=%h/.local/state/1panel-runtime/current/h3-video-preview
 EnvironmentFile=%h/.config/h3-studio-ivan/preview.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStartPre=/usr/bin/python3 %h/.local/state/1panel-runtime/current/tools/release.py verify --release %h/.local/state/1panel-runtime/current --external-component h3-venv
 ExecStart=%h/.local/state/h3-studio-ivan-runtime/venv/bin/python scripts/preview.py --state-dir %h/.local/state/h3-studio-ivan-preview --port 14829
 Restart=on-failure
 RestartSec=5
