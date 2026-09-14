@@ -7677,6 +7677,7 @@ def _public_test_runtime(
     *,
     client_id: str,
     rpm_limit: int = 120,
+    tpm_limit: int = 1000000,
 ):
     registry = Registry(ROOT / "config" / "registry.yaml")
     value = settings(tmp_path)
@@ -7724,7 +7725,7 @@ def _public_test_runtime(
                 "enabled": True,
                 "models": ["siyuan/auto"],
                 "rpm_limit": rpm_limit,
-                "tpm_limit": 1000000,
+                "tpm_limit": tpm_limit,
                 "max_parallel_requests": 8,
                 "disclosure_mode": "public",
             },
@@ -7779,6 +7780,55 @@ def test_identity_intercept_obeys_rate_limit_and_records_usage(
     assert usage["requests"] == 2
     assert usage["errors"] == 1
     run(runtime.internal_client.aclose())
+    run(runtime.close())
+
+
+@pytest.mark.parametrize(
+    "path,payload",
+    [
+        (
+            "/v1/chat/completions",
+            {
+                "model": "siyuan/auto",
+                "messages": [
+                    {"role": "user", "content": "你当前底层是什么模型？"}
+                ],
+            },
+        ),
+        (
+            "/v1/responses",
+            {
+                "model": "siyuan/auto",
+                "input": "What underlying model are you using?",
+            },
+        ),
+    ],
+)
+def test_oversized_request_returns_413_for_both_protocols(
+    tmp_path: Path,
+    monkeypatch,
+    path: str,
+    payload: dict,
+) -> None:
+    runtime, secret = _public_test_runtime(
+        tmp_path,
+        monkeypatch,
+        client_id="public-oversized",
+        tpm_limit=1,
+    )
+    app = create_app(runtime)
+    with TestClient(app) as client:
+        response = client.post(
+            path,
+            headers={"Authorization": f"Bearer {secret}"},
+            json=payload,
+        )
+
+    assert response.status_code == 413
+    error = response.json()["error"]
+    assert error["code"] == "request_exceeds_tpm_limit"
+    assert "token-per-minute limit" in error["message"]
+    assert "details" not in error
     run(runtime.close())
 
 

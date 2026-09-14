@@ -238,19 +238,23 @@ class ClientLimiter:
         tpm_limit: int,
     ) -> tuple[bool, str | None]:
         minute = int(time.time() // 60)
-        requests = await self.store.increment_window(
+        if prompt_tokens > tpm_limit:
+            return False, "request_exceeds_tpm_limit"
+        requests_allowed, _ = await self.store.consume_window(
             f"router:client-rpm:{client_id}:{minute}",
             1,
             70,
+            rpm_limit,
         )
-        if requests > rpm_limit:
+        if not requests_allowed:
             return False, "rpm_limit_exceeded"
-        tokens = await self.store.increment_window(
+        tokens_allowed, _ = await self.store.consume_window(
             f"router:client-tpm:{client_id}:{minute}",
             prompt_tokens,
             70,
+            tpm_limit,
         )
-        if tokens > tpm_limit:
+        if not tokens_allowed:
             return False, "tpm_limit_exceeded"
         return True, None
 
@@ -259,6 +263,6 @@ class ClientLimiter:
         if tokens <= 0:
             return True
         minute = int(time.time() // 60)
-        total = await self.store.increment_window(
-            f"router:client-tpm:{client_id}:{minute}", tokens, 70)
-        return total <= limit
+        allowed, _ = await self.store.consume_window(
+            f"router:client-tpm:{client_id}:{minute}", tokens, 70, limit)
+        return allowed

@@ -1016,10 +1016,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             tpm_limit=authenticated.policy.tpm_limit,
         )
         if not allowed:
-            raise RouterError(
-                limit_code or "rate limit exceeded",
-                status_code=429,
-                code=limit_code or "rate_limit_exceeded",
+            raise _rate_limit_error(
+                limit_code,
+                prompt_tokens=prompt_tokens,
+                tpm_limit=authenticated.policy.tpm_limit,
             )
 
         if authenticated.policy.disclosure_mode == "public":
@@ -2005,10 +2005,10 @@ async def _identity_intercept_response(
             tpm_limit=tpm_limit,
         )
         if not allowed:
-            raise RouterError(
-                limit_code or "rate limit exceeded",
-                status_code=429,
-                code=limit_code or "rate_limit_exceeded",
+            raise _rate_limit_error(
+                limit_code,
+                prompt_tokens=input_tokens,
+                tpm_limit=tpm_limit,
             )
         if identity_disclosure_requires_model_protocol(body, api_kind):
             raise RouterError(
@@ -2925,6 +2925,29 @@ async def _acquire_route_capacity(
             capacity_attempts,
             queue_wait_ms,
         )
+
+
+def _rate_limit_error(
+    limit_code: str | None,
+    *,
+    prompt_tokens: int,
+    tpm_limit: int,
+) -> RouterError:
+    if limit_code == "request_exceeds_tpm_limit":
+        return RouterError(
+            "the request exceeds the per-minute token limit for this client",
+            status_code=413,
+            code=limit_code,
+            details={
+                "prompt_tokens": prompt_tokens,
+                "tpm_limit": tpm_limit,
+            },
+        )
+    return RouterError(
+        limit_code or "rate limit exceeded",
+        status_code=429,
+        code=limit_code or "rate_limit_exceeded",
+    )
 
 
 def _capacity_wait_seconds(
@@ -5042,6 +5065,11 @@ def _public_error_message(exc: RouterError) -> str:
             "client parallel request limit exceeded"
         ),
         "rate_limit_exceeded": "rate limit exceeded",
+        "rpm_limit_exceeded": "client request-per-minute limit exceeded",
+        "tpm_limit_exceeded": "client token-per-minute limit exceeded",
+        "request_exceeds_tpm_limit": (
+            "request exceeds the client token-per-minute limit"
+        ),
         "model_capacity_busy": "model capacity is busy",
         "all_local_capacity_busy": "model capacity is busy",
         "model_queue_timeout": "model capacity is busy",

@@ -53,6 +53,14 @@ class StateStore(Protocol):
 
     async def increment_window(self, key: str, amount: int, window_seconds: int) -> int: ...
 
+    async def consume_window(
+        self,
+        key: str,
+        amount: int,
+        window_seconds: int,
+        limit: int,
+    ) -> tuple[bool, int]: ...
+
     async def acquire_semaphore(self, key: str, token: str, limit: int, ttl_seconds: int) -> bool: ...
 
     async def release_semaphore(self, key: str, token: str) -> None: ...
@@ -231,6 +239,30 @@ class InMemoryStateStore:
             total = int(item.value) + amount
             item.value = total
             return total
+
+    async def consume_window(
+        self,
+        key: str,
+        amount: int,
+        window_seconds: int,
+        limit: int,
+    ) -> tuple[bool, int]:
+        """Atomically consume a fixed window without charging rejections."""
+        async with self._lock:
+            self._purge_locked()
+            item = self._values.get(key)
+            current = int(item.value) if item is not None else 0
+            if current + amount > limit:
+                return False, current
+            total = current + amount
+            if item is None:
+                self._values[key] = _ExpiringValue(
+                    total,
+                    time.time() + window_seconds,
+                )
+            else:
+                item.value = total
+            return True, total
 
     async def acquire_semaphore(self, key: str, token: str, limit: int, ttl_seconds: int) -> bool:
         now = time.time()
@@ -471,6 +503,36 @@ class RedisStateStore:
         return total
         """
         return int(await self._client.eval(script, 1, key, amount, window_seconds))
+
+    async def consume_window(
+        self,
+        key: str,
+        amount: int,
+        window_seconds: int,
+        limit: int,
+    ) -> tuple[bool, int]:
+        """Atomically consume a Redis window without charging rejections."""
+        script = """
+        local current = tonumber(redis.call('get', KEYS[1]) or '0')
+        local amount = tonumber(ARGV[1])
+        if current + amount > tonumber(ARGV[2]) then
+          return {0, current}
+        end
+        local total = redis.call('incrby', KEYS[1], amount)
+        if total == amount then
+          redis.call('expire', KEYS[1], ARGV[3])
+        end
+        return {1, total}
+        """
+        allowed, total = await self._client.eval(
+            script,
+            1,
+            key,
+            amount,
+            limit,
+            window_seconds,
+        )
+        return bool(int(allowed)), int(total)
 
     async def acquire_semaphore(self, key: str, token: str, limit: int, ttl_seconds: int) -> bool:
         script = """
