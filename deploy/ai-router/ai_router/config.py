@@ -75,10 +75,14 @@ class Settings:
         value = self._value.get(name, {})
         return copy.deepcopy(value) if isinstance(value, dict) else {}
 
-    def write_runtime(self, value: dict[str, Any]) -> None:
+    def preview_runtime(self, value: dict[str, Any]) -> dict[str, Any]:
         merged = deep_merge(load_yaml(self.defaults_path), value)
         _preserve_legacy_weight_total(value, merged)
         validate_settings(merged)
+        return merged
+
+    def write_runtime(self, value: dict[str, Any]) -> None:
+        self.preview_runtime(value)
         self.runtime_path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.runtime_path.with_suffix(self.runtime_path.suffix + ".new")
         with temporary.open("w", encoding="utf-8") as handle:
@@ -909,6 +913,31 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError("cloud.monthly_budget must not be negative")
 
     compaction = value.get("compaction", {})
+    from .summary_profile import output_limit, reasoning_mode
+    reasoning_mode(compaction.get("summary_reasoning", "provider_default"))
+    output_limit(compaction.get("summary_output_tokens", 8192))
+    from .compaction_limits import parse_limits
+    parse_limits(compaction.get("background_limits", {}))
+    from .memory_ingestion import indexing_options
+    indexing_options(compaction.get("history_indexing"))
+    if type(compaction.get("history_query_rewrite_enabled", False)) is not bool:
+        raise ValueError("compaction.history_query_rewrite_enabled must be boolean")
+    if type(compaction.get("background_enabled", False)) is not bool:
+        raise ValueError("compaction.background_enabled must be boolean")
+    context_policy = value.get("context_policy", {})
+    if not isinstance(context_policy, dict):
+        raise ValueError("context_policy must be an object")
+    context_mode = context_policy.get("mode", "legacy")
+    if not isinstance(context_mode, str) or context_mode not in {"legacy", "compact", "extended"}:
+        raise ValueError("context_policy.mode must be legacy, compact, or extended")
+    endpoint_id = context_policy.get("endpoint_id", "codex-pro-gpt-6-astra")
+    if not isinstance(endpoint_id, str) or not endpoint_id.strip():
+        raise ValueError("context_policy.endpoint_id must be a non-empty endpoint ID")
+    context_limit = context_policy.get("extended_context_tokens", 500000)
+    if type(context_limit) is not int or not 1 <= context_limit <= 1050000:
+        raise ValueError("context_policy.extended_context_tokens must be an integer between 1 and 1050000")
+    if context_policy.get("mode") == "compact" and not compaction.get("model_id"):
+        raise ValueError("compression strategy requires compaction.model_id")
     if compaction.get("mode", "explicit_only") not in {
         "explicit_only",
         "automatic",

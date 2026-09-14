@@ -37,6 +37,8 @@ class StateStore(Protocol):
 
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool: ...
 
+    async def renew_lock(self, key: str, token: str, ttl_seconds: int) -> bool: ...
+
     async def release_lock(self, key: str, token: str) -> None: ...
 
     async def enqueue(self, key: str, member: str, score: float) -> None: ...
@@ -174,6 +176,15 @@ class InMemoryStateStore:
             if key in self._values:
                 return False
             self._values[key] = _ExpiringValue(token, time.time() + ttl_seconds)
+            return True
+
+    async def renew_lock(self, key: str, token: str, ttl_seconds: int) -> bool:
+        async with self._lock:
+            self._purge_locked()
+            item = self._values.get(key)
+            if item is None or item.value != token:
+                return False
+            item.expires_at = time.time() + ttl_seconds
             return True
 
     async def release_lock(self, key: str, token: str) -> None:
@@ -412,6 +423,15 @@ class RedisStateStore:
 
     async def acquire_lock(self, key: str, token: str, ttl_seconds: int) -> bool:
         return bool(await self._client.set(key, token, nx=True, ex=ttl_seconds))
+
+    async def renew_lock(self, key: str, token: str, ttl_seconds: int) -> bool:
+        script = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+          return redis.call('expire', KEYS[1], ARGV[2])
+        end
+        return 0
+        """
+        return bool(await self._client.eval(script, 1, key, token, ttl_seconds))
 
     async def release_lock(self, key: str, token: str) -> None:
         script = """

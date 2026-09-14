@@ -22,6 +22,12 @@ CLIENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
 KEY_PREFIX = "sk-1panel"
 USAGE_RETENTION_SECONDS = 31 * 24 * 60 * 60
 DISCLOSURE_MODES = {"public", "internal"}
+HISTORY_GRANT_FIELDS = (
+    "history_owner_confirmed",
+    "history_recall_enabled",
+    "history_cloud_allowed",
+    "history_legacy_cloud_allowed",
+)
 
 
 class ClientAccountManager:
@@ -176,6 +182,37 @@ class ClientAccountManager:
         records = await self.store.list_json("router:client-key-digest:")
         return any(item.get("client_id") == client_id and item.get("key_id") == key_id
                    and item.get("status") == "active" for item in records)
+
+    async def history_policy(
+        self, client_id: str, key_id: str, *, cloud: bool
+    ) -> ClientPolicy | None:
+        """Recheck grants at use time; never trust a cached request policy."""
+        if not await self.is_key_active(client_id, key_id):
+            return None
+        policy = await self.history_account_policy(client_id)
+        if policy is None:
+            return None
+        if cloud and (policy.local_only or not policy.history_cloud_allowed):
+            return None
+        return policy
+
+    async def history_account_policy(self, client_id: str) -> ClientPolicy | None:
+        """Account consent for server-owned indexing, without borrowing a key."""
+        policy = await self.current_policy(client_id)
+        return policy if policy and policy.history_recall_enabled else None
+
+    async def current_policy(self, client_id: str) -> ClientPolicy | None:
+        account = await self.store.get_json(_account_key(client_id))
+        if not account or account.get("enabled") is not True:
+            return None
+        policy = _policy_from_account(account)
+        return policy
+
+    async def history_accounts(self) -> list[str]:
+        accounts = await self.store.list_json("router:client-account:")
+        return [str(item["id"]) for item in accounts
+                if item.get("enabled") is True and item.get("id")
+                and _effective_history_grants(item)["history_recall_enabled"]]
 
     async def create_account(
         self,
@@ -461,13 +498,15 @@ def _validated_account(
             code="invalid_client_models",
         )
     models = tuple(dict.fromkeys(str(item).strip() for item in models_value))
-    if not models or any(not item for item in models):
+    if (not models and (existing is None or "models" in value)) or any(not item for item in models):
         raise RouterError(
             "client models must not be empty",
             status_code=400,
             code="invalid_client_models",
         )
-    invalid_models = sorted(set(models) - allowed_models)
+    # A policy-only PATCH must preserve existing grants even if a registered
+    # model was removed. Explicit model edits and new accounts remain strict.
+    invalid_models = sorted(set(models) - allowed_models) if existing is None or "models" in value else []
     if invalid_models:
         raise RouterError(
             "client models contain unknown model IDs",
@@ -546,8 +585,29 @@ def _validated_account(
     local_only = value.get("local_only", (existing or {}).get("local_only", False))
     if mode not in {"inherit", "cost", "efficiency", "quality"} or not isinstance(local_only, bool):
         raise RouterError("invalid client routing mode", status_code=400, code="invalid_client_routing_mode")
+    grants = {
+        field: value.get(field, (existing or {}).get(
+            field, field == "history_recall_enabled" and existing is None))
+        for field in HISTORY_GRANT_FIELDS
+    }
+    if any(type(item) is not bool for item in grants.values()):
+        raise RouterError("history grants must be booleans", status_code=400,
+                          code="invalid_history_grants")
+    # Isolation is the authenticated Router client_id, not a natural person.
+    # Keep history_owner_confirmed as inert compatibility metadata for old UIs.
+    if not grants["history_recall_enabled"] or local_only:
+        if value.get("history_cloud_allowed") is True:
+            raise RouterError("cloud history requires enabled recall and a non-local-only account",
+                              status_code=400, code="invalid_history_cloud_grant")
+        grants["history_cloud_allowed"] = False
+    if not grants["history_cloud_allowed"]:
+        if value.get("history_legacy_cloud_allowed") is True:
+            raise RouterError("legacy history cloud grant requires cloud history authorization",
+                              status_code=400, code="invalid_history_legacy_cloud_grant")
+        grants["history_legacy_cloud_allowed"] = False
     now = time.time()
     return {
+        **grants,
         "routing_mode": mode,
         "local_only": local_only,
         "id": client_id,
@@ -588,6 +648,7 @@ def _validated_account(
 
 def _policy_from_account(value: dict[str, Any]) -> ClientPolicy:
     return ClientPolicy(
+        **_effective_history_grants(value),
         routing_mode=str(value.get("routing_mode", "inherit")),
         local_only=bool(value.get("local_only", False)),
         id=str(value["id"]),
@@ -612,6 +673,7 @@ def _public_account(
     usage: dict[str, int],
 ) -> dict[str, Any]:
     return {
+        **_effective_history_grants(account),
         "routing_mode": str(account.get("routing_mode", "inherit")),
         "local_only": bool(account.get("local_only", False)),
         "id": str(account["id"]),
@@ -635,6 +697,19 @@ def _public_account(
         "updated_at": float(account.get("updated_at", 0)),
         "keys": keys,
         "usage_24h": usage,
+    }
+
+
+def _effective_history_grants(value: dict[str, Any]) -> dict[str, bool]:
+    """Legacy or malformed stored values never become implicit consent."""
+    owner = value.get("history_owner_confirmed") is True
+    enabled = value.get("history_recall_enabled") is True
+    cloud = enabled and value.get("history_cloud_allowed") is True and value.get("local_only", False) is False
+    return {
+        "history_owner_confirmed": owner,
+        "history_recall_enabled": enabled,
+        "history_cloud_allowed": cloud,
+        "history_legacy_cloud_allowed": cloud and value.get("history_legacy_cloud_allowed") is True,
     }
 
 

@@ -540,6 +540,7 @@ class HealthMonitor:
                             item.get("safe_context_tokens", 0)
                         ),
                         "error_code": item.get("error_code"),
+                        "model_context_limits": item.get("model_context_limits", {}),
                         "cooldown_until": item.get("cooldown_until"),
                     }
                     for item in workers

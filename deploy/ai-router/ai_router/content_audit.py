@@ -141,3 +141,62 @@ class ArchiveReader:
             text = json.dumps(body, ensure_ascii=False, indent=2)
             result.update(stage=stage, text=text[offset:offset+limit], offset=offset, total_chars=len(text), next_offset=offset+limit if offset+limit < len(text) else None)
         return result
+
+    def history_page(self, client_id, cursor=0, *, limit=4):
+        """Read an account-filtered change page without mutating the archive.
+
+        Cursor tracks committed change events, not request creation order, so a
+        slow earlier request completing after later requests is not lost.
+        """
+        if not client_id or type(cursor) is not int or cursor < 0:
+            raise ValueError("history owner and nonnegative cursor are required")
+        if type(limit) is not int or not 1 <= limit <= 32:
+            raise ValueError("history page limit must be between 1 and 32")
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            rows = db.execute("""SELECT e.sequence,e.request_hash,r.payload_ciphertext
+                FROM training_history_events e JOIN training_records r
+                ON r.request_hash=e.request_hash WHERE e.sequence>?
+                ORDER BY e.sequence LIMIT ?""", (cursor, limit)).fetchall()
+        payloads = []
+        seen = set()
+        for sequence, request_hash, ciphertext in rows:
+            if request_hash in seen:
+                continue
+            seen.add(request_hash)
+            payload = self._history_payload(request_hash, ciphertext)
+            if payload.get("request", {}).get("client_id") == client_id:
+                payloads.append(payload)
+        return (rows[-1][0] if rows else cursor), payloads
+
+    def history_head(self):
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            return db.execute("SELECT COALESCE(MAX(sequence),0) FROM training_history_events").fetchone()[0]
+
+    def history_event(self, cursor, through):
+        """Read/decrypt one shared event, without holding a DB snapshot while indexing.
+
+        The owner is trusted only after ciphertext and request-hash verification.
+        One record at a time bounds buffering even for large encrypted requests.
+        """
+        if type(cursor) is not int or type(through) is not int or not 0 <= cursor <= through:
+            raise ValueError("invalid history event range")
+        with closing(sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=2)) as db:
+            row = db.execute("""SELECT e.sequence,e.request_hash,r.payload_ciphertext
+                FROM training_history_events e LEFT JOIN training_records r
+                ON r.request_hash=e.request_hash WHERE e.sequence>? AND e.sequence<=?
+                ORDER BY e.sequence LIMIT 1""", (cursor, through)).fetchone()
+        if row is None:
+            return through, None
+        sequence, request_hash, ciphertext = row
+        if ciphertext is None:
+            raise ValueError("archive event source missing")
+        return sequence, self._history_payload(request_hash, ciphertext)
+
+    def _history_payload(self, request_hash, ciphertext):
+        payload = json.loads(zlib.decompress(self.cipher.decrypt(ciphertext)))
+        request = payload.get("request", {})
+        expected = hmac.new(self.index_key,
+            ("request:" + str(request.get("request_id", ""))).encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(request_hash, expected):
+            raise ValueError("archive request provenance mismatch")
+        return payload

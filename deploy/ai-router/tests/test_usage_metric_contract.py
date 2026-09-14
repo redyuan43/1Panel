@@ -271,7 +271,7 @@ class RealAuditContract(unittest.IsolatedAsyncioTestCase):
                         protocol='responses',requested_model='synthetic-model',excerpt={},instance_id='synthetic-instance',
                         boot_id='synthetic-boot',settings_hash='synthetic-settings',registry_hash='synthetic-registry')
                     current=SimpleNamespace(instance_id='synthetic-instance',boot_id='synthetic-boot',
-                        settings=SimpleNamespace(section=lambda name:{}),
+                        settings=SimpleNamespace(section=lambda name: {}),
                         audit=SimpleNamespace(write=mock.Mock()),
                         policy=SimpleNamespace(mark_deployment_recent=mock.AsyncMock()),
                         clients=SimpleNamespace(record_usage=mock.AsyncMock()),

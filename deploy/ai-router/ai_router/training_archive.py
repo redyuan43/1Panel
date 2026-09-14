@@ -47,8 +47,22 @@ class TrainingArchive:
             )
             os.chmod(self.database_path.parent, 0o700)
             self._initialize()
+            # Read-only bind mounts cannot recreate SQLite WAL/SHM files after
+            # the last writer closes. Keep a connection (not a transaction)
+            # alive so Control can read the live archive while APIs are idle.
+            self._wal_anchor = sqlite3.connect(
+                self.database_path, timeout=30, check_same_thread=False,
+                isolation_level=None,
+            )
+            self._wal_anchor.execute("SELECT value FROM training_metadata LIMIT 1").fetchall()
         except Exception as exc:
             raise TrainingArchiveUnavailableError() from exc
+
+    def close(self) -> None:
+        anchor = getattr(self, "_wal_anchor", None)
+        if anchor is not None:
+            anchor.close()
+            self._wal_anchor = None
 
     async def begin(
         self,
@@ -62,6 +76,7 @@ class TrainingArchive:
         received_body: dict[str, Any],
         instance_id: str,
         boot_id: str,
+        history_source_local_only: bool | None = None,
     ) -> str | None:
         payload = {
             "schema_version": SCHEMA_VERSION,
@@ -79,6 +94,10 @@ class TrainingArchive:
                 "instance_id": instance_id,
                 "boot_id": boot_id,
                 "received_body": received_body,
+                "history_source_policy": {
+                    "version": 1,
+                    "local_only": history_source_local_only,
+                },
             },
             "routing_attempts": [],
         }
@@ -305,8 +324,28 @@ class TrainingArchive:
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS training_history_events (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        request_hash TEXT NOT NULL
+                    );
+                    CREATE TRIGGER IF NOT EXISTS training_history_insert
+                    AFTER INSERT ON training_records BEGIN
+                        INSERT INTO training_history_events(request_hash) VALUES(NEW.request_hash);
+                    END;
+                    CREATE TRIGGER IF NOT EXISTS training_history_update
+                    AFTER UPDATE OF payload_ciphertext ON training_records BEGIN
+                        INSERT INTO training_history_events(request_hash) VALUES(NEW.request_hash);
+                    END;
                     """
                 )
+                # Seed once, transactionally with the marker. SQL triggers also
+                # cover writes from older Router processes during rolling updates.
+                connection.execute("""INSERT INTO training_history_events(request_hash)
+                    SELECT request_hash FROM training_records
+                    WHERE NOT EXISTS (SELECT 1 FROM training_metadata
+                        WHERE key='history_events_seeded') ORDER BY id""")
+                connection.execute("""INSERT OR IGNORE INTO training_metadata(key,value)
+                    VALUES('history_events_seeded','1')""")
                 connection.execute(
                     """
                     INSERT INTO training_metadata(key, value)

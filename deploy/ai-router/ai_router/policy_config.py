@@ -19,6 +19,7 @@ EDITABLE_POLICY_SECTIONS = frozenset(
         "affinity",
         "cloud",
         "compaction",
+        "context_policy",
         "evaluator",
         "failover",
         "health",
@@ -88,12 +89,15 @@ class PolicyConfigManager:
         expected_revision: int | None,
         expected_fingerprint: str | None,
         source: str,
+        validate_dependencies: Any = None,
     ) -> dict[str, Any]:
         draft = await asyncio.to_thread(
             self._activation_candidate,
             expected_revision,
             expected_fingerprint,
         )
+        if validate_dependencies is not None:
+            validate_dependencies(draft["settings"])
         self.settings.write_runtime(draft["settings"])
         return await asyncio.to_thread(
             self._finish_activation,

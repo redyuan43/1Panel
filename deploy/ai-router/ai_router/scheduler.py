@@ -253,3 +253,12 @@ class ClientLimiter:
         if tokens > tpm_limit:
             return False, "tpm_limit_exceeded"
         return True, None
+
+    async def check_additional_tokens(self, client_id: str, tokens: int, limit: int) -> bool:
+        """Account for optional recall without charging an extra request."""
+        if tokens <= 0:
+            return True
+        minute = int(time.time() // 60)
+        total = await self.store.increment_window(
+            f"router:client-tpm:{client_id}:{minute}", tokens, 70)
+        return total <= limit

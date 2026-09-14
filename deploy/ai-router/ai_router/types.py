@@ -313,6 +313,7 @@ class RouteDecision:
     affinity: str
     score: float
     migration: bool = False
+    recall_projection: Any | None = field(default=None, repr=False, compare=False)
     previous_endpoint_id: str | None = None
     deployment_id: str | None = None
     deployment_profile_id: str | None = None
@@ -457,6 +458,10 @@ class ClientPolicy:
     media_models: tuple[str, ...] = ()
     routing_mode: str = "inherit"
     local_only: bool = False
+    history_owner_confirmed: bool = False
+    history_recall_enabled: bool = False
+    history_cloud_allowed: bool = False
+    history_legacy_cloud_allowed: bool = False
 
 
 @dataclass
@@ -479,3 +484,4 @@ class ModelCallTarget:
     base_url: str
     model: str
     api_key: str = field(default="", repr=False)
+    safe_context_tokens: int | None = None
