@@ -670,7 +670,7 @@ endpoints:
     tier_rank: 50
     modalities: [text]
     tasks: [general, code, batch, long-context]
-    safe_context_tokens: 32768
+    safe_context_tokens: 1000000
     configured_context_tokens: 1000000
     max_concurrency: 8
     backend_type: openai
@@ -694,7 +694,7 @@ endpoints:
       routing_quality_validated: true
       provider: zhipu-coding
       billing_mode: subscription
-      context_status: configured-32k-unvalidated-official-1m
+      context_status: user-approved-1m-admission-unvalidated
       quality_status: unbenchmarked
       max_output_tokens: 128000
       thinking_via_extra_body: true
@@ -719,7 +719,7 @@ endpoints:
       - code
       - batch
       - long-context
-    safe_context_tokens: 262144
+    safe_context_tokens: 1000000
     configured_context_tokens: 1000000
     max_concurrency: 8
     backend_type: openai
@@ -748,7 +748,7 @@ endpoints:
     metadata:
       provider: zhipu-coding
       billing_mode: subscription
-      context_status: live-validated-262k-official-1m
+      context_status: user-approved-1m-admission-live-probe-358432
       quality_status: user-directed-code-priority-unbenchmarked
       max_output_tokens: 128000
       thinking_via_extra_body: true

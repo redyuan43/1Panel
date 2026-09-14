@@ -457,8 +457,10 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert glm is not None
     assert glm.public_model == "zhipu/glm-5.3-flash"
     assert glm.modalities == ("text", "image")
-    assert glm.safe_context_tokens == 262144
+    assert glm.safe_context_tokens == 1000000
     assert glm.configured_context_tokens == 1000000
+    assert "context_validation_script" not in glm.metadata
+    assert registry.by_id("zhipu-glm-5.3").safe_context_tokens == 1000000
     assert glm.auto_candidate is True
     assert glm.quality["code"] > registry.by_id(
         "cloud-deepseek-v4-flash"
