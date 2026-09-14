@@ -60,7 +60,7 @@ systemd --user (Linger=yes，开机自启)
 | TENSOR_PARALLEL_SIZE | 4 | GPU4-7 同属 NUMA1；TP4 实测通过 |
 | LMCACHE max-gpu-workers | 随 GPU_UUIDS 自动计数（当前 4） | 修复 TP2 硬编码只允许 2 rank 注册的问题 |
 | MAX_NUM_SEQS | 8 | 从 4 提升；解除并发调度上限，单流性能无回归 |
-| LMCACHE_ENABLED | 0 | 2026-09-12 复测复现部分前缀回读错误后再次关闭；保留 vLLM GPU 前缀缓存 |
+| LMCACHE_ENABLED | 1 | 2026-09-14 按当前运行状态正式开启；51,200-token 部分回读与 68,800-token 完整回读通过，短前缀仍列为回归风险 |
 | 其余（backend/KV 根目录等） | 沿用旧生产 | — |
 
 ## 与旧部署的差异
@@ -76,12 +76,15 @@ systemd --user (Linger=yes，开机自启)
 - 2026-09-10 256K 验收使用原推理版本、TP4、MTP2、量化和八路配置。当前 GPU KV 池为
   **2,582,714 Token**；单请求实测输入 **257,970 Token**，冷请求 382.222 秒，复用
   256,000 Token GPU 缓存后约 5 秒。长短混合请求实测同时运行峰值达到 2、4、8，标记均正确。
-- DRAM 缓存的部分前缀回读出现可复现错误，清空重建与改为 1600 预填充批次均未修复。
-  当前只使用已验证的 GPU 前缀缓存；LMCache 服务保留备用，没有连接当前模型。
-  模型重启后需要重新预热，不能将下述历史 DRAM 验证视为当前已修复。
+- DRAM 缓存的短部分前缀回读曾出现可复现错误，清空重建与改为 1600 预填充批次均未修复。
+  当前 LMCache 已连接模型；2026-09-14 干净重启后，三次 51,200-token 部分回读和
+  一次 68,800-token 完整回读均正确，但旧的 1,600/3,200-token 失败路径尚未重测。
+  这次启用是当前运行决策，不能表述为旧问题已经修复。
   `BASE_VLLM_VENV` 和 `SERVER_BIN` 均固定到原 `1cat-vllm-1.5.0-lmcache` 环境，确保
-  只改变缓存连接方式，不切换推理版本。恢复 DRAM 需先修复并重测部分前缀，不能只切开关。
-  详细证据与独立回滚快照位于 `/home/ai/.local/state/ai-router-acceptance/20260910-routing-modes`。
+  只改变缓存连接方式，不切换推理版本。若要宣称旧问题已修复，仍需重测短部分前缀。
+  历史证据位于 `/home/ai/.local/state/ai-router-acceptance/20260910-routing-modes`；
+  2026-09-14 新证据归档位于
+  `/home/ai/.local/state/1panel-source-reconciliation/20260914/experiments/lmcache-long-repro-20260914.tar.gz`。
 - **2026-09-12 复测（决定性）**：升级核查确认 LMCache 无新版本（installed 0.5.4 ==
   latest 0.5.4，包日期 2026-09-07）。复跑 `validate_aligned_prefill.py cache`：
   cold 与 full_cache_repeat（cached 4800）均正确，partial_cache_shorter（cached
@@ -101,7 +104,7 @@ systemd --user (Linger=yes，开机自启)
   清 L1，重启冒烟通过。根因仍指向全注意力层 subpaged 视图编辑未生效
   （`KV cache group edits applied` 仅出现 mamba-page-view:48），上游 0.5.4 与
   0.5.5rc6 代码逐字相同，无可用修复。
-- **2026-09-12 最终评估（议题关闭）**：全注意力层未获视图修正的深层原因确认——
+- **2026-09-12 历史评估（当时关闭）**：全注意力层未获视图修正的深层原因确认——
   本机必须使用定制 `flash_attn_v100.py`（335KB，V100+PG500 混插卡 + FP8 E5M2
   storage-only KV 的唯一可用路径），其后端以 4 维 K/V 布局工作，而 LMCache 的
   子分页修复规则只匹配 5 维布局，且 LMCache 全库对该后端零引用。**上游无法修**：
@@ -224,6 +227,11 @@ docker logs -f qwen38-v100-tp2-vllm
 ```
 
 回滚：见 `rollback/README.md`（三条 cp + daemon-reload + start）。
+
+仅回退本次 LMCache 连接时，将当前发布版本 env 中的 `LMCACHE_ENABLED` 改为 `0`，
+重启 `qwen38-v100-tp2-vllm.service`，再确认模型容器环境中不存在
+`KV_TRANSFER_CONFIG`；无需切换模型、量化或推理环境。`rollback/README.md` 是整套
+旧模型回滚，范围更大。
 
 ## 变更记录
 

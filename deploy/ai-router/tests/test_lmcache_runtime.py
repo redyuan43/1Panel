@@ -221,3 +221,12 @@ def test_lmcache_ui_and_service_contracts_are_present() -> None:
     assert "--query-gpu=memory.free,memory.total" in preflight
     assert 'os.environ.get("GPU_MEMORY_UTILIZATION", "0.90")' in preflight
     assert "RequestType.UNREGISTER_KV_CACHE" in preflight
+
+
+def test_qwen_production_env_keeps_lmcache_enabled() -> None:
+    env = (
+        ROOT.parent
+        / "qwen38-et-v100/env/qwen38-et-w4a16-mtp2.env"
+    ).read_text()
+    assert "\nLMCACHE_ENABLED=1\n" in env
+    assert "short-prefix case in regression" in env
