@@ -2965,6 +2965,11 @@ function renderRouteDiagnosis() {
   document.querySelectorAll("[data-policy-ref]").forEach((button) => {
     button.addEventListener("click", () => {
       switchView("settings");
+      const mode = byId("routing-mode-view");
+      if (mode && mode.value !== "advanced") {
+        mode.value = "advanced";
+        mode.dispatchEvent(new Event("change", {bubbles: true}));
+      }
       requestAnimationFrame(() => {
         byId(button.dataset.policyRef)?.scrollIntoView({
           behavior: "smooth",
