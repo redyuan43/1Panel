@@ -184,11 +184,16 @@ class CostLedger:
     def backfill(self, limit=200):
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
-            rows = db.execute("""SELECT t.payload_json FROM route_traces t LEFT JOIN cost_trace_state s
+            rows = db.execute("""SELECT t.payload_json,t.updated_at FROM route_traces t LEFT JOIN cost_trace_state s
                 ON s.request_id=t.request_id WHERE s.request_id IS NULL OR s.updated_at<t.updated_at
                 ORDER BY t.started_at,t.request_id LIMIT ?""", (limit,)).fetchall()
             for row in rows:
-                consume_trace(db, json.loads(row[0]))
+                trace = json.loads(row[0])
+                consume_trace(db, trace)
+                # Legacy metadata updates may change only the SQL revision.
+                # Track the scanned row revision without changing measured usage.
+                db.execute("UPDATE cost_trace_state SET updated_at=max(updated_at,?) WHERE request_id=?",
+                           (row[1], trace["request_id"]))
         return len(rows)
 
     def records(self, *, since, until, model=None, client_id=None, conversation_id=None, request_id=None, measurement=None):

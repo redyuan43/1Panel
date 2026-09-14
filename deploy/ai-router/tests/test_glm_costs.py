@@ -139,6 +139,18 @@ def test_cost_write_failure_keeps_audit_and_backfill_can_repair(ledger,monkeypat
     assert ledger.backfill()==1
 
 
+def test_backfill_tracks_sql_only_legacy_updates_without_repricing(ledger):
+    store=RouteTraceStore(ledger.path)
+    store._save(trace())
+    with ledger.connect() as db:
+        db.execute("UPDATE route_traces SET updated_at=updated_at+60 WHERE request_id=?",("cost-test",))
+    assert ledger.backfill()==1
+    assert ledger.backfill()==0
+    summary=ledger.summary(since=0,until=2**40)
+    assert summary["backfill_remaining"]==0 and summary["attempts"]==1
+    assert summary["total_cny"]=="0.000200250"
+
+
 def xlsx(rows, *, extra_header="API Key", extra_value="synthetic-secret-never-persist"):
     headers=["账单号","账期(自然日)","模型编码（推理专用）","付费类型","单价","单价单位","用量","用量单位","币种","总消费金额（结算金额加总）","请求次数 (仅API)","价格类型",extra_header]
     contents=[headers]+[r+[extra_value] for r in rows]
