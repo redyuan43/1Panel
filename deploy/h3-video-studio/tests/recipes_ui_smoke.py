@@ -40,7 +40,10 @@ def main():
             route.fulfill(json=project)
             return
         responses = {"/api/recipes": catalog, "/api/health": {"ok": True, "execution_mode": "preview"},
-            "/api/capacity": {"available": False}, "/api/projects": {"projects": []},
+            "/api/capacity": {"available": True, "nodes": [
+                {"id": "ivan-u24", "enabled": True, "available": True, "active": 0},
+                {"id": "edge", "enabled": False, "available": True, "active": 0},
+            ]}, "/api/projects": {"projects": []},
             "/api/projects/legacy": project, "/api/768-queue/candidates": {"candidates": []},
             "/api/768-queue/schedules": {"schedules": []},
             "/api/script/options": {"capability_manifest": {"configured": False}, "skills": []}}
@@ -76,6 +79,9 @@ def main():
         catalog["enabled"] = True
         page.evaluate("refreshRecipes()")
         page.evaluate("openProject('legacy', 'preview')")
+        node_select = page.get_by_role("combobox", name="执行设备")
+        expect(node_select.locator('option[value="ivan-u24"]')).to_be_enabled()
+        expect(node_select.locator('option[value="edge"]')).to_be_disabled()
         select = page.get_by_role("combobox", name="本次生成配方")
         expect(select).to_have_value("")
         page.get_by_role("button", name="开始低清预览").click()

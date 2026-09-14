@@ -48,8 +48,8 @@ def read_nodes(path):
         nodes.append(node)
     if (not nodes or len({n.id for n in nodes}) != len(nodes)
             or len({n.url.rstrip('/') for n in nodes}) != len(nodes)
-            or sum(n.max_parallel for n in nodes) > 3):
-        raise ValueError("duplicate nodes or cluster capacity exceeds three")
+            or sum(n.max_parallel for n in nodes) > 4):
+        raise ValueError("duplicate nodes or cluster capacity exceeds four")
     legacy = config.get("legacy_node", "ivan")
     if legacy not in {n.id for n in nodes}:
         raise ValueError("legacy Fleet node must remain addressable")

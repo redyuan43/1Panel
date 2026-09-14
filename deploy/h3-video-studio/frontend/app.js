@@ -862,6 +862,7 @@ function renderStageActions(stage) {
       const option = document.createElement("option");
       option.value = node.id;
       option.textContent = node.id === "auto" ? "自动选择可用设备" : `${node.id}${node.enabled ? "" : "（尚未开放）"}`;
+      option.disabled = node.enabled !== true;
       select.appendChild(option);
     }
     select.value = state.nodeSelections[state.project.id] ?? stage.target_node ?? "auto";

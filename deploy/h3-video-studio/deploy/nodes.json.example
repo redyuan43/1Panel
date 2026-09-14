@@ -19,6 +19,15 @@
       "max_parallel": 1,
       "priority": 10,
       "legacy_profiles": []
+    },
+    {
+      "id": "edge",
+      "url": "http://edge.taild500c8.ts.net:18789",
+      "key_file": "/home/ai/.config/h3-studio-ivan/edge-fleet.key",
+      "enabled": false,
+      "max_parallel": 1,
+      "priority": 30,
+      "legacy_profiles": []
     }
   ]
 }

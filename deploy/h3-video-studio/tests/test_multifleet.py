@@ -219,6 +219,23 @@ def test_config_rejects_arbitrary_urls_and_capacity(tmp_path):
             read_nodes(path)
 
 
+def test_config_represents_all_three_hosts_at_physical_capacity(tmp_path):
+    path = tmp_path / "nodes.json"
+    path.write_text(json.dumps({"version": 1, "legacy_node": "ivan", "nodes": [
+        {"id": "ivan", "url": "http://ivan.ts.net:8789", "key_file": "/private/ivan",
+         "enabled": False, "max_parallel": 2},
+        {"id": "ivan-u24", "url": "http://ivan-u24.ts.net:8789", "key_file": "/private/u24",
+         "enabled": True, "max_parallel": 1},
+        {"id": "edge", "url": "http://edge.ts.net:18789", "key_file": "/private/edge",
+         "enabled": False, "max_parallel": 1},
+    ]}))
+    nodes, legacy = read_nodes(path)
+    assert legacy == "ivan"
+    assert [(node.id, node.max_parallel) for node in nodes] == [
+        ("ivan", 2), ("ivan-u24", 1), ("edge", 1),
+    ]
+
+
 def test_unbound_write_cannot_hit_legacy_fleet(cluster):
     with pytest.raises(RuntimeError, match="明确"):
         cluster._request("POST", "/api/router/release-validation-gate", {})
