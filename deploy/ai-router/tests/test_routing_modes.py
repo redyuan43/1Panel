@@ -3,6 +3,8 @@ import copy
 import json
 import time
 from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -10,7 +12,9 @@ import pytest
 from ai_router.config import Registry
 from ai_router.endpoint_tokens import EndpointTokenCounter
 from ai_router.errors import NoEligibleModelError
-from ai_router.routing_modes import DEFAULTS, PerformanceRouter, resolve, validate
+from ai_router.routing_modes import (DEFAULTS, FLASH, PerformanceRouter,
+                                     flash_order_for_window, in_work_window,
+                                     resolve, validate)
 from ai_router.store import InMemoryStateStore
 from ai_router.types import Evaluation, RequestCapabilities, ConversationState
 from ai_router.cache_audit import OutputClock
@@ -280,3 +284,118 @@ def test_quality_requires_separate_validation(tmp_path):
     policy, registry, options=setup(tmp_path,"quality")
     registry.by_id("cloud-deepseek-v4-pro").metadata.pop("routing_quality_validated")
     assert run(request(policy,options)).endpoint.id != "cloud-deepseek-v4-pro"
+
+
+TZ = ZoneInfo("Asia/Shanghai")
+SCHEDULE_ROUTING = {"objectives": {"enabled": True, "mode": "cost", "schedule": {
+    "enabled": True,
+    "work_flash_order": {"general": ["zhipu-glm-5.3-flash", "cloud-deepseek-v4-flash"]},
+    "off_hours_flash_order": {"general": ["cloud-deepseek-v4-flash", "zhipu-glm-5.3-flash"]}}}}
+
+
+def frozen_clock(monkeypatch, moment):
+    """Pin routing_modes.datetime so window tests never depend on wall time."""
+    import ai_router.routing_modes as modes
+
+    class Clock:
+        current = moment
+
+        @classmethod
+        def now(cls, zone=None):
+            return cls.current.astimezone(zone) if zone else cls.current
+
+    monkeypatch.setattr(modes, "datetime", Clock)
+    return Clock
+
+
+def test_schedule_defaults_off_change_nothing():
+    assert DEFAULTS["schedule"]["enabled"] is False
+    options = resolve({"objectives": {"enabled": True}})
+    assert options["schedule_window"] is None and options["flash_order"] == FLASH
+    assert flash_order_for_window(DEFAULTS["schedule"]) == {}
+    # 两个 order 都写好，只要 enabled 为 false 就不得生效
+    options = resolve({"objectives": {"enabled": True, "schedule": {"enabled": False,
+        "work_flash_order": {"general": ["zhipu-glm-5.3-flash"]}}}})
+    assert options["schedule_window"] is None and options["flash_order"] == FLASH
+
+
+def test_schedule_window_switches_general_flash_only(monkeypatch):
+    clock = frozen_clock(monkeypatch, datetime(2026, 9, 15, 10, 0, tzinfo=TZ))
+    options = resolve(SCHEDULE_ROUTING)
+    assert options["schedule_window"] == "work"
+    assert options["flash_order"]["general"] == ["zhipu-glm-5.3-flash", "cloud-deepseek-v4-flash"]
+    # 只覆盖 general；code 与 multimodal 沿用 objectives.flash_order
+    assert options["flash_order"]["code"] == FLASH["code"]
+    assert options["flash_order"]["multimodal"] == FLASH["multimodal"]
+    clock.current = datetime(2026, 9, 15, 22, 0, tzinfo=TZ)
+    options = resolve(SCHEDULE_ROUTING)
+    assert options["schedule_window"] == "off_hours"
+    assert options["flash_order"]["general"] == ["cloud-deepseek-v4-flash", "zhipu-glm-5.3-flash"]
+
+
+def test_schedule_window_boundaries_days_and_timezone():
+    schedule = {"enabled": True, "timezone": "Asia/Shanghai", "work_windows": [
+        {"days": ["MO", "TU", "WE", "TH", "FR"], "ranges": ["09:00-12:00", "14:00-18:00"]}]}
+    for hour, minute, expected in [(8, 59, False), (9, 0, True), (11, 59, True), (12, 0, False),
+                                   (13, 59, False), (14, 0, True), (17, 59, True), (18, 0, False),
+                                   (23, 59, False)]:
+        assert in_work_window(schedule, datetime(2026, 9, 15, hour, minute, tzinfo=TZ)) is expected
+    assert in_work_window(schedule, datetime(2026, 9, 14, 9, 0, tzinfo=TZ)) is True
+    for day in (19, 20):
+        assert in_work_window(schedule, datetime(2026, 9, day, 10, 0, tzinfo=TZ)) is False
+    weekend = {"enabled": True, "timezone": "Asia/Shanghai",
+               "work_windows": [{"days": ["SA", "SU"], "ranges": ["10:00-12:00"]}]}
+    assert in_work_window(weekend, datetime(2026, 9, 19, 11, 0, tzinfo=TZ)) is True
+    assert in_work_window(weekend, datetime(2026, 9, 19, 13, 0, tzinfo=TZ)) is False
+    # 时区敏感：同一 UTC 时刻，北京落在窗内而 UTC 落在窗外
+    moment = datetime(2026, 9, 15, 2, 0, tzinfo=ZoneInfo("UTC"))
+    assert in_work_window(schedule, moment) is True
+    assert in_work_window({**schedule, "timezone": "UTC"}, moment) is False
+    assert in_work_window({**schedule, "enabled": False}, moment) is None
+
+
+def test_schedule_validation_rejects_invalid_configuration():
+    base = {"enabled": True, "mode": "efficiency",
+            "flash_order": {"general": ["a"], "code": ["a"], "multimodal": ["a"]},
+            "quality_order": {"general": ["a"], "code": ["a"], "multimodal": ["a"]}}
+    validate({**base, "schedule": {"enabled": True,
+        "work_windows": [{"days": ["MO"], "ranges": ["09:00-12:00"]}],
+        "work_flash_order": {"general": ["a", "b"]}, "off_hours_flash_order": {}}})
+    for patch in [
+            {"schedule": {"enabled": True, "bogus": 1}},
+            {"schedule": {"enabled": "yes"}},
+            {"schedule": {"enabled": True, "timezone": "Mars/Olympus"}},
+            {"schedule": {"enabled": True, "timezone": "   "}},
+            {"schedule": {"enabled": True, "work_windows": []}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["FUNDAY"], "ranges": ["09:00-12:00"]}]}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["MO", "MO"], "ranges": ["09:00-12:00"]}]}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["18:00-09:00"]}]}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["9am-6pm"]}]}},
+            {"schedule": {"enabled": True, "work_flash_order": {"video": ["a"]}}},
+            {"schedule": {"enabled": True, "work_flash_order": {"general": []}}},
+            {"schedule": {"enabled": True, "work_flash_order": {"general": ["a", "a"]}}},
+            {"schedule_window": "work"}]:
+        with pytest.raises(ValueError):
+            validate({**base, **patch})
+
+
+def test_schedule_partial_override_merge_semantics():
+    from ai_router.routing_modes import settings_value
+    schedule = settings_value({"objectives": {"enabled": True, "schedule": {
+        "enabled": True, "timezone": "UTC", "work_flash_order": {"general": ["g1", "d1"]}}}})["schedule"]
+    assert schedule["timezone"] == "UTC"
+    assert schedule["work_flash_order"] == {"general": ["g1", "d1"]}
+    assert schedule["off_hours_flash_order"] == {}
+    # 未提供的键保留默认：默认工作窗口仍在
+    assert schedule["work_windows"][0]["days"] == ["MO", "TU", "WE", "TH", "FR"]
+
+
+def test_schedule_window_selects_cloud_flash_endpoint(tmp_path, monkeypatch):
+    clock = frozen_clock(monkeypatch, datetime(2026, 9, 15, 10, 0, tzinfo=TZ))
+    policy, registry, _ = setup(tmp_path, "cost")
+    local = {e.id for e in registry.endpoints if not e.cloud}
+    decision = run(request(policy, resolve(SCHEDULE_ROUTING), excluded_endpoint_ids=local))
+    assert decision.endpoint.id == "zhipu-glm-5.3-flash" and decision.reason == "cost_flash_fallback"
+    clock.current = datetime(2026, 9, 15, 22, 0, tzinfo=TZ)
+    decision = run(request(policy, resolve(SCHEDULE_ROUTING), excluded_endpoint_ids=local))
+    assert decision.endpoint.id == "cloud-deepseek-v4-flash"

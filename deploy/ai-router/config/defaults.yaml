@@ -110,6 +110,26 @@ routing:
     context: 0.10
     cost: 0.05
     locality: 0.05
+  # 时段策略：按本地时区在工作时段 / 非工作时段切换云端 Flash 首选模型。
+  # enabled: false 不改变任何现有行为；打开后，命中 work_windows 的请求应用
+  # work_flash_order，其余时间应用 off_hours_flash_order。
+  # 两个 order 都是"部分覆盖"：只影响列出的 group，未列出的 group 沿用
+  # objectives.flash_order。multimodal 未列出，因为图片请求不派发给 DeepSeek。
+  objectives:
+    schedule:
+      enabled: false
+      timezone: Asia/Shanghai
+      work_windows:
+        - days: [MO, TU, WE, TH, FR]
+          ranges: ["09:00-12:00", "14:00-18:00"]
+      work_flash_order:
+        general:
+          - zhipu-glm-5.3-flash
+          - cloud-deepseek-v4-flash
+      off_hours_flash_order:
+        general:
+          - cloud-deepseek-v4-flash
+          - zhipu-glm-5.3-flash
 
 affinity:
   ttl_seconds: 86400
