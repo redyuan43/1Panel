@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from .instance_status import INSTANCE_HEARTBEAT_SECONDS
+from .instance_status import (
+    INSTANCE_HEARTBEAT_SECONDS,
+    INSTANCE_STALE_SECONDS,
+)
 
 import asyncio
 import os
@@ -414,6 +417,62 @@ class RouterRuntime:
         await self.store.delete(
             self._draining_deployment_key(deployment_id)
         )
+
+    async def set_manual_deployment_drain(
+        self,
+        deployment_id: str,
+        *,
+        source: str,
+    ) -> dict[str, Any]:
+        key = self._draining_deployment_key(deployment_id)
+        current = await self.store.get_json(key)
+        if isinstance(current, dict) and current.get("mode") == "manual":
+            return current
+        marker = {
+            "deployment_id": deployment_id,
+            "mode": "manual",
+            "source": source,
+            "created_at": time.time(),
+        }
+        await self.store.set_json(key, marker)
+        return marker
+
+    async def deployment_activity(
+        self,
+        deployment_id: str,
+    ) -> list[dict[str, Any]]:
+        now = time.time()
+        active: list[dict[str, Any]] = []
+        for state in await self.instance_states():
+            updated_at = state.get("updated_at")
+            age = (
+                now - float(updated_at)
+                if isinstance(updated_at, (int, float))
+                and not isinstance(updated_at, bool)
+                else None
+            )
+            if (
+                age is None
+                or age < 0
+                or age > INSTANCE_STALE_SECONDS
+            ):
+                continue
+            instance_id = str(state.get("instance_id", ""))
+            for request in state.get("active_requests", []):
+                if (
+                    not isinstance(request, dict)
+                    or request.get("deployment_id") != deployment_id
+                ):
+                    continue
+                active.append(
+                    {
+                        "instance_id": instance_id,
+                        "request_id": request.get("request_id"),
+                        "conversation_id": request.get("conversation_id"),
+                        "started_at": request.get("started_at"),
+                    }
+                )
+        return active
 
     async def record_draining_busy(
         self,

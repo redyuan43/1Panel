@@ -119,3 +119,124 @@ def test_workbuddy_image_tools_stream_output_limit(
         assert trace["endpoint_id"] == endpoint_id
         assert ("output_token_limit" not in trace["request"]["required_capabilities"]) == advisory
     asyncio.run(runtime.close())
+
+
+def test_nonstream_empty_assistant_response_is_502_and_not_persisted(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "test-internal")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "test-legacy")
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH", str(tmp_path / "traces.sqlite3")
+    )
+    monkeypatch.setenv("AI_ROUTER_TRAINING_ENABLED", "false")
+    settings = Settings(ROOT / "config/defaults.yaml", tmp_path / "settings.yaml")
+    settings.write_runtime(
+        {
+            "identity": {"enabled": True},
+            "routing": {"prompt_directives": {"enabled": True}},
+        }
+    )
+    source = Registry(ROOT / "config/registry.yaml")
+    endpoint = replace(
+        source.by_id("codex-pro-gpt-6-astra"),
+        enabled=True,
+        cloud=False,
+        backend_type="openai",
+        api_base="http://upstream/v1",
+        backend_api_key_env="AI_ROUTER_LITELLM_MASTER_KEY",
+    )
+    registry = source.with_endpoints([endpoint])
+    runtime = build_runtime(
+        settings=settings,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    asyncio.run(runtime.health.client.aclose())
+    runtime.health = _Health(
+        EndpointStatus(
+            endpoint_id=endpoint.id,
+            healthy=True,
+            checked_at=time.time(),
+            eligible_context_tokens=endpoint.safe_context_tokens,
+            load_headroom=1,
+        )
+    )
+    runtime.policy = RoutingPolicy(registry, settings, runtime.health)
+    asyncio.run(
+        runtime.clients.create_account(
+            {
+                "id": "workbuddy-public",
+                "name": "WorkBuddy",
+                "enabled": True,
+                "models": ["siyuan/auto", endpoint.public_model],
+                "rpm_limit": 120,
+                "tpm_limit": 1000000,
+                "max_parallel_requests": 2,
+                "disclosure_mode": "internal",
+            },
+            allowed_models={"siyuan/auto", endpoint.public_model},
+            public_model_id="siyuan/auto",
+        )
+    )
+    _, secret = asyncio.run(
+        runtime.clients.create_key("workbuddy-public", "test")
+    )
+
+    async def upstream(_request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "empty",
+                "object": "chat.completion",
+                "model": endpoint.provider_model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                },
+            },
+        )
+
+    asyncio.run(runtime.internal_client.aclose())
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer " + secret},
+            json={
+                "model": endpoint.public_model,
+                "messages": [
+                    {"role": "user", "content": "请回答。"}
+                ],
+                "stream": False,
+            },
+        )
+    assert response.status_code == 502, response.text
+    assert response.json()["error"]["code"] == "invalid_upstream_response"
+    trace = asyncio.run(runtime.route_traces.get(response.headers["x-request-id"]))
+    assert trace["status"] == "failed"
+    assert trace["observation"]["output_integrity"] == {
+        "content_chars": 0,
+        "reasoning_chars": 0,
+        "refusal_chars": 0,
+        "tool_call_count": 0,
+        "finish_reason": "stop",
+        "completion_tokens": 2,
+        "usage_complete": True,
+        "effective": False,
+        "public_effective": False,
+    }
+    asyncio.run(runtime.close())

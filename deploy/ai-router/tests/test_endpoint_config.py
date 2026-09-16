@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import time
 
+import httpx
 import pytest
 import yaml
 from cryptography.fernet import Fernet
@@ -237,9 +239,9 @@ class StaticHealth:
             item.id: EndpointStatus(
                 endpoint_id=item.id,
                 healthy=True,
-                checked_at=1,
+                checked_at=time.time(),
                 eligible_context_tokens=item.safe_context_tokens,
-                detail={},
+                detail=self._detail(item),
             )
             for item in endpoints
         }
@@ -248,10 +250,22 @@ class StaticHealth:
         return EndpointStatus(
             endpoint_id=endpoint.id,
             healthy=True,
-            checked_at=1,
+            checked_at=time.time(),
             eligible_context_tokens=endpoint.safe_context_tokens,
-            detail={},
+            detail=self._detail(endpoint),
         )
+
+    @staticmethod
+    def _detail(endpoint):
+        if not endpoint.metadata.get("lmcache_http_url"):
+            return {}
+        return {
+            "lmcache": {
+                "connector_active": True,
+                "registered_count": 4,
+                "expected_registrations": 4,
+            }
+        }
 
     async def in_cooldown(self, _endpoint_id):
         return False
@@ -343,6 +357,283 @@ def test_control_actions_sync_two_runtimes_and_hide_disabled_model(
     assert explicit.json()["error"]["code"] == "endpoint_disabled"
     run(first.close())
     run(second.close())
+
+
+def test_control_manual_drain_is_idempotent_and_blocks_new_requests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = InMemoryStateStore()
+    registry = Registry(ROOT / "config" / "registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(tmp_path / "route-traces.sqlite3"),
+    )
+    runtime = build_runtime(
+        settings=Settings(
+            ROOT / "config" / "defaults.yaml",
+            tmp_path / "settings.yaml",
+        ),
+        registry=registry,
+        store=store,
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = StaticHealth()
+    runtime.policy.health = runtime.health
+    endpoint_id = "ai-qwen38-27b"
+    public_model = registry.by_id(endpoint_id).public_model
+    run(
+        store.set_json(
+            "router:instance-state:test-router",
+            {
+                "instance_id": "test-router",
+                "status": "running",
+                "updated_at": time.time(),
+                "active_requests": [
+                    {
+                        "request_id": "active-request",
+                        "deployment_id": endpoint_id,
+                        "started_at": time.time(),
+                    }
+                ],
+            },
+        )
+    )
+    headers = {"Authorization": "Bearer admin-key"}
+
+    with TestClient(create_control_app(runtime)) as control:
+        first = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/drain",
+            headers=headers,
+            json={},
+        )
+        second = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/drain",
+            headers=headers,
+            json={},
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        assert first.json()["maintenance"]["active_request_count"] == 1
+        assert second.json()["maintenance"]["draining"] is True
+
+    with TestClient(create_api_app(runtime)) as api:
+        blocked = api.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": public_model,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+    assert blocked.status_code == 503
+    assert blocked.json()["error"]["code"] == "endpoint_draining"
+
+    with TestClient(create_control_app(runtime)) as control:
+        resumed = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/resume",
+            headers=headers,
+            json={},
+        )
+        repeated = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/resume",
+            headers=headers,
+            json={},
+        )
+        assert resumed.status_code == 200
+        assert resumed.json()["maintenance"]["draining"] is False
+        assert repeated.status_code == 200
+    run(runtime.close())
+
+
+def test_manual_drain_race_is_rechecked_before_upstream_dispatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store = InMemoryStateStore()
+    registry = Registry(ROOT / "config/registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(tmp_path / "route-traces.sqlite3"),
+    )
+    runtime = build_runtime(
+        settings=Settings(
+            ROOT / "config/defaults.yaml",
+            tmp_path / "settings.yaml",
+        ),
+        registry=registry,
+        store=store,
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = StaticHealth()
+    runtime.policy.health = runtime.health
+    endpoint_id = "ai-qwen38-27b"
+    endpoint = registry.by_id(endpoint_id)
+    dispatched = False
+
+    async def upstream(_request):
+        nonlocal dispatched
+        dispatched = True
+        return httpx.Response(200, json={})
+
+    run(runtime.internal_client.aclose())
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    original_track = runtime.track_request_routed
+
+    async def track_and_drain(*args, **kwargs):
+        await original_track(*args, **kwargs)
+        await runtime.set_manual_deployment_drain(
+            endpoint_id,
+            source="race-test",
+        )
+
+    runtime.track_request_routed = track_and_drain
+    with TestClient(create_api_app(runtime)) as api:
+        response = api.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": endpoint.public_model,
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "endpoint_draining"
+    assert dispatched is False
+    run(runtime.close())
+
+
+def test_control_resume_requires_healthy_endpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class UnhealthyHealth(StaticHealth):
+        async def status(self, endpoint, **_kwargs):
+            return EndpointStatus(
+                endpoint_id=endpoint.id,
+                healthy=False,
+                checked_at=time.time(),
+                eligible_context_tokens=0,
+                detail={"reason": "test-unhealthy"},
+            )
+
+    store = InMemoryStateStore()
+    registry = Registry(ROOT / "config/registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(tmp_path / "route-traces.sqlite3"),
+    )
+    runtime = build_runtime(
+        settings=Settings(
+            ROOT / "config/defaults.yaml",
+            tmp_path / "settings.yaml",
+        ),
+        registry=registry,
+        store=store,
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = UnhealthyHealth()
+    runtime.policy.health = runtime.health
+    endpoint_id = "ai-qwen38-27b"
+    headers = {"Authorization": "Bearer admin-key"}
+    with TestClient(create_control_app(runtime)) as control:
+        drained = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/drain",
+            headers=headers,
+            json={},
+        )
+        resumed = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/resume",
+            headers=headers,
+            json={},
+        )
+    assert drained.status_code == 200
+    assert resumed.status_code == 409
+    assert resumed.json()["error"]["code"] == "endpoint_resume_unhealthy"
+    marker = run(runtime.draining_marker(endpoint_id))
+    assert marker is not None
+    assert marker["mode"] == "manual"
+    run(runtime.close())
+
+
+def test_control_resume_requires_all_lmcache_workers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class PartialLMCacheHealth(StaticHealth):
+        @staticmethod
+        def _detail(_endpoint):
+            return {
+                "lmcache": {
+                    "connector_active": False,
+                    "registered_count": 2,
+                    "expected_registrations": 4,
+                }
+            }
+
+    store = InMemoryStateStore()
+    registry = Registry(ROOT / "config/registry.yaml")
+    monkeypatch.setenv("AI_ROUTER_ADMIN_KEY", "admin-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_AUDIT_PATH", str(tmp_path / "audit.jsonl"))
+    monkeypatch.setenv(
+        "AI_ROUTER_ROUTE_TRACE_DB_PATH",
+        str(tmp_path / "route-traces.sqlite3"),
+    )
+    runtime = build_runtime(
+        settings=Settings(
+            ROOT / "config/defaults.yaml",
+            tmp_path / "settings.yaml",
+        ),
+        registry=registry,
+        store=store,
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = PartialLMCacheHealth()
+    runtime.policy.health = runtime.health
+    endpoint_id = "ai-qwen38-27b"
+    headers = {"Authorization": "Bearer admin-key"}
+    with TestClient(create_control_app(runtime)) as control:
+        drained = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/drain",
+            headers=headers,
+            json={},
+        )
+        resumed = control.post(
+            f"/api/endpoints/{endpoint_id}/actions/resume",
+            headers=headers,
+            json={},
+        )
+    assert drained.status_code == 200
+    assert resumed.status_code == 409
+    assert resumed.json()["error"]["code"] == "endpoint_resume_unhealthy"
+    assert resumed.json()["error"]["details"] == {
+        "endpoint_healthy": True,
+        "lmcache_required": True,
+        "lmcache_ready": False,
+        "lmcache_registered_count": 2,
+        "lmcache_expected_registrations": 4,
+    }
+    marker = run(runtime.draining_marker(endpoint_id))
+    assert marker is not None
+    run(runtime.close())
 
 
 def test_control_draft_validate_and_activate(

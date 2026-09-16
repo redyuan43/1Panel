@@ -49,6 +49,7 @@ from .history import (
     normalize_history_for_provider,
     persist_history,
     provider_family,
+    response_output_observation,
 )
 from .identity import (
     IdentityProfile,
@@ -1544,6 +1545,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     prompt_tokens=decision.prompt_tokens,
                     output_reserve_tokens=decision.output_reserve_tokens,
                 )
+                await _reject_manual_endpoint_drain(
+                    current,
+                    decision.endpoint.id,
+                )
                 cache_snapshot = await _prefix_cache_snapshot(
                     current,
                     decision,
@@ -1804,13 +1809,43 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         payload,
                         model=decision.endpoint.public_model,
                     )
-                await _map_response_id(current, payload, state)
                 public_payload, redactions = sanitize_payload(
                     payload,
                     identity,
                     identifiers,
                 )
                 decision.response_redactions = redactions
+                private_output = response_output_observation(
+                    private_payload,
+                    api_kind,
+                )
+                public_output = response_output_observation(
+                    public_payload,
+                    api_kind,
+                )
+                output_integrity = {
+                    **private_output,
+                    "public_effective": bool(public_output["effective"]),
+                }
+                completion_tokens = token_count(
+                    raw_usage.get(
+                        "completion_tokens",
+                        raw_usage.get("output_tokens"),
+                    )
+                )
+                output_integrity["completion_tokens"] = completion_tokens
+                output_integrity["usage_complete"] = (
+                    completion_tokens is not None
+                )
+                _record_output_integrity(decision, output_integrity)
+                if not public_output["effective"]:
+                    raise RouterError(
+                        "the model completed without effective output",
+                        status_code=502,
+                        code="invalid_upstream_response",
+                        details=output_integrity,
+                    )
+                await _map_response_id(current, payload, state)
                 await persist_history(
                     current.compactor,
                     current.conversations,
@@ -3193,6 +3228,17 @@ async def _filter_restart_draining_deployments(
     if not markers:
         return True
 
+    manual_markers = {
+        deployment_id: marker
+        for deployment_id, marker in markers.items()
+        if marker.get("mode") == "manual"
+    }
+    if manual_markers:
+        raise _endpoint_draining_error(
+            endpoint.id,
+            sorted(manual_markers),
+        )
+
     status = await current.health.status(endpoint, force_refresh=True)
     blocked: set[str] = set()
     for deployment_id, marker in markers.items():
@@ -3242,6 +3288,31 @@ async def _filter_restart_draining_deployments(
 
     excluded_endpoints.add(endpoint.id)
     return False
+
+
+async def _reject_manual_endpoint_drain(
+    current: RouterRuntime,
+    endpoint_id: str,
+) -> None:
+    marker = await current.draining_marker(endpoint_id)
+    if isinstance(marker, dict) and marker.get("mode") == "manual":
+        raise _endpoint_draining_error(endpoint_id, [endpoint_id])
+
+
+def _endpoint_draining_error(
+    endpoint_id: str,
+    deployment_ids: list[str],
+) -> RouterError:
+    return RouterError(
+        "the selected model endpoint is draining for maintenance",
+        status_code=503,
+        code="endpoint_draining",
+        headers={"Retry-After": "5"},
+        details={
+            "endpoint_id": endpoint_id,
+            "deployment_ids": deployment_ids,
+        },
+    )
 
 
 def _deployment_available(
@@ -4482,6 +4553,45 @@ async def _map_response_id(
         )
 
 
+def _record_output_integrity(
+    decision: RouteDecision,
+    observation: dict[str, Any],
+) -> None:
+    if decision.trace is None:
+        return
+    decision.trace.payload.setdefault("observation", {})[
+        "output_integrity"
+    ] = copy.deepcopy(observation)
+
+
+def _stream_error_event(
+    api_kind: str,
+    *,
+    code: str,
+    message: str,
+) -> bytes:
+    payload: dict[str, Any]
+    if api_kind == "responses":
+        payload = {
+            "type": "error",
+            "code": code,
+            "message": message,
+        }
+    else:
+        payload = {
+            "error": {
+                "message": message,
+                "type": "server_error",
+                "code": code,
+            }
+        }
+    return (
+        "data: "
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + "\n\n"
+    ).encode("utf-8")
+
+
 async def _stream_response(
     current: RouterRuntime,
     upstream: httpx.Response,
@@ -4527,6 +4637,10 @@ async def _stream_response(
     )
     status_code = upstream.status_code
     completed = False
+    invalid_output = False
+    transport_interrupted = False
+    pending_public_chunks: list[bytes] = []
+    effective_output_exposed = False
     try:
         source = (
             chat_stream_to_responses(
@@ -4550,11 +4664,22 @@ async def _stream_response(
                 output_clock.feed(public_chunk)
                 if decision.trace:
                     decision.trace.payload.setdefault("observation", {}).update(output_clock.values)
-                yield public_chunk
+                if effective_output_exposed:
+                    yield public_chunk
+                else:
+                    pending_public_chunks.append(public_chunk)
+                    if accumulator.has_effective_output():
+                        effective_output_exposed = True
+                        for pending_chunk in pending_public_chunks:
+                            yield pending_chunk
+                        pending_public_chunks.clear()
                 if accumulator.completed:
                     batch_completed = True
             if batch_completed:
-                completed = True
+                if accumulator.has_effective_output():
+                    completed = True
+                else:
+                    invalid_output = True
                 break
         else:
             trailing = b"".join(usage_filter.finish()) if usage_filter else b""
@@ -4563,13 +4688,75 @@ async def _stream_response(
                 output_clock.feed(public_chunk)
                 if decision.trace:
                     decision.trace.payload.setdefault("observation", {}).update(output_clock.values)
-                yield public_chunk
+                if effective_output_exposed:
+                    yield public_chunk
+                else:
+                    pending_public_chunks.append(public_chunk)
+                    if accumulator.has_effective_output():
+                        effective_output_exposed = True
+                        for pending_chunk in pending_public_chunks:
+                            yield pending_chunk
+                        pending_public_chunks.clear()
             # A clean EOF still needs a protocol terminal marker. Cancellation
             # or transport failure must never promote partial usage to success.
-            completed = bool(accumulator.terminal or private_accumulator.terminal)
+            terminal = bool(
+                accumulator.terminal or private_accumulator.terminal
+            )
+            if terminal and accumulator.has_effective_output():
+                completed = True
+            elif terminal:
+                invalid_output = True
+            else:
+                transport_interrupted = True
+        if invalid_output:
+            pending_public_chunks.clear()
+            error_event = _stream_error_event(
+                api_kind,
+                code="invalid_upstream_response",
+                message="the model completed without effective output",
+            )
+            accumulator.feed(error_event)
+            yield error_event
+        elif transport_interrupted:
+            pending_public_chunks.clear()
+            error_event = _stream_error_event(
+                api_kind,
+                code="stream_interrupted",
+                message="the model stream ended before completion",
+            )
+            accumulator.feed(error_event)
+            yield error_event
+    except httpx.RequestError:
+        transport_interrupted = True
+        pending_public_chunks.clear()
+        error_event = _stream_error_event(
+            api_kind,
+            code="stream_interrupted",
+            message="the model stream ended before completion",
+        )
+        accumulator.feed(error_event)
+        yield error_event
+    except RouterError as exc:
+        if exc.code != "invalid_upstream_response":
+            raise
+        invalid_output = True
+        pending_public_chunks.clear()
+        error_event = _stream_error_event(
+            api_kind,
+            code="invalid_upstream_response",
+            message="the model returned an invalid stream",
+        )
+        accumulator.feed(error_event)
+        yield error_event
     finally:
         accumulator.finish()
         private_accumulator.finish()
+        output_integrity = private_accumulator.output_observation()
+        output_integrity["public_effective"] = bool(
+            accumulator.has_effective_output()
+        )
+        output_integrity["transport_interrupted"] = transport_interrupted
+        _record_output_integrity(decision, output_integrity)
 
         async def finalize_stream() -> None:
             try:
@@ -4618,34 +4805,55 @@ async def _stream_response(
                             )
                         )
                 elif current.training is not None:
+                    failure_status = 502 if invalid_output else 499
+                    failure_code = (
+                        "invalid_upstream_response"
+                        if invalid_output
+                        else "stream_interrupted"
+                    )
+                    failure_message = (
+                        "the model completed without effective output"
+                        if invalid_output
+                        else "stream ended before a complete response"
+                    )
                     await asyncio.shield(
                         current.training.fail(
                             training_token,
-                            status_code=499,
+                            status_code=failure_status,
                             error={
-                                "type": "stream_interrupted",
-                                "message": (
-                                    "stream ended before a complete response"
-                                ),
+                                "type": failure_code,
+                                "message": failure_message,
                             },
-                            interrupted=True,
+                            interrupted=not invalid_output,
                         )
                     )
                 if not completed and decision.trace:
+                    failure_status = 502 if invalid_output else 499
+                    failure_code = (
+                        "invalid_upstream_response"
+                        if invalid_output
+                        else "stream_interrupted"
+                    )
+                    failure_message = (
+                        "the model completed without effective output"
+                        if invalid_output
+                        else "stream ended before a complete response"
+                    )
                     decision.trace.record(
                         decision.attempts,
                         "upstream_request",
                         "error",
-                        reason="stream_interrupted",
-                        evidence={"status_code": 499},
+                        reason=failure_code,
+                        evidence={
+                            "status_code": failure_status,
+                            **output_integrity,
+                        },
                     )
                     decision.trace.fail(
-                        status_code=499,
-                        code="stream_interrupted",
-                        message=(
-                            "stream ended before a complete response"
-                        ),
-                        interrupted=True,
+                        status_code=failure_status,
+                        code=failure_code,
+                        message=failure_message,
+                        interrupted=not invalid_output,
                         attempt=decision.attempts,
                     )
                     await _save_request_trace(
@@ -4660,10 +4868,19 @@ async def _stream_response(
                     key_id=key_id,
                     conversation_id=conversation_id,
                     decision=decision,
-                    status_code=status_code if completed else 499,
+                    status_code=(
+                        status_code
+                        if completed
+                        else 502
+                        if invalid_output
+                        else 499
+                    ),
                     started_at=started_at,
                     usage=adapter_usage if api_kind == "responses" and decision.native_or_adapter == "adapter" else private_accumulator.usage,
-                    usage_complete=not private_accumulator.usage_incomplete,
+                    usage_complete=(
+                        private_accumulator.usage is not None
+                        and not private_accumulator.usage_incomplete
+                    ),
                     cache_snapshot=cache_snapshot,
                 )
             finally:

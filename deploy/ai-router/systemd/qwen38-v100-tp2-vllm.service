@@ -4,6 +4,8 @@ After=network-online.target qwen38-v100-tp2-lmcache.service
 Requires=qwen38-v100-tp2-lmcache.service
 BindsTo=qwen38-v100-tp2-lmcache.service
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=2
 
 [Service]
 Type=simple

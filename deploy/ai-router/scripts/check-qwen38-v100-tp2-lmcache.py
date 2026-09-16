@@ -24,17 +24,111 @@ from ai_router.lmcache_runtime import (  # noqa: E402
 )
 
 
+def unknown_unregister_state_path() -> Path:
+    configured = os.environ.get(
+        "LMCACHE_UNKNOWN_UNREGISTER_STATE_PATH",
+        "",
+    ).strip()
+    if configured:
+        return Path(configured).expanduser()
+    return (
+        Path.home()
+        / ".local/state/qwen38-vllm-deploy"
+        / "lmcache-unknown-unregister.json"
+    )
+
+
+def load_unknown_unregisters(path: Path) -> set[int]:
+    if not path.exists():
+        return set()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        pending = value.get("pending_instance_ids")
+        if value.get("version") != 1 or not isinstance(pending, list):
+            raise ValueError("invalid state schema")
+        return {int(item) for item in pending}
+    except (OSError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"cannot read LMCache unknown-operation state {path}: {exc}"
+        ) from exc
+
+
+def save_unknown_unregisters(path: Path, pending: set[int]) -> None:
+    if not pending:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "pending_instance_ids": sorted(pending),
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    temporary.chmod(0o600)
+    os.replace(temporary, path)
+
+
+def reconcile_unknown_unregister(
+    status_url: str,
+    instance_id: int,
+    source_error: Exception,
+) -> None:
+    try:
+        with urllib.request.urlopen(status_url, timeout=5) as response:
+            reconciled_status = json.load(response)
+    except (
+        OSError,
+        ValueError,
+        urllib.error.URLError,
+    ) as status_exc:
+        raise RuntimeError(
+            "LMCache unregister outcome is unknown for GPU "
+            f"instance {instance_id}; status reconciliation failed with "
+            f"{type(status_exc).__name__}: {status_exc}; refusing to retry"
+        ) from source_error
+    remaining = {
+        int(value)
+        for value in reconciled_status.get("registered_gpu_ids", [])
+    }
+    if instance_id in remaining:
+        raise RuntimeError(
+            "LMCache unregister outcome is unknown for GPU "
+            f"instance {instance_id}; it remains registered; refusing to "
+            "retry"
+        ) from source_error
+
+
 def unregister_stale_gpu_contexts(
     settings: dict[str, object],
-) -> list[int]:
+) -> tuple[list[int], list[int]]:
     status_url = str(settings["http_url"]).rstrip("/") + "/status"
     with urllib.request.urlopen(status_url, timeout=5) as response:
         payload = json.load(response)
     instance_ids = [
         int(value) for value in payload.get("registered_gpu_ids", [])
     ]
+    state_path = unknown_unregister_state_path()
+    pending = load_unknown_unregisters(state_path)
+    active_instance_ids = set(instance_ids)
+    if pending - active_instance_ids:
+        pending &= active_instance_ids
+        save_unknown_unregisters(state_path, pending)
+    blocked = sorted(pending & active_instance_ids)
+    if blocked:
+        raise RuntimeError(
+            "LMCache unregister outcome remains unknown for GPU instances "
+            f"{blocked}; refusing to submit the operation again; inspect "
+            f"{state_path} after resolving LMCache state"
+        )
     if not instance_ids:
-        return []
+        return [], []
 
     container_name = os.environ.get(
         "CONTAINER_NAME",
@@ -59,16 +153,31 @@ def unregister_stale_gpu_contexts(
 
     context = zmq.Context()
     client = MessageQueueClient(str(settings["server_url"]), context)
+    unregistered: list[int] = []
+    reconciled_unknown: list[int] = []
     try:
         for instance_id in instance_ids:
-            client.submit_request(
-                RequestType.UNREGISTER_KV_CACHE,
-                [instance_id],
-            ).result(timeout=30)
+            pending.add(instance_id)
+            save_unknown_unregisters(state_path, pending)
+            try:
+                client.submit_request(
+                    RequestType.UNREGISTER_KV_CACHE,
+                    [instance_id],
+                ).result(timeout=30)
+                unregistered.append(instance_id)
+            except Exception as exc:
+                reconcile_unknown_unregister(
+                    status_url,
+                    instance_id,
+                    exc,
+                )
+                reconciled_unknown.append(instance_id)
+            pending.discard(instance_id)
+            save_unknown_unregisters(state_path, pending)
     finally:
         client.close()
         context.term()
-    return instance_ids
+    return unregistered, reconciled_unknown
 
 
 def wait_for_gpu_memory(deadline: float) -> list[dict[str, int | str]]:
@@ -173,6 +282,7 @@ def main() -> int:
     deadline = time.monotonic() + args.timeout
     gpu_memory: list[dict[str, int | str]] = []
     unregistered_instances: list[int] = []
+    reconciled_unknown_instances: list[int] = []
     if args.require_vllm_guards:
         if os.environ.get("DISABLE_CUSTOM_ALL_REDUCE") != "1":
             raise ValueError(
@@ -181,9 +291,10 @@ def main() -> int:
         if os.environ.get("NCCL_P2P_DISABLE") != "1":
             raise ValueError("LMCache requires NCCL_P2P_DISABLE=1")
         if settings["enabled"]:
-            unregistered_instances = unregister_stale_gpu_contexts(
-                settings
-            )
+            (
+                unregistered_instances,
+                reconciled_unknown_instances,
+            ) = unregister_stale_gpu_contexts(settings)
         gpu_memory = wait_for_gpu_memory(deadline)
     if not settings["enabled"]:
         print(
@@ -193,6 +304,9 @@ def main() -> int:
                     "lmcache_enabled": False,
                     "gpu_memory": gpu_memory,
                     "unregistered_instances": unregistered_instances,
+                    "reconciled_unknown_instances": (
+                        reconciled_unknown_instances
+                    ),
                 },
                 separators=(",", ":"),
                 sort_keys=True,
@@ -235,6 +349,9 @@ def main() -> int:
                         "memory_total_bytes": actual_bytes,
                         "l2_adapters": 0,
                         "unregistered_instances": unregistered_instances,
+                        "reconciled_unknown_instances": (
+                            reconciled_unknown_instances
+                        ),
                     },
                     separators=(",", ":"),
                     sort_keys=True,

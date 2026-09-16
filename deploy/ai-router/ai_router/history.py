@@ -705,12 +705,116 @@ def assistant_items_from_response(
     return []
 
 
+def assistant_output_observation(
+    items: list[dict[str, Any]],
+    *,
+    finish_reason: str | None = None,
+) -> dict[str, Any]:
+    """Return privacy-safe counters for effective assistant output."""
+    content_chars = 0
+    refusal_chars = 0
+    reasoning_chars = 0
+    tool_call_count = 0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        item_type = str(item.get("type", ""))
+        if item_type == "function_call":
+            if str(item.get("name", "")).strip():
+                tool_call_count += 1
+            continue
+        if item_type == "reasoning":
+            reasoning_chars += _text_chars(
+                item.get("summary", item.get("content", item.get("text")))
+            )
+            continue
+        content_chars += _text_chars(item.get("content"))
+        refusal_chars += _text_chars(item.get("refusal"))
+        reasoning_chars += _text_chars(item.get("reasoning_content"))
+        reasoning_chars += _text_chars(item.get("reasoning"))
+        reasoning_chars += _text_chars(item.get("codex_reasoning_items"))
+        tool_calls = item.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function")
+                if isinstance(function, dict) and str(
+                    function.get("name", "")
+                ).strip():
+                    tool_call_count += 1
+    effective = any(
+        value > 0
+        for value in (
+            content_chars,
+            refusal_chars,
+            reasoning_chars,
+            tool_call_count,
+        )
+    )
+    return {
+        "effective": effective,
+        "content_chars": content_chars,
+        "refusal_chars": refusal_chars,
+        "reasoning_chars": reasoning_chars,
+        "tool_call_count": tool_call_count,
+        "finish_reason": finish_reason,
+    }
+
+
+def response_output_observation(
+    payload: bytes | None,
+    api_kind: str,
+) -> dict[str, Any]:
+    finish_reason: str | None = None
+    if payload:
+        try:
+            value = json.loads(payload)
+            if api_kind == "chat":
+                choices = value.get("choices")
+                if isinstance(choices, list) and choices:
+                    raw_reason = choices[0].get("finish_reason")
+                    if raw_reason is not None:
+                        finish_reason = str(raw_reason)
+            elif isinstance(value, dict):
+                status = value.get("status")
+                if status is not None:
+                    finish_reason = str(status)
+        except (TypeError, ValueError):
+            pass
+    return assistant_output_observation(
+        assistant_items_from_response(payload, api_kind),
+        finish_reason=finish_reason,
+    )
+
+
+def _text_chars(value: Any) -> int:
+    if isinstance(value, str):
+        return len(value.strip())
+    if isinstance(value, list):
+        return sum(_text_chars(item) for item in value)
+    if isinstance(value, dict):
+        return sum(
+            _text_chars(value.get(key))
+            for key in (
+                "text",
+                "content",
+                "output_text",
+                "refusal",
+                "summary",
+            )
+            if value.get(key) is not None
+        )
+    return 0
+
+
 class SSEAccumulator:
     def __init__(self, api_kind: str = "chat") -> None:
         self.api_kind = api_kind
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="ignore")
         self._buffer = ""
         self._text: list[str] = []
+        self._chat_refusal: list[str] = []
         self._chat_reasoning_content: list[str] = []
         self._chat_tool_calls: dict[int, dict[str, Any]] = {}
         self._chat_reasoning_items: list[dict[str, Any]] = []
@@ -722,6 +826,7 @@ class SSEAccumulator:
         self.terminal = False
         self.usage_incomplete = False
         self.completed = False
+        self.finish_reason: str | None = None
 
     def feed(self, chunk: bytes) -> None:
         self._buffer += self._decoder.decode(chunk)
@@ -736,6 +841,7 @@ class SSEAccumulator:
             if not any(
                 (
                     self._text,
+                    self._chat_refusal,
                     self._chat_reasoning_content,
                     self._chat_tool_calls,
                     self._chat_reasoning_items,
@@ -752,6 +858,8 @@ class SSEAccumulator:
                     copy.deepcopy(self._chat_tool_calls[index])
                     for index in sorted(self._chat_tool_calls)
                 ]
+            if self._chat_refusal:
+                message["refusal"] = "".join(self._chat_refusal)
             if self._chat_reasoning_items:
                 message["codex_reasoning_items"] = copy.deepcopy(
                     self._chat_reasoning_items
@@ -794,6 +902,29 @@ class SSEAccumulator:
                 }
             )
         return result
+
+    def output_observation(self) -> dict[str, Any]:
+        observation = assistant_output_observation(
+            self.assistant_items(),
+            finish_reason=self.finish_reason,
+        )
+        if isinstance(self.usage, dict):
+            completion_tokens = self.usage.get(
+                "completion_tokens",
+                self.usage.get("output_tokens"),
+            )
+            if isinstance(completion_tokens, int) and not isinstance(
+                completion_tokens,
+                bool,
+            ):
+                observation["completion_tokens"] = completion_tokens
+        observation["usage_complete"] = (
+            self.usage is not None and not self.usage_incomplete
+        )
+        return observation
+
+    def has_effective_output(self) -> bool:
+        return bool(self.output_observation()["effective"])
 
     def assistant_message(self) -> dict[str, Any] | None:
         items = self.assistant_items()
@@ -840,10 +971,13 @@ class SSEAccumulator:
         if isinstance(choices, list) and choices:
             if choices[0].get("finish_reason") is not None:
                 self.terminal = True
+                self.finish_reason = str(choices[0]["finish_reason"])
             delta = choices[0].get("delta", {})
             if isinstance(delta, dict):
                 if isinstance(delta.get("content"), str):
                     self._text.append(delta["content"])
+                if isinstance(delta.get("refusal"), str):
+                    self._chat_refusal.append(delta["refusal"])
                 if isinstance(delta.get("reasoning_content"), str):
                     self._chat_reasoning_content.append(
                         delta["reasoning_content"]
@@ -950,6 +1084,7 @@ class SSEAccumulator:
         if event_type == "response.completed":
             self.terminal = True
             self.completed = True
+            self.finish_reason = "completed"
             response = payload.get("response")
             if isinstance(response, dict):
                 output = response.get("output")

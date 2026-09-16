@@ -711,6 +711,79 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         current = _authorized_runtime(request)
         value = await _json_body(request)
         source = request.client.host if request.client else "unknown"
+        if action in {"drain", "resume"}:
+            endpoint = current.registry.by_id(endpoint_id)
+            if endpoint is None:
+                raise RouterError(
+                    f"unknown endpoint: {endpoint_id}",
+                    status_code=404,
+                    code="endpoint_not_found",
+                )
+            marker = await current.draining_marker(endpoint_id)
+            if action == "drain":
+                marker = await current.set_manual_deployment_drain(
+                    endpoint_id,
+                    source=source,
+                )
+            elif marker is not None:
+                status = await current.health.status(
+                    endpoint,
+                    force_refresh=True,
+                )
+                lmcache = status.detail.get("lmcache", {})
+                lmcache_required = bool(
+                    endpoint.metadata.get("lmcache_http_url")
+                )
+                lmcache_ready = bool(
+                    isinstance(lmcache, dict)
+                    and lmcache.get("connector_active")
+                )
+                if not status.healthy or (
+                    lmcache_required and not lmcache_ready
+                ):
+                    raise RouterError(
+                        "endpoint is not healthy enough to resume",
+                        status_code=409,
+                        code="endpoint_resume_unhealthy",
+                        details={
+                            "endpoint_healthy": status.healthy,
+                            "lmcache_required": lmcache_required,
+                            "lmcache_ready": lmcache_ready,
+                            "lmcache_registered_count": (
+                                lmcache.get("registered_count")
+                                if isinstance(lmcache, dict)
+                                else None
+                            ),
+                            "lmcache_expected_registrations": (
+                                lmcache.get("expected_registrations")
+                                if isinstance(lmcache, dict)
+                                else None
+                            ),
+                        },
+                    )
+                await current.clear_draining_marker(endpoint_id)
+                marker = None
+            active_requests = await current.deployment_activity(
+                endpoint_id
+            )
+            current.audit.write(
+                (
+                    "endpoint_maintenance_drained"
+                    if action == "drain"
+                    else "endpoint_maintenance_resumed"
+                ),
+                endpoint_id=endpoint_id,
+                active_requests=len(active_requests),
+                source=source,
+            )
+            return {
+                "maintenance": {
+                    "endpoint_id": endpoint_id,
+                    "draining": marker is not None,
+                    "active_request_count": len(active_requests),
+                    "active_requests": active_requests,
+                }
+            }
         active = await current.endpoint_configs.action(
             endpoint_id,
             action,

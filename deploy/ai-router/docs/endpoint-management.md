@@ -57,8 +57,9 @@ POST   /api/endpoints/{endpoint_id}/actions/{action}
 POST   /api/endpoints/{endpoint_id}/reset
 ```
 
-所有写请求需要管理密钥，并应携带最新的 `expected_revision`。版本不一致返回
-`409 endpoint_revision_conflict`，管理员重新加载页面后再提交。
+所有写请求需要管理密钥。配置类请求应携带最新的 `expected_revision`；版本不一致
+返回 `409 endpoint_revision_conflict`。临时维护动作 `drain` / `resume` 不修改配置
+revision，并且可幂等重复调用。
 
 可用 action：
 
@@ -67,7 +68,12 @@ enable
 disable
 auto-enable
 auto-disable
+drain
+resume
 ```
+
+`drain` 会阻止新请求进入该 endpoint，并返回两个 Router实例中仍在运行的请求
+数量；不会把请求静默切换到云模型。`resume` 只在 endpoint 健康时清除维护标记。
 
 重要审计事件包括：
 
@@ -80,5 +86,7 @@ endpoint_enabled
 endpoint_disabled
 endpoint_auto_enabled
 endpoint_auto_disabled
+endpoint_maintenance_drained
+endpoint_maintenance_resumed
 endpoint_reset
 ```

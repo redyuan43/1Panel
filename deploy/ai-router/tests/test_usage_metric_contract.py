@@ -18,6 +18,7 @@ sys.path.insert(0,str(WORK))
 from ai_router import api
 from ai_router.cache_audit import CacheAudit, metrics
 from ai_router.config import Registry
+from ai_router.history import SSEAccumulator, response_output_observation
 from ai_router.identity import IdentityProfile
 from ai_router.route_trace import DecisionTrace
 from ai_router.usage_evidence import usage_measurement, token_count
@@ -43,6 +44,30 @@ def native(**overrides):
     return item
 
 class MetricContract(unittest.TestCase):
+    def test_nonstream_output_observation_rejects_empty_success(self):
+        payload=json.dumps({'choices':[{'message':{'role':'assistant','content':''},
+                                        'finish_reason':'stop'}]}).encode()
+        self.assertEqual(response_output_observation(payload,'chat'),{
+            'effective':False,'content_chars':0,'refusal_chars':0,
+            'reasoning_chars':0,'tool_call_count':0,'finish_reason':'stop'})
+
+    def test_nonstream_output_observation_accepts_tool_call(self):
+        payload=json.dumps({'choices':[{'message':{'role':'assistant','content':None,
+            'tool_calls':[{'id':'call-1','type':'function','function':{
+                'name':'Read','arguments':'{}'}}]},'finish_reason':'tool_calls'}]}).encode()
+        observed=response_output_observation(payload,'chat')
+        self.assertTrue(observed['effective'])
+        self.assertEqual(observed['tool_call_count'],1)
+
+    def test_stream_output_observation_marks_missing_usage_incomplete(self):
+        accumulator=SSEAccumulator('chat')
+        accumulator.feed(
+            b'data: {"choices":[{"delta":{"content":"ok"},'
+            b'"finish_reason":"stop"}]}\n\n'
+        )
+        accumulator.feed(b'data: [DONE]\n\n')
+        self.assertFalse(accumulator.output_observation()['usage_complete'])
+
     def unknown(self,row,status='unknown'):
         self.assertEqual(row['cache_status'],status)
         self.assertEqual(row['cache_measurement'],'unavailable')
@@ -152,7 +177,8 @@ class BoundaryStream(httpx.AsyncByteStream):
     async def aclose(self): self.closed=True
 
 class FinalizationContract(unittest.IsolatedAsyncioTestCase):
-    async def run_stream(self,frames,*,cancel=False,api_kind='chat',adapter=False,allow_protocol_error=False):
+    async def run_stream(self,frames,*,cancel=False,api_kind='chat',adapter=False,allow_protocol_error=False,
+                         identity_enabled=False):
         stream=BoundaryStream(frames,cancel)
         upstream=httpx.Response(200,stream=stream)
         upstream.extensions['internal_cache_usage']=api_kind=='chat'
@@ -171,7 +197,12 @@ class FinalizationContract(unittest.IsolatedAsyncioTestCase):
                     client_id='synthetic',key_id='synthetic',request_id='synthetic-request',conversation_id=None,
                     decision=decision,state=None,body={'stream':True},api_kind=api_kind,training_token=None,
                     started_at=time.monotonic()-.01,cache_snapshot=None,
-                    identity=IdentityProfile.from_settings({'enabled':False}),identifiers=()): parts.append(part)
+                    identity=IdentityProfile.from_settings({
+                        'enabled':identity_enabled,'public_model_id':'siyuan/auto',
+                        'display_name_zh':'思源','display_name_en':'Siyuan',
+                        'provider_name':'test','description':'test',
+                        'identity_response':'test',
+                    }),identifiers=()): parts.append(part)
             except httpx.RemoteProtocolError:
                 protocol_error_seen=True
                 self.assertTrue(allow_protocol_error,'unexpected protocol error')
@@ -202,9 +233,11 @@ class FinalizationContract(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(adapter=adapter,finish_reason_seen=finished):
                     frames=[self.frame({'choices':[{'delta':{'content':'synthetic'},'finish_reason':'stop' if finished else None}]}),
                             self.frame({'choices':[],'usage':usage()})]
-                    public,final=await self.run_stream(frames,api_kind='responses' if adapter else 'chat',adapter=adapter,allow_protocol_error=adapter and not finished)
+                    public,final=await self.run_stream(frames,api_kind='responses' if adapter else 'chat',adapter=adapter)
                     print('eof_boundary='+json.dumps({'adapter':adapter,'finish_reason_seen':finished,'audited_status_code':final['status_code']}))
                     self.assertEqual(final['status_code'],200 if finished else 499,'adapter-generated terminal cannot prove missing upstream completion')
+                    if not finished:
+                        self.assertIn(b'stream_interrupted',public)
 
     async def test_native_responses_failed_or_incomplete_cannot_become_success_at_done(self):
         for state in ('completed','incomplete','failed'):
@@ -214,7 +247,9 @@ class FinalizationContract(unittest.IsolatedAsyncioTestCase):
                     if done: frames.append(b'data: [DONE]\n\n')
                     public,final=await self.run_stream(frames,api_kind='responses')
                     print('responses_terminal='+json.dumps({'state':state,'done':done,'audited_status_code':final['status_code']}))
-                    if state=='completed': self.assertEqual(final['status_code'],200)
+                    if state=='completed':
+                        self.assertEqual(final['status_code'],502)
+                        self.assertIn(b'invalid_upstream_response',public)
                     else: self.assertIs(final.get('usage_complete'),False,'incomplete/failed semantic state must survive trailing DONE')
 
     async def test_responses_adapter_length_finish_is_incomplete(self):
@@ -236,17 +271,50 @@ class FinalizationContract(unittest.IsolatedAsyncioTestCase):
                 self.assertIn(b'synthetic-stream-error',public,'public error frame must remain visible')
                 self.assertEqual(public.count(b'[DONE]'),1)
 
+    async def test_empty_terminal_stream_is_failed_without_done(self):
+        frames=[self.frame({'choices':[{'delta':{'role':'assistant'},'finish_reason':None}]}),
+                self.frame({'choices':[{'delta':{},'finish_reason':'stop'}]}),
+                self.frame({'choices':[],'usage':usage()}),b'data: [DONE]\n\n']
+        public,final=await self.run_stream(frames)
+        self.assertEqual(final['status_code'],502)
+        self.assertIn(b'invalid_upstream_response',public)
+        self.assertNotIn(b'[DONE]',public)
+
+    async def test_malformed_identity_stream_becomes_sse_error(self):
+        public,final=await self.run_stream(
+            [b'data: {not-json}\n\n'],identity_enabled=True)
+        self.assertEqual(final['status_code'],502)
+        self.assertIn(b'invalid_upstream_response',public)
+        self.assertNotIn(b'[DONE]',public)
+
+    async def test_tool_reasoning_and_refusal_are_effective_output(self):
+        cases=(
+            {'tool_calls':[{'index':0,'id':'call-1','type':'function',
+                            'function':{'name':'Read','arguments':'{}'}}]},
+            {'reasoning_content':'private analysis'},
+            {'refusal':'cannot comply'},
+        )
+        for delta in cases:
+            with self.subTest(delta=delta):
+                frames=[self.frame({'choices':[{'delta':delta,'finish_reason':None}]}),
+                        self.frame({'choices':[{'delta':{},'finish_reason':'stop'}]}),
+                        self.frame({'choices':[],'usage':usage()}),b'data: [DONE]\n\n']
+                public,final=await self.run_stream(frames)
+                self.assertEqual(final['status_code'],200)
+                self.assertIn(b'[DONE]',public)
+
     async def test_responses_adapter_rejects_chat_error_before_synthetic_completion(self):
         for error in ({'error':{'message':'synthetic-stream-error'}},
                       {'type':'error','message':'synthetic-stream-error'}):
             with self.subTest(error_type=error.get('type','envelope')):
                 frames=[self.frame({'choices':[{'delta':{'content':'synthetic'},'finish_reason':'stop'}]}),
                         self.frame({'choices':[],'usage':usage()}),self.frame(error),b'data: [DONE]\n\n']
-                public,final=await self.run_stream(frames,api_kind='responses',adapter=True,allow_protocol_error=True)
+                public,final=await self.run_stream(frames,api_kind='responses',adapter=True)
                 self.assertEqual(final['status_code'],499,'adapter error must not produce a successful audit')
                 self.assertEqual(final['usage'],usage(),'raw usage observed before error remains available for diagnosis')
                 self.assertNotIn(b'response.completed',public,'adapter must not synthesize successful completion')
                 self.assertNotIn(b'[DONE]',public,'adapter must not synthesize normal DONE after upstream error')
+                self.assertIn(b'stream_interrupted',public)
 
     async def test_responses_adapter_preserves_raw_missing_and_invalid_input(self):
         for value in ({'prompt_tokens_details':{'cached_tokens':0}},usage(100,75),usage(-1,0)):
