@@ -371,12 +371,19 @@ def test_schedule_validation_rejects_invalid_configuration():
             {"schedule": {"enabled": True, "work_windows": [{"days": ["MO", "MO"], "ranges": ["09:00-12:00"]}]}},
             {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["18:00-09:00"]}]}},
             {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["9am-6pm"]}]}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["9:00-12:00"]}]}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["09:99-12:00"]}]}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["24:00-24:00"]}]}},
+            {"schedule": {"enabled": True, "work_windows": [{"days": ["MO"], "ranges": ["09:00-24:01"]}]}},
             {"schedule": {"enabled": True, "work_flash_order": {"video": ["a"]}}},
             {"schedule": {"enabled": True, "work_flash_order": {"general": []}}},
             {"schedule": {"enabled": True, "work_flash_order": {"general": ["a", "a"]}}},
             {"schedule_window": "work"}]:
         with pytest.raises(ValueError):
             validate({**base, **patch})
+
+    validate({**base, "schedule": {"enabled": True,
+        "work_windows": [{"days": ["MO"], "ranges": ["00:00-24:00"]}]}})
 
 
 def test_schedule_partial_override_merge_semantics():

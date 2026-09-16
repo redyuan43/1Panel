@@ -247,12 +247,32 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             )
         objectives = changes.get("routing", {}).get("objectives", {}) if isinstance(changes.get("routing"), dict) else {}
         if isinstance(objectives, dict):
-            for key in ("flash_order", "quality_order"):
-                order = objectives.get(key)
+            orders = [
+                objectives.get("flash_order"),
+                objectives.get("quality_order"),
+            ]
+            schedule = objectives.get("schedule")
+            if isinstance(schedule, dict):
+                orders.extend(
+                    schedule.get(key)
+                    for key in (
+                        "work_flash_order",
+                        "off_hours_flash_order",
+                    )
+                )
+            for order in orders:
                 if isinstance(order, dict):
                     for values in order.values():
-                        if isinstance(values, list) and any(not isinstance(eid, str) or current.registry.by_id(eid) is None for eid in values):
-                            raise RouterError("模型顺序中包含未注册的端点", status_code=400, code="invalid_policy_draft")
+                        if isinstance(values, list) and any(
+                            not isinstance(endpoint_id, str)
+                            or current.registry.by_id(endpoint_id) is None
+                            for endpoint_id in values
+                        ):
+                            raise RouterError(
+                                "模型顺序中包含未注册的端点",
+                                status_code=400,
+                                code="invalid_policy_draft",
+                            )
         snapshot = await current.policy_config.snapshot()
         draft_record = snapshot.get("draft")
         base_settings = (

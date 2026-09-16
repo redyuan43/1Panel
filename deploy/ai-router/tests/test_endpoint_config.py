@@ -422,6 +422,32 @@ def test_control_draft_validate_and_activate(
             conflict.json()["error"]["code"]
             == "endpoint_revision_conflict"
         )
+        for schedule_key in (
+            "work_flash_order",
+            "off_hours_flash_order",
+        ):
+            invalid_schedule = control.patch(
+                "/api/policy/draft",
+                headers=headers,
+                json={
+                    "changes": {
+                        "routing": {
+                            "objectives": {
+                                "schedule": {
+                                    schedule_key: {
+                                        "general": ["missing-endpoint"]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+            )
+            assert invalid_schedule.status_code == 400
+            assert (
+                invalid_schedule.json()["error"]["code"]
+                == "invalid_policy_draft"
+            )
     run(runtime.close())
 
 @pytest.mark.parametrize("modalities", [[], ["video"], ["text", "unknown"]])

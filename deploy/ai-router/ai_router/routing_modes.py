@@ -57,12 +57,18 @@ def _merge_schedule(target, patch):
             target[key] = copy.deepcopy(item)
 
 
-def _minutes(value):
+def _minutes(value, *, allow_day_end=False):
     text = str(value or "").strip()
     hours, separator, minutes = text.partition(":")
-    if not separator or not hours.isdigit() or len(minutes) != 2 or not minutes.isdigit():
+    if (not separator or len(hours) != 2 or not hours.isdigit()
+            or len(minutes) != 2 or not minutes.isdigit()):
         raise ValueError("invalid schedule time: " + text)
-    return int(hours) * 60 + int(minutes)
+    hour = int(hours)
+    minute = int(minutes)
+    if minute > 59 or hour > 23:
+        if not (allow_day_end and hour == 24 and minute == 0):
+            raise ValueError("invalid schedule time: " + text)
+    return hour * 60 + minute
 
 
 def _matches_window(schedule, moment):
@@ -73,7 +79,7 @@ def _matches_window(schedule, moment):
             continue
         for span in window.get("ranges") or []:
             start, _, end = str(span).partition("-")
-            if _minutes(start) <= minute < _minutes(end):
+            if _minutes(start) <= minute < _minutes(end, allow_day_end=True):
                 return True
     return False
 
@@ -181,7 +187,7 @@ def _validate_schedule(schedule):
             if not separator:
                 raise ValueError("schedule ranges must be HH:MM-HH:MM")
             try:
-                ascending = _minutes(start) < _minutes(end) <= 1440
+                ascending = _minutes(start) < _minutes(end, allow_day_end=True)
             except ValueError as exc:
                 raise ValueError("schedule ranges must be HH:MM-HH:MM") from exc
             if not ascending:
