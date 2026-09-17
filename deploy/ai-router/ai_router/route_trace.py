@@ -836,6 +836,9 @@ class DecisionTrace:
             "directive_id": evaluation.directive_id,
             "directive_generation": evaluation.directive_generation,
             "required_endpoint_id": evaluation.required_endpoint_id,
+            "required_endpoint_source": (
+                evaluation.required_endpoint_source
+            ),
         }
         self.record(
             attempt,
@@ -1923,6 +1926,9 @@ class RouteTraceStore:
             "excerpt": excerpt,
             "error": payload.get("error"),
             "route_selected": bool(payload.get("route_selected")),
+            "client_route_resolution": payload.get(
+                "client_route_resolution"
+            ),
             "disclosure_mode": str(
                 payload.get("disclosure_mode") or "internal"
             ),

@@ -2001,6 +2001,36 @@ function requestGroups() {
   return groups;
 }
 
+function clientRouteResolution(item) {
+  return item?.client_route_resolution || item?.model_compatibility || null;
+}
+
+function compatibilityTargetLabel(item) {
+  const resolution = clientRouteResolution(item);
+  return resolution?.resolved_model
+    ? `兼容目标 ${shortModel(resolution.resolved_model)}`
+    : "";
+}
+
+function actualRouteLabel(item) {
+  return item?.selected_model
+    ? shortModel(item.selected_model)
+    : "尚未调用模型";
+}
+
+function actualRouteDetail(item) {
+  if (item?.selected_model) return reasonLabel(item.reason);
+  return item?.error?.message
+    || item?.error?.code
+    || "路由阶段失败";
+}
+
+function deploymentResultLabel(item) {
+  if (item?.deployment_id) return shortId(item.deployment_id, 28);
+  const target = clientRouteResolution(item)?.target_endpoint_id;
+  return target ? `计划目标 ${shortId(target, 28)}` : "—";
+}
+
 function renderRequestTable() {
   const groups = requestGroups();
   const totalPages = Math.max(
@@ -2036,14 +2066,21 @@ function requestGroupRows(group) {
   const latestStatus = summary.latest_status || latest.status;
   const latestStatusCode = summary.latest_status_code
     ?? latest.status_code;
-  const selectedModel = summary.latest_selected_model
-    || latest.selected_model
-    || summary.latest_requested_model
+  const requestedModel = summary.latest_requested_model
     || latest.requested_model;
+  const selectedModel = summary.latest_selected_model
+    || latest.selected_model;
   const node = summary.latest_node || latest.node || "—";
   const deployment = summary.latest_deployment_id
     || latest.deployment_id
-    || "—";
+    || null;
+  const display = {
+    ...latest,
+    requested_model: requestedModel,
+    selected_model: selectedModel,
+    node,
+    deployment_id: deployment,
+  };
   const total = Number(summary.request_count || group.items.length);
   return `
     <tr class="request-conversation-row${expanded ? " expanded" : ""}">
@@ -2070,12 +2107,14 @@ function requestGroupRows(group) {
         <span class="table-secondary">本页 / 留存</span>
       </td>
       <td>
-        <strong class="table-primary">${escapeHtml(shortModel(selectedModel))}</strong>
-        <span class="table-secondary">${escapeHtml(latest.client_id || "—")}</span>
+        <strong class="table-primary">${escapeHtml(shortModel(requestedModel))}</strong>
+        <span class="table-secondary">${escapeHtml(compatibilityTargetLabel(display) || latest.client_id || "—")}</span>
+        ${compatibilityTargetLabel(display) ? `<span class="table-secondary">${escapeHtml(latest.client_id || "—")}</span>` : ""}
       </td>
       <td>
-        <strong class="table-primary">${escapeHtml(String(node).toUpperCase())}</strong>
-        <span class="table-secondary" title="${escapeHtml(deployment)}">${escapeHtml(shortId(deployment, 28))}</span>
+        <strong class="table-primary">${escapeHtml(actualRouteLabel(display))}</strong>
+        <span class="table-secondary" title="${escapeHtml(actualRouteDetail(display))}">${escapeHtml(actualRouteDetail(display))}</span>
+        <span class="table-secondary" title="${escapeHtml(deployment || clientRouteResolution(display)?.target_endpoint_id || "")}">${escapeHtml(deploymentResultLabel(display))}</span>
       </td>
       <td>
         <span class="request-summary" title="${escapeHtml(excerpt)}">${escapeHtml(graphemeExcerpt(excerpt))}</span>
@@ -2112,12 +2151,14 @@ function requestStandaloneRow(item) {
       </td>
       <td><strong class="table-primary">1 / 1</strong></td>
       <td>
-        <strong class="table-primary">${escapeHtml(shortModel(item.selected_model || item.requested_model))}</strong>
-        <span class="table-secondary">${escapeHtml(item.client_id || "—")}</span>
+        <strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong>
+        <span class="table-secondary">${escapeHtml(compatibilityTargetLabel(item) || item.client_id || "—")}</span>
+        ${compatibilityTargetLabel(item) ? `<span class="table-secondary">${escapeHtml(item.client_id || "—")}</span>` : ""}
       </td>
       <td>
-        <strong class="table-primary">${escapeHtml(String(item.node || "—").toUpperCase())}</strong>
-        <span class="table-secondary">${escapeHtml(shortId(item.deployment_id || "—", 28))}</span>
+        <strong class="table-primary">${escapeHtml(actualRouteLabel(item))}</strong>
+        <span class="table-secondary" title="${escapeHtml(actualRouteDetail(item))}">${escapeHtml(actualRouteDetail(item))}</span>
+        <span class="table-secondary" title="${escapeHtml(item.deployment_id || clientRouteResolution(item)?.target_endpoint_id || "")}">${escapeHtml(deploymentResultLabel(item))}</span>
       </td>
       <td><span class="request-summary" title="${escapeHtml(excerpt)}">${escapeHtml(graphemeExcerpt(excerpt))}</span></td>
       <td>${formatTime(item.started_at)}</td>
@@ -2214,13 +2255,16 @@ function requestRoundRow(item) {
         <span class="table-secondary">${requestLineageLabel(item)}</span>
         ${costRequestLink(item)}
       </td>
-      <td><strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong></td>
       <td>
-        <strong class="table-primary">${escapeHtml(shortModel(item.selected_model))}</strong>
-        <span class="table-secondary">${escapeHtml(reasonLabel(item.reason))}</span>
+        <strong class="table-primary">${escapeHtml(shortModel(item.requested_model))}</strong>
+        <span class="table-secondary">${escapeHtml(compatibilityTargetLabel(item) || "—")}</span>
       </td>
       <td>
-        <code title="${escapeHtml(item.deployment_id || "")}">${escapeHtml(shortId(item.deployment_id || "—", 28))}</code>
+        <strong class="table-primary">${escapeHtml(actualRouteLabel(item))}</strong>
+        <span class="table-secondary" title="${escapeHtml(actualRouteDetail(item))}">${escapeHtml(actualRouteDetail(item))}</span>
+      </td>
+      <td>
+        <code title="${escapeHtml(item.deployment_id || clientRouteResolution(item)?.target_endpoint_id || "")}">${escapeHtml(deploymentResultLabel(item))}</code>
         <span class="table-secondary">${escapeHtml(item.deployment_profile_id || "—")}${item.image_resizes ? ` · 缩图 ${item.image_resizes}` : ""}</span>
       </td>
       <td>${escapeHtml(item.task || "—")}</td>
@@ -2847,12 +2891,18 @@ function renderTraceDetail(preserveReviews = {}) {
     );
   byId("trace-detail-summary").textContent =
     trace.excerpt?.text || "此请求没有可显示的文本摘要。";
+  const routeResolution = clientRouteResolution(trace);
   byId("trace-detail-meta").innerHTML = [
     `请求 <code>${escapeHtml(trace.request_id)}</code> ${costRequestLink(trace)}`,
     ...(trace.client_request_id
       ? [`客户端请求 <code>${escapeHtml(trace.client_request_id)}</code>`]
       : []),
     `客户端 <strong>${escapeHtml(trace.client_id)}</strong>`,
+    `客户端请求 <strong>${escapeHtml(trace.requested_model || "—")}</strong>`,
+    ...(routeResolution?.resolved_model
+      ? [`兼容目标 <strong>${escapeHtml(routeResolution.resolved_model)}</strong>`]
+      : []),
+    `实际结果 <strong>${escapeHtml(actualRouteLabel(trace))}</strong>`,
     `披露 <strong>${trace.disclosure_mode === "public" ? "客户脱敏" : "内部详细"}</strong>`,
     `会话 <code title="${escapeHtml(trace.conversation_id || "")}">${escapeHtml(shortId(trace.conversation_id || "—", 24))}</code>`,
     `上下文 <strong>${trace.request?.context_compacted ? `${trace.request?.context_compaction_source === "client" ? "客户端" : "Router"}压缩` : trace.request?.conversation_mode === "stateful" ? "显式 ID" : "推断 ID"}</strong>`,

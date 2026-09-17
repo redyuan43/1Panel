@@ -796,6 +796,79 @@ def validate_settings(value: dict[str, Any]) -> None:
             raise ValueError(
                 "routing.client_deployment_pins wait must be between 0 and 3600 seconds"
             )
+    compatibility = routing.get("client_route_bindings", [])
+    if not isinstance(compatibility, list):
+        raise ValueError(
+            "routing.client_route_bindings must be an array"
+        )
+    compatibility_scopes: set[tuple[str, str]] = set()
+    for rule in compatibility:
+        if not isinstance(rule, dict) or set(rule) != {
+            "client_id",
+            "requested_models",
+            "target_endpoint_id",
+            "ignored_route_tiers",
+        }:
+            raise ValueError(
+                "routing.client_route_bindings has invalid fields"
+            )
+        client_id = rule["client_id"]
+        target_endpoint_id = rule["target_endpoint_id"]
+        requested_models = rule["requested_models"]
+        ignored_route_tiers = rule["ignored_route_tiers"]
+        if (
+            not isinstance(client_id, str)
+            or not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,62}", client_id)
+            or not isinstance(target_endpoint_id, str)
+            or not target_endpoint_id.strip()
+            or target_endpoint_id != target_endpoint_id.strip()
+            or len(target_endpoint_id) > 128
+        ):
+            raise ValueError(
+                "routing.client_route_bindings has invalid identifiers"
+            )
+        if (
+            not isinstance(requested_models, list)
+            or not requested_models
+            or any(
+                not isinstance(model, str)
+                or not model.strip()
+                or model != model.strip()
+                or len(model) > 256
+                for model in requested_models
+            )
+            or len(requested_models) != len(set(requested_models))
+        ):
+            raise ValueError(
+                "routing.client_route_bindings requested_models "
+                "must contain unique nonempty model IDs"
+            )
+        if (
+            not isinstance(ignored_route_tiers, list)
+            or any(
+                not isinstance(tier, str)
+                or tier not in {
+                    "edge-small",
+                    "local-general",
+                    "local-large",
+                    "cloud-frontier",
+                    "subscription-frontier",
+                }
+                for tier in ignored_route_tiers
+            )
+            or len(ignored_route_tiers) != len(set(ignored_route_tiers))
+        ):
+            raise ValueError(
+                "routing.client_route_bindings ignored_route_tiers "
+                "must contain unique supported tiers"
+            )
+        for model in requested_models:
+            scope = (client_id, model)
+            if scope in compatibility_scopes:
+                raise ValueError(
+                    "routing.client_route_bindings scopes must be unique"
+                )
+            compatibility_scopes.add(scope)
     from .routing_modes import validate as validate_objectives
     validate_objectives(routing.get("objectives", {}))
     strategy = str(routing.get("strategy", "legacy_v1"))

@@ -1,6 +1,6 @@
 # 动态端点管理
 
-更新日期：2026-09-02
+更新日期：2026-09-16
 
 ## 作用
 
@@ -74,6 +74,31 @@ resume
 
 `drain` 会阻止新请求进入该 endpoint，并返回两个 Router实例中仍在运行的请求
 数量；不会把请求静默切换到云模型。`resume` 只在 endpoint 健康时清除维护标记。
+
+## 客户端旧模型名兼容
+
+`routing.client_route_bindings` 在请求进入路由策略前，把指定内部账号的旧请求
+契约规范化为唯一的路由意图。规则按 `client_id + requested_model` 精确匹配，同时
+显式声明可被替代的历史 Tier；未匹配的账号、模型和 Tier 保持原行为。目标 endpoint
+必须唯一对应一个公开模型，账号也必须显式获准访问目标模型，否则请求失败。规范化
+完成后，权限、模态、图片数、上下文、健康和容量仍由正常路由流程检查；目标不可用时
+不会切换到其他本地节点或云模型。
+
+```yaml
+routing:
+  client_route_bindings:
+    - client_id: home-assistant
+      requested_models:
+        - auto
+        - huihui/Qwen3.8-27B-Q4-DFlash2
+      target_endpoint_id: ai-qwen38-27b
+      ignored_route_tiers:
+        - local-large
+```
+
+上游请求使用真实目标模型与 endpoint；审计同时保留客户端请求、规范化目标和被替代
+的历史约束；对客户端返回的协议字段 `model` 保留其原始请求值。该功能仅对
+`disclosure_mode=internal` 的账号生效。
 
 重要审计事件包括：
 

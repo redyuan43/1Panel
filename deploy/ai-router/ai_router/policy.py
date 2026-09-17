@@ -371,6 +371,9 @@ class RoutingPolicy:
         options = routing_options or resolve_objectives(self.settings.section("routing"))
         counts = candidate_prompt_tokens or {}
         directed = bool(evaluation.required_endpoint_id)
+        endpoint_constraint_source = (
+            evaluation.required_endpoint_source or "route_directive"
+        )
         objective_preview = bool(options["enabled"] and requested_model == "auto" and not directed
                                 and not (conversation_control or {}).get("pin"))
         objective_active = objective_preview and not options.get("observe_only")
@@ -398,6 +401,13 @@ class RoutingPolicy:
                 )
             )
             if target is None:
+                if endpoint_constraint_source == "client_route_binding":
+                    raise RouterError(
+                        "the configured client route target is outside the "
+                        "resolved model scope",
+                        status_code=503,
+                        code="client_route_binding_invalid",
+                    )
                 if requested_model != "auto":
                     raise RouteDirectiveIncompatibleError(
                         "the directed endpoint is outside the requested "
@@ -603,6 +613,13 @@ class RoutingPolicy:
                 rejections
             )
             if directed:
+                if endpoint_constraint_source == "client_route_binding":
+                    if any(
+                        reason in INCOMPATIBLE_REJECTION_REASONS
+                        for reason in rejection_reasons
+                    ):
+                        raise NoCompatibleModelError(message)
+                    raise NoEligibleModelError(message)
                 if any(
                     reason in INCOMPATIBLE_REJECTION_REASONS
                     for reason in rejection_reasons

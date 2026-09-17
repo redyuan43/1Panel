@@ -485,7 +485,10 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
         item.id: item
         for item in client_policies(value)
     }
-    assert policies["check-boards"].models == ("auto",)
+    assert policies["check-boards"].models == (
+        "siyuan/qwen38-v100-196k",
+    )
+    assert policies["check-boards"].local_only is True
     assert policies["check-boards"].max_parallel_requests == 4
     assert all(
         endpoint.capabilities.chat

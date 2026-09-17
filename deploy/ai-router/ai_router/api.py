@@ -25,6 +25,11 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
 from .compaction import extract_messages, replace_messages
+from .client_route_binding import (
+    SSEModelRewriter,
+    resolve_client_route,
+    rewrite_response_model,
+)
 from .context_policy import request_strategy, strategy_for
 from .errors import (
     AllLocalCapacityBusyError,
@@ -706,10 +711,30 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     )
     request.state.route_trace = trace
     await _save_request_trace(current, trace)
+    request_headers = {
+        key.lower(): value for key, value in request.headers.items()
+    }
+    route_resolution = resolve_client_route(
+        current.settings.section("routing"),
+        current.registry,
+        client_id=authenticated.policy.id,
+        requested_model=client_requested_model,
+        disclosure_mode=authenticated.policy.disclosure_mode,
+        headers=request_headers,
+    )
+    if route_resolution is not None:
+        trace.payload["client_route_resolution"] = (
+            route_resolution.audit_metadata()
+        )
+        await _save_request_trace(current, trace)
     requested_model = _resolve_requested_model(
         current,
         authenticated.policy.models,
-        client_requested_model,
+        (
+            route_resolution.target_model
+            if route_resolution is not None
+            else client_requested_model
+        ),
         configured_identity,
         authenticated.policy.disclosure_mode,
     )
@@ -719,7 +744,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         and client_requested_model
         in {"auto", configured_identity.public_model_id}
     )
-    if not public_auto_request and not (
+    if route_resolution is not None:
+        current.auth.ensure_model_access(
+            authenticated,
+            route_resolution.target_model,
+        )
+    elif not public_auto_request and not (
         configured_identity.enabled
         and client_requested_model == configured_identity.public_model_id
     ):
@@ -735,7 +765,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             details={"instance_id": current.instance_id},
         )
     lineage_body = copy.deepcopy(body)
-    if client_requested_model in {"auto", configured_identity.public_model_id}:
+    if (
+        route_resolution is None
+        and client_requested_model
+        in {"auto", configured_identity.public_model_id}
+    ):
         from .media_service.creative_chat import maybe_creative_chat
         from .media_service.contracts import MediaError
         try:
@@ -1028,7 +1062,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 effective_body, api_kind, request_id=request_id,
                 client_id=authenticated.policy.id,
             )
-        header_values = {key.lower(): value for key, value in request.headers.items()}
+        header_values = (
+            route_resolution.normalized_headers(request_headers)
+            if route_resolution is not None
+            else request_headers
+        )
         async def acquire_evaluator() -> ModelCallTarget:
             return await _acquire_internal_model(
                 current,
@@ -1069,7 +1107,13 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             before_model_call=acquire_evaluator,
             after_model_call=lease.release_deployment,
         )
+        if route_resolution is not None:
+            route_resolution.apply_to_evaluation(evaluation)
         if resolved_directive is not None:
+            if route_resolution is not None:
+                route_resolution.ensure_directive_compatible(
+                    resolved_directive.endpoint_id
+                )
             evaluation.directive_id = resolved_directive.id
             evaluation.directive_generation = (
                 resolved_directive.generation
@@ -1077,6 +1121,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             evaluation.required_endpoint_id = (
                 resolved_directive.endpoint_id
             )
+            evaluation.required_endpoint_source = "route_directive"
             evaluation.evidence = {
                 **evaluation.evidence,
                 "route_directive": resolved_directive.id,
@@ -1771,6 +1816,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                             cache_snapshot=cache_snapshot,
                             identity=identity,
                             identifiers=identifiers,
+                            response_model=(
+                                route_resolution.requested_model
+                                if route_resolution is not None
+                                else None
+                            ),
                         ),
                         status_code=upstream.status_code,
                         headers=headers,
@@ -1813,6 +1863,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     payload,
                     identity,
                     identifiers,
+                )
+                public_payload = rewrite_response_model(
+                    public_payload,
+                    (
+                        route_resolution.requested_model
+                        if route_resolution is not None
+                        else None
+                    ),
                 )
                 decision.response_redactions = redactions
                 private_output = response_output_observation(
@@ -4610,6 +4668,7 @@ async def _stream_response(
     cache_snapshot: dict[str, float] | None,
     identity: IdentityProfile,
     identifiers: tuple[str, ...],
+    response_model: str | None = None,
 ) -> AsyncIterator[bytes]:
     await resource_finalizer.begin_stream()
     accumulator = SSEAccumulator(api_kind)
@@ -4635,6 +4694,7 @@ async def _stream_response(
         identity,
         identifiers,
     )
+    model_rewriter = SSEModelRewriter(response_model)
     status_code = upstream.status_code
     completed = False
     invalid_output = False
@@ -4659,22 +4719,25 @@ async def _stream_response(
             private_accumulator.feed(chunk)
             batch_completed = False
             visible = b"".join(usage_filter.feed(chunk)) if usage_filter else chunk
-            for public_chunk in sanitizer.feed(visible):
-                accumulator.feed(public_chunk)
-                output_clock.feed(public_chunk)
-                if decision.trace:
-                    decision.trace.payload.setdefault("observation", {}).update(output_clock.values)
-                if effective_output_exposed:
-                    yield public_chunk
-                else:
-                    pending_public_chunks.append(public_chunk)
-                    if accumulator.has_effective_output():
-                        effective_output_exposed = True
-                        for pending_chunk in pending_public_chunks:
-                            yield pending_chunk
-                        pending_public_chunks.clear()
-                if accumulator.completed:
-                    batch_completed = True
+            for rewritten_chunk in model_rewriter.feed(visible):
+                for public_chunk in sanitizer.feed(rewritten_chunk):
+                    accumulator.feed(public_chunk)
+                    output_clock.feed(public_chunk)
+                    if decision.trace:
+                        decision.trace.payload.setdefault(
+                            "observation", {}
+                        ).update(output_clock.values)
+                    if effective_output_exposed:
+                        yield public_chunk
+                    else:
+                        pending_public_chunks.append(public_chunk)
+                        if accumulator.has_effective_output():
+                            effective_output_exposed = True
+                            for pending_chunk in pending_public_chunks:
+                                yield pending_chunk
+                            pending_public_chunks.clear()
+                    if accumulator.completed:
+                        batch_completed = True
             if batch_completed:
                 if accumulator.has_effective_output():
                     completed = True
@@ -4683,7 +4746,15 @@ async def _stream_response(
                 break
         else:
             trailing = b"".join(usage_filter.finish()) if usage_filter else b""
-            for public_chunk in sanitizer.feed(trailing) + sanitizer.finish():
+            rewritten_chunks = (
+                model_rewriter.feed(trailing) if trailing else []
+            )
+            rewritten_chunks.extend(model_rewriter.finish())
+            public_chunks: list[bytes] = []
+            for rewritten_chunk in rewritten_chunks:
+                public_chunks.extend(sanitizer.feed(rewritten_chunk))
+            public_chunks.extend(sanitizer.finish())
+            for public_chunk in public_chunks:
                 accumulator.feed(public_chunk)
                 output_clock.feed(public_chunk)
                 if decision.trace:

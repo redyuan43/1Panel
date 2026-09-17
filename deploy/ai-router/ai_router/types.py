@@ -477,6 +477,7 @@ class Evaluation:
     directive_id: str | None = None
     directive_generation: int = 0
     required_endpoint_id: str | None = None
+    required_endpoint_source: str | None = None
 
 
 @dataclass(frozen=True)

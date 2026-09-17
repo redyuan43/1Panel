@@ -76,6 +76,21 @@ routing:
       context_overflow_deployment_id: qwen36-agx
       prewarm_min_prompt_tokens: 45000
       capacity_wait_seconds: 900
+  client_route_bindings:
+    - client_id: home-assistant
+      requested_models:
+        - auto
+        - huihui/Qwen3.8-27B-Q4-DFlash2
+        - huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
+      target_endpoint_id: ai-qwen38-27b
+      ignored_route_tiers: [local-large]
+    - client_id: check-boards
+      requested_models:
+        - auto
+        - huihui/Qwen3.8-27B-Q4-DFlash2
+        - huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
+      target_endpoint_id: ai-qwen38-27b
+      ignored_route_tiers: [local-large]
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
   auto_max_input_tokens: 196608
@@ -238,9 +253,10 @@ clients:
     - id: check-boards
       key_env: AI_ROUTER_CHECK_BOARDS_API_KEY
       models:
-        - auto
+        - siyuan/qwen38-v100-196k
       rpm_limit: 240
       tpm_limit: 2000000
       max_parallel_requests: 4
       allow_compaction: false
       disclosure_mode: internal
+      local_only: true

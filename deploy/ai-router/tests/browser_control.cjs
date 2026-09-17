@@ -45,6 +45,31 @@ async function run() {
     await page.goto(base);
     await page.waitForFunction(() => state.settings && state.dashboard);
     await page.locator('#auto-refresh').uncheck();
+    await check('client route binding display distinguishes request target and result', async () => {
+      const html = await page.evaluate(() => requestStandaloneRow({
+        request_id: 'binding-preview',
+        requested_model: 'auto',
+        selected_model: null,
+        client_id: 'home-assistant',
+        status: 'failed',
+        status_code: 503,
+        started_at: Date.now() / 1000,
+        excerpt: {text: '门口复核'},
+        error: {
+          code: 'no_eligible_model',
+          message: 'the target endpoint is unavailable',
+        },
+        client_route_resolution: {
+          resolved_model: 'siyuan/qwen38-v100-196k',
+          target_endpoint_id: 'ai-qwen38-27b',
+        },
+      }));
+      assert.match(html, />auto</);
+      assert.match(html, /兼容目标 qwen38-v100-196k/);
+      assert.match(html, /尚未调用模型/);
+      assert.match(html, /the target endpoint is unavailable/);
+      assert.match(html, /计划目标 ai-qwen38-27b/);
+    });
     await page.locator('[data-view="audit"]').click();
     await page.locator('#trace-review-filter').selectOption('');
     await selectTrace('preview-local');
