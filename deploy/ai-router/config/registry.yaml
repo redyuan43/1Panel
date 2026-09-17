@@ -65,6 +65,12 @@ model_aliases:
   siyuan/danyue:
     endpoint_ids:
       - edge-qwen38-flash
+  siyuan/xuanji:
+    endpoint_ids:
+      - edge-qwen38-nvfp4
+    deployment_profile_ids: []
+    max_input_tokens: 262144
+    max_output_tokens: 8192
   siyuan/kongqing:
     endpoint_ids:
       - qwen36-shared-fleet
@@ -212,7 +218,7 @@ endpoints:
         cache_type_v: fp8_e5m2
         short_request_rank: 0
         vision_status: validated-2026-09-06
-        max_images: 1
+        max_images: 8
     quality:
       general: 50
       code: 0
@@ -244,7 +250,7 @@ endpoints:
       lmcache_storage: cpu-dram-only
       lmcache_expected_registrations: 4
       vision_status: live-validated-2026-09-06
-      max_images: 1
+      max_images: 8
 
   - id: edge-qwen38-flash
     public_model: RadixArk/Qwen3.8-Flash-Next-NVFP4
@@ -294,6 +300,54 @@ endpoints:
       quality_status: benchmarked-2026-09-01
       quality_report: /opt/1panel/ai-router/benchmarks/report-edge-20260901.json
       vision_status: disabled-runtime-crash-2026-09-02
+
+  - id: edge-qwen38-nvfp4
+    public_model: siyuan/qwen38-nvfp4-256k
+    provider_model: Qwen3.8-27B-NVFP4
+    api_base: http://edge.taild500c8.ts.net:8082/v1
+    node: edge
+    role: responder
+    tier: local-large
+    tier_rank: 30
+    modalities:
+      - text
+    tasks:
+      - general
+      - code
+      - batch
+      - long-context
+    safe_context_tokens: 262144
+    configured_context_tokens: 262144
+    max_concurrency: 1
+    backend_type: vllm
+    health_url: http://edge.taild500c8.ts.net:8082/health
+    backend_api_key_env: AI_ROUTER_EDGE_BACKEND_KEY
+    enabled: true
+    auto_candidate: false
+    capabilities:
+      chat: true
+      responses: adapter
+      tools: parallel
+      tool_choice: true
+      structured_output: []
+      streaming: true
+      validation_status: live-validated-chat-tools-streaming
+      validated_at: "2026-09-17"
+    quality:
+      general: 100
+      code: 0
+      batch: 0
+    metadata:
+      runtime: ninfer-gb10-sm121
+      context_status: runtime-tested-240k-prefill-1004tps-decode-16tps
+      quality_status: pending-benchmark
+      service_unit: ninfer-serve.service
+      quantization: nvfp4
+      kv_cache: fp8
+      speculative_method: mtp
+      speculative_tokens: 3
+      concurrency_note: fixed-at-startup-1-lane
+      vision_status: not-supported
 
   - id: ivan-qwen38-flash-128k
     public_model: huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
