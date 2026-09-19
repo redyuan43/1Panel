@@ -93,7 +93,10 @@ routing:
       ignored_route_tiers: [local-large]
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
-  auto_max_input_tokens: 196608
+  # Auto 对客户端声明 1,000,000 总上下文：934,464 输入 + 65,536 输出。
+  # 这只是客户端预算上限；路由仍按每个端点的实测安全上下文逐一准入，
+  # 本地端点能容纳时不会仅因该声明变大而提前使用云端。
+  auto_max_input_tokens: 934464
   auto_max_output_tokens: 65536
   remote_fallback_order:
     general:
@@ -125,11 +128,11 @@ routing:
     context: 0.10
     cost: 0.05
     locality: 0.05
-  # 时段策略：按本地时区在工作时段 / 非工作时段切换云端 Flash 首选模型。
-  # enabled: false 不改变任何现有行为；打开后，命中 work_windows 的请求应用
-  # work_flash_order，其余时间应用 off_hours_flash_order。
-  # 两个 order 都是"部分覆盖"：只影响列出的 group，未列出的 group 沿用
-  # objectives.flash_order。multimodal 未列出，因为图片请求不派发给 DeepSeek。
+  # 启用效率档后先用满足硬约束的本地模型；本地上下文/能力/健康不满足，或
+  # 现有性能迁移门槛触发时，才进入云端 Flash 候选。
+  # 云端按北京时间严格锁定：工作时段只用 GLM 5.3 Flash，其余时间只用
+  # DeepSeek V4.1 Flash。单元素列表表示所选云端不可用时直接报错，不跨厂商回退。
+  # 时段开关保持安全默认关闭，由已启用效率档的生产策略经过发布门禁后打开。
   objectives:
     schedule:
       enabled: false
@@ -140,11 +143,17 @@ routing:
       work_flash_order:
         general:
           - zhipu-glm-5.3-flash
-          - cloud-deepseek-v4-flash
+        code:
+          - zhipu-glm-5.3-flash
+        multimodal:
+          - zhipu-glm-5.3-flash
       off_hours_flash_order:
         general:
           - cloud-deepseek-v4-flash
-          - zhipu-glm-5.3-flash
+        code:
+          - cloud-deepseek-v4-flash
+        multimodal:
+          - cloud-deepseek-v4-flash
 
 affinity:
   ttl_seconds: 86400

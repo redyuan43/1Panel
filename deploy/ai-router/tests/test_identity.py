@@ -689,9 +689,9 @@ def test_public_alias_descriptor_uses_resolved_target_limits(
     )
     descriptors = {item["id"]: item for item in broad}
     public = descriptors["siyuan/auto"]
-    assert public["maxInputTokens"] == 196608
+    assert public["maxInputTokens"] == 934464
     assert public["maxOutputTokens"] == 65536
-    assert public["contextWindow"] == 262144
+    assert public["contextWindow"] == 1000000
 
     disallowed = asyncio.run(
         _identity_model_descriptors(

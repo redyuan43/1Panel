@@ -287,10 +287,18 @@ def test_quality_requires_separate_validation(tmp_path):
 
 
 TZ = ZoneInfo("Asia/Shanghai")
-SCHEDULE_ROUTING = {"objectives": {"enabled": True, "mode": "cost", "schedule": {
+SCHEDULE_ROUTING = {"objectives": {"enabled": True, "mode": "efficiency", "schedule": {
     "enabled": True,
-    "work_flash_order": {"general": ["zhipu-glm-5.3-flash", "cloud-deepseek-v4-flash"]},
-    "off_hours_flash_order": {"general": ["cloud-deepseek-v4-flash", "zhipu-glm-5.3-flash"]}}}}
+    "work_flash_order": {
+        "general": ["zhipu-glm-5.3-flash"],
+        "code": ["zhipu-glm-5.3-flash"],
+        "multimodal": ["zhipu-glm-5.3-flash"],
+    },
+    "off_hours_flash_order": {
+        "general": ["cloud-deepseek-v4-flash"],
+        "code": ["cloud-deepseek-v4-flash"],
+        "multimodal": ["cloud-deepseek-v4-flash"],
+    }}}}
 
 
 def frozen_clock(monkeypatch, moment):
@@ -319,18 +327,21 @@ def test_schedule_defaults_off_change_nothing():
     assert options["schedule_window"] is None and options["flash_order"] == FLASH
 
 
-def test_schedule_window_switches_general_flash_only(monkeypatch):
+def test_schedule_window_strictly_switches_all_flash_groups(monkeypatch):
     clock = frozen_clock(monkeypatch, datetime(2026, 9, 15, 10, 0, tzinfo=TZ))
     options = resolve(SCHEDULE_ROUTING)
     assert options["schedule_window"] == "work"
-    assert options["flash_order"]["general"] == ["zhipu-glm-5.3-flash", "cloud-deepseek-v4-flash"]
-    # 只覆盖 general；code 与 multimodal 沿用 objectives.flash_order
-    assert options["flash_order"]["code"] == FLASH["code"]
-    assert options["flash_order"]["multimodal"] == FLASH["multimodal"]
+    assert all(
+        options["flash_order"][group] == ["zhipu-glm-5.3-flash"]
+        for group in ("general", "code", "multimodal")
+    )
     clock.current = datetime(2026, 9, 15, 22, 0, tzinfo=TZ)
     options = resolve(SCHEDULE_ROUTING)
     assert options["schedule_window"] == "off_hours"
-    assert options["flash_order"]["general"] == ["cloud-deepseek-v4-flash", "zhipu-glm-5.3-flash"]
+    assert all(
+        options["flash_order"][group] == ["cloud-deepseek-v4-flash"]
+        for group in ("general", "code", "multimodal")
+    )
 
 
 def test_schedule_window_boundaries_days_and_timezone():
@@ -402,7 +413,84 @@ def test_schedule_window_selects_cloud_flash_endpoint(tmp_path, monkeypatch):
     policy, registry, _ = setup(tmp_path, "cost")
     local = {e.id for e in registry.endpoints if not e.cloud}
     decision = run(request(policy, resolve(SCHEDULE_ROUTING), excluded_endpoint_ids=local))
-    assert decision.endpoint.id == "zhipu-glm-5.3-flash" and decision.reason == "cost_flash_fallback"
+    assert decision.endpoint.id == "zhipu-glm-5.3-flash"
     clock.current = datetime(2026, 9, 15, 22, 0, tzinfo=TZ)
     decision = run(request(policy, resolve(SCHEDULE_ROUTING), excluded_endpoint_ids=local))
     assert decision.endpoint.id == "cloud-deepseek-v4-flash"
+
+
+def test_scheduled_efficiency_keeps_local_until_context_requires_cloud(tmp_path, monkeypatch):
+    clock = frozen_clock(monkeypatch, datetime(2026, 9, 15, 10, 0, tzinfo=TZ))
+    policy, registry, _ = setup(tmp_path)
+    glm = replace(
+        registry.by_id("zhipu-glm-5.3-flash"),
+        safe_context_tokens=1_000_000,
+        configured_context_tokens=1_000_000,
+    )
+    registry = registry.with_endpoints([
+        glm if endpoint.id == glm.id else endpoint
+        for endpoint in registry.endpoints
+    ])
+    policy.registry = registry
+    policy.health.status_values[glm.id] = status_for(glm)
+
+    local = run(request(
+        policy,
+        resolve(SCHEDULE_ROUTING),
+        prompt_tokens=200_000,
+        output_reserve_tokens=1_024,
+    ))
+    assert not local.endpoint.cloud
+
+    work_cloud = run(request(
+        policy,
+        resolve(SCHEDULE_ROUTING),
+        prompt_tokens=300_000,
+        output_reserve_tokens=1_024,
+    ))
+    assert work_cloud.endpoint.id == "zhipu-glm-5.3-flash"
+
+    clock.current = datetime(2026, 9, 15, 22, 0, tzinfo=TZ)
+    off_hours_cloud = run(request(
+        policy,
+        resolve(SCHEDULE_ROUTING),
+        prompt_tokens=300_000,
+        output_reserve_tokens=1_024,
+    ))
+    assert off_hours_cloud.endpoint.id == "cloud-deepseek-v4-flash"
+
+
+@pytest.mark.parametrize(
+    "hour,unavailable,excluded",
+    [
+        (10, "zhipu-glm-5.3-flash", "cloud-deepseek-v4-flash"),
+        (22, "cloud-deepseek-v4-flash", "zhipu-glm-5.3-flash"),
+    ],
+)
+def test_scheduled_cloud_does_not_cross_provider_on_failure(
+    tmp_path, monkeypatch, hour, unavailable, excluded
+):
+    frozen_clock(monkeypatch, datetime(2026, 9, 15, hour, 0, tzinfo=TZ))
+    policy, registry, _ = setup(tmp_path)
+    glm = replace(
+        registry.by_id("zhipu-glm-5.3-flash"),
+        safe_context_tokens=1_000_000,
+        configured_context_tokens=1_000_000,
+    )
+    registry = registry.with_endpoints([
+        glm if endpoint.id == glm.id else endpoint
+        for endpoint in registry.endpoints
+    ])
+    policy.registry = registry
+    policy.health.status_values[glm.id] = status_for(glm)
+    endpoint = registry.by_id(unavailable)
+    policy.health.status_values[unavailable] = status_for(endpoint, healthy=False)
+
+    with pytest.raises(NoEligibleModelError) as error:
+        run(request(
+            policy,
+            resolve(SCHEDULE_ROUTING),
+            prompt_tokens=300_000,
+            output_reserve_tokens=1_024,
+        ))
+    assert excluded + ":objective_pool" in str(error.value)

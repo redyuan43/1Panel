@@ -3885,9 +3885,9 @@ def test_models_endpoint_reports_vision_capabilities(
     }
     assert models["auto"]["supportsImages"] is True
     assert "image" in models["auto"]["input_modalities"]
-    assert models["auto"]["maxInputTokens"] == 196608
+    assert models["auto"]["maxInputTokens"] == 934464
     assert models["auto"]["maxOutputTokens"] == 65536
-    assert models["auto"]["contextWindow"] == 262144
+    assert models["auto"]["contextWindow"] == 1000000
     assert models[
         "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
     ]["supportsImages"] is True

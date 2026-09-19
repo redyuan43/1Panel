@@ -458,6 +458,29 @@ def _sanitize_identifier_value(
     return value, 0
 
 
+# Module-level classifier (lazy-loaded)
+_disclosure_clf: "DisclosureClassifier" | None = None
+
+
+def _get_disclosure_classifier() -> "DisclosureClassifier":
+    global _disclosure_clf
+    if _disclosure_clf is None:
+        from pathlib import Path
+        from ai_router.disclosure_classifier import DisclosureClassifier
+        candidates = [
+            Path(__file__).parent.parent / "config" / "disclosure_model.npz",
+            Path("/data/disclosure_model.npz"),
+            Path("/tmp/disclosure_model.npz"),
+        ]
+        model_path = None
+        for c in candidates:
+            if c.exists():
+                model_path = c
+                break
+        _disclosure_clf = DisclosureClassifier(model_path)
+    return _disclosure_clf
+
+
 def is_identity_disclosure_request(
     body: dict[str, Any],
     api_kind: str,
@@ -468,27 +491,18 @@ def is_identity_disclosure_request(
     text = view.current_query
     if not view.certain or not text or len(text) > 240:
         return False
-    # Quoted instructions, code and mixed tasks are not high-confidence direct asks.
-    if re.search(
-        r'["\'`“”‘’<>]|\n|翻译|比较|举例|解释|推荐|如何|为什么|'
-        r'顺便|另外|然后帮|translate|compare|explain|example',
+
+    # Use the LR classifier with regex fallback
+    clf = _get_disclosure_classifier()
+    result, _confidence = clf.classify(
         text,
-        flags=re.IGNORECASE,
-    ):
-        return False
-    if any(
-        pattern.search(text)
-        for pattern in _IDENTITY_DISCLOSURE_PATTERNS
-    ):
-        return True
-    return bool(
-        identity_context
-        and len(text) <= 160
-        and any(
-            pattern.search(text)
-            for pattern in _IDENTITY_FOLLOWUP_PATTERNS
-        )
+        identity_context=identity_context,
+        has_tool_choice="tool_choice" in body,
+        has_response_format="response_format" in body,
+        patterns=_IDENTITY_DISCLOSURE_PATTERNS,
+        followup_patterns=_IDENTITY_FOLLOWUP_PATTERNS,
     )
+    return result
 
 
 def identity_disclosure_requires_model_protocol(
