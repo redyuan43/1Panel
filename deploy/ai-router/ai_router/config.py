@@ -1006,6 +1006,49 @@ def validate_settings(value: dict[str, Any]) -> None:
     attempts = int(failover.get("max_attempts", 0))
     if attempts < 1 or attempts > 3:
         raise ValueError("failover.max_attempts must be between 1 and 3")
+    empty_output_recovery = failover.get("empty_output_recovery", {})
+    if not isinstance(empty_output_recovery, dict):
+        raise ValueError("failover.empty_output_recovery must be an object")
+    unknown_recovery_fields = set(empty_output_recovery) - {
+        "enabled",
+        "client_ids",
+        "same_endpoint_retries",
+        "scheduled_cloud_fallback",
+    }
+    if unknown_recovery_fields:
+        raise ValueError(
+            "failover.empty_output_recovery contains unknown fields"
+        )
+    if type(empty_output_recovery.get("enabled", False)) is not bool:
+        raise ValueError(
+            "failover.empty_output_recovery.enabled must be boolean"
+        )
+    recovery_client_ids = empty_output_recovery.get("client_ids", [])
+    if (
+        not isinstance(recovery_client_ids, list)
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in recovery_client_ids
+        )
+        or len(set(recovery_client_ids)) != len(recovery_client_ids)
+    ):
+        raise ValueError(
+            "failover.empty_output_recovery.client_ids must contain unique client IDs"
+        )
+    same_endpoint_retries = empty_output_recovery.get(
+        "same_endpoint_retries",
+        0,
+    )
+    if type(same_endpoint_retries) is not int or same_endpoint_retries not in {0, 1}:
+        raise ValueError(
+            "failover.empty_output_recovery.same_endpoint_retries must be 0 or 1"
+        )
+    if type(
+        empty_output_recovery.get("scheduled_cloud_fallback", False)
+    ) is not bool:
+        raise ValueError(
+            "failover.empty_output_recovery.scheduled_cloud_fallback must be boolean"
+        )
 
     cloud = value.get("cloud", {})
     if float(cloud.get("monthly_budget", 0)) < 0:

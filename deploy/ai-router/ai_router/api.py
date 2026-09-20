@@ -11,7 +11,12 @@ from .protocol import stabilize_workbuddy_tools
 from .prefix_break import PrefixBreakCollector
 from .cache_audit import TelemetryCollector, OutputClock
 from .request_observation import install_observer, observe_dispatch, observe_response
-from .routing_modes import resolve as resolve_objectives, settings_value as objective_settings, finite as finite_metric
+from .routing_modes import (
+    finite as finite_metric,
+    resolve as resolve_objectives,
+    settings_value as objective_settings,
+    task_group as objective_task_group,
+)
 from .usage_evidence import UsageOnlyFilter, token_count, usage_dict, usage_measurement
 
 import asyncio
@@ -122,6 +127,80 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+
+
+def _empty_output_recovery_policy(
+    current: RouterRuntime,
+    *,
+    client_id: str,
+    requested_model: str,
+    resolved_directive: Any,
+    conversation_control: dict[str, Any] | None,
+    routing_options: dict[str, Any],
+) -> dict[str, Any] | None:
+    value = current.settings.section("failover").get(
+        "empty_output_recovery",
+        {},
+    )
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return None
+    if client_id not in value.get("client_ids", []):
+        return None
+    if requested_model != "auto" or resolved_directive is not None:
+        return None
+    if (conversation_control or {}).get("pin"):
+        return None
+    if routing_options.get("local_only"):
+        return None
+    return value
+
+
+def _can_retry_empty_output(
+    policy: dict[str, Any] | None,
+    *,
+    decision: RouteDecision,
+    empty_output_failures: int,
+) -> bool:
+    if policy is None or decision.endpoint.cloud:
+        return False
+    same_endpoint_retries = int(policy.get("same_endpoint_retries", 0))
+    return bool(
+        empty_output_failures < same_endpoint_retries
+        or policy.get("scheduled_cloud_fallback") is True
+    )
+
+
+def _next_empty_output_targets(
+    current: RouterRuntime,
+    *,
+    policy: dict[str, Any] | None,
+    routing_options: dict[str, Any],
+    evaluation: Evaluation,
+    initial_endpoint_id: str,
+    empty_output_failures: int,
+    request_has_seed: bool,
+) -> set[str]:
+    if policy is None:
+        return set()
+    same_endpoint_retries = int(policy.get("same_endpoint_retries", 0))
+    if not request_has_seed and empty_output_failures <= same_endpoint_retries:
+        return {initial_endpoint_id}
+    if policy.get("scheduled_cloud_fallback") is not True:
+        return set()
+    if routing_options.get("schedule_window") not in {"work", "off_hours"}:
+        return set()
+    group = objective_task_group(evaluation)
+    ordered = routing_options.get("flash_order", {}).get(group, [])
+    return {
+        endpoint_id
+        for endpoint_id in ordered
+        if (
+            (endpoint := current.registry.by_id(endpoint_id)) is not None
+            and endpoint.cloud
+            and endpoint.enabled
+            and endpoint.role == "responder"
+        )
+    }
 
 
 def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
@@ -1430,6 +1509,17 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         template_capture_attempted = False
         excluded_deployments: set[str] = set()
         max_attempts = int(current.settings.section("failover").get("max_attempts", 2))
+        empty_output_recovery = _empty_output_recovery_policy(
+            current,
+            client_id=authenticated.policy.id,
+            requested_model=requested_model,
+            resolved_directive=resolved_directive,
+            conversation_control=conversation_control,
+            routing_options=routing_options,
+        )
+        empty_output_failures = 0
+        initial_empty_output_endpoint_id: str | None = None
+        forced_recovery_endpoint_ids: set[str] | None = None
         # At this point no response bytes or tool calls reached the client.
         allow_retry = resolved_directive is None
         attempts = (
@@ -1449,6 +1539,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             )
             else max_attempts
         )
+        if empty_output_recovery is not None:
+            attempts = max(attempts, 3)
         last_error: RouterError | None = None
         total_capacity_attempts = 0
         total_queue_wait_ms = 0.0
@@ -1458,6 +1550,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             decision = None
             cache_snapshot = None
             try:
+                attempt_excluded = excluded
+                if forced_recovery_endpoint_ids is not None:
+                    attempt_excluded = set(excluded)
+                    attempt_excluded.update(
+                        endpoint.id
+                        for endpoint in current.registry.responders()
+                        if endpoint.id not in forced_recovery_endpoint_ids
+                    )
                 (
                     decision,
                     routed_body,
@@ -1487,7 +1587,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     body=effective_body,
                     api_kind=api_kind,
                     lease=lease,
-                    excluded_endpoints=excluded,
+                    excluded_endpoints=attempt_excluded,
                     excluded_deployments=excluded_deployments,
                     capacity_attempts=total_capacity_attempts,
                     queue_wait_ms=total_queue_wait_ms,
@@ -1887,31 +1987,99 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         authenticated.policy.id,
                         budget_reservation=budget_reservation,
                     )
-                    response = _FinalizingStreamingResponse(
-                        _stream_response(
-                            current,
-                            upstream,
-                            resource_finalizer=resource_finalizer,
-                            client_id=authenticated.policy.id,
-                            key_id=authenticated.key_id,
-                            request_id=request_id,
-                            conversation_id=conversation_id,
+                    retry_empty_stream = bool(
+                        attempt < attempts
+                        and _can_retry_empty_output(
+                            empty_output_recovery,
                             decision=decision,
-                            state=state,
-                            body=persistence_body,
-                            api_kind=api_kind,
-                            training_token=training_token,
-                            started_at=request.state.started_at,
-                            cache_snapshot=cache_snapshot,
-                            identity=identity,
-                            identifiers=identifiers,
-                            response_model=(
-                                route_resolution.requested_model
-                                if route_resolution is not None
-                                else None
+                            empty_output_failures=empty_output_failures,
+                        )
+                        and _next_empty_output_targets(
+                            current,
+                            policy=empty_output_recovery,
+                            routing_options=routing_options,
+                            evaluation=evaluation,
+                            initial_endpoint_id=(
+                                initial_empty_output_endpoint_id
+                                or decision.endpoint.id
                             ),
-                            budget_reservation=budget_reservation,
+                            empty_output_failures=empty_output_failures + 1,
+                            request_has_seed="seed" in effective_body,
+                        )
+                    )
+                    stream_outcome: dict[str, Any] = {}
+                    stream_iterator = _stream_response(
+                        current,
+                        upstream,
+                        resource_finalizer=resource_finalizer,
+                        client_id=authenticated.policy.id,
+                        key_id=authenticated.key_id,
+                        request_id=request_id,
+                        conversation_id=conversation_id,
+                        decision=decision,
+                        state=state,
+                        body=persistence_body,
+                        api_kind=api_kind,
+                        training_token=training_token,
+                        started_at=request.state.started_at,
+                        cache_snapshot=cache_snapshot,
+                        identity=identity,
+                        identifiers=identifiers,
+                        response_model=(
+                            route_resolution.requested_model
+                            if route_resolution is not None
+                            else None
                         ),
+                        budget_reservation=budget_reservation,
+                        retryable_empty_output=retry_empty_stream,
+                        outcome=stream_outcome,
+                    )
+                    response_iterator = stream_iterator
+                    if retry_empty_stream:
+                        try:
+                            first_stream_chunk = await anext(stream_iterator)
+                        except StopAsyncIteration:
+                            if not stream_outcome.get("retryable_empty_output"):
+                                raise RouterError(
+                                    "the model stream ended without a public response",
+                                    status_code=502,
+                                    code="invalid_upstream_response",
+                                )
+                            budget_reservation = None
+                            empty_output_failures += 1
+                            if initial_empty_output_endpoint_id is None:
+                                initial_empty_output_endpoint_id = decision.endpoint.id
+                            forced_recovery_endpoint_ids = _next_empty_output_targets(
+                                current,
+                                policy=empty_output_recovery,
+                                routing_options=routing_options,
+                                evaluation=evaluation,
+                                initial_endpoint_id=initial_empty_output_endpoint_id,
+                                empty_output_failures=empty_output_failures,
+                                request_has_seed="seed" in effective_body,
+                            )
+                            _record_trace_retry(
+                                trace,
+                                attempt=attempt,
+                                status_code=502,
+                                reason="invalid_upstream_response",
+                                allowed=bool(forced_recovery_endpoint_ids),
+                            )
+                            await _save_request_trace(current, trace)
+                            if forced_recovery_endpoint_ids:
+                                continue
+                            raise RouterError(
+                                "the model completed without effective output",
+                                status_code=502,
+                                code="invalid_upstream_response",
+                                details=stream_outcome.get("output_integrity"),
+                            )
+                        response_iterator = _prepend_stream_chunk(
+                            first_stream_chunk,
+                            stream_iterator,
+                        )
+                    response = _FinalizingStreamingResponse(
+                        response_iterator,
                         status_code=upstream.status_code,
                         headers=headers,
                         media_type=upstream.headers.get("content-type"),
@@ -2001,6 +2169,33 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 )
                 _record_output_integrity(decision, output_integrity)
                 if not public_output["effective"]:
+                    if _can_retry_empty_output(
+                        empty_output_recovery,
+                        decision=decision,
+                        empty_output_failures=empty_output_failures,
+                    ) and attempt < attempts:
+                        empty_output_failures += 1
+                        if initial_empty_output_endpoint_id is None:
+                            initial_empty_output_endpoint_id = decision.endpoint.id
+                        forced_recovery_endpoint_ids = _next_empty_output_targets(
+                            current,
+                            policy=empty_output_recovery,
+                            routing_options=routing_options,
+                            evaluation=evaluation,
+                            initial_endpoint_id=initial_empty_output_endpoint_id,
+                            empty_output_failures=empty_output_failures,
+                            request_has_seed="seed" in effective_body,
+                        )
+                        _record_trace_retry(
+                            trace,
+                            attempt=attempt,
+                            status_code=502,
+                            reason="invalid_upstream_response",
+                            allowed=bool(forced_recovery_endpoint_ids),
+                        )
+                        await _save_request_trace(current, trace)
+                        if forced_recovery_endpoint_ids:
+                            continue
                     raise RouterError(
                         "the model completed without effective output",
                         status_code=502,
@@ -4625,6 +4820,11 @@ class _StreamResourceFinalizer:
         self._lock = asyncio.Lock()
         self._stream_finalization_lock = asyncio.Lock()
         self._released = False
+        self._retain_request = False
+
+    def retain_request_for_retry(self) -> None:
+        """Release only attempt-scoped resources; the route loop still owns the request."""
+        self._retain_request = True
 
     async def begin_stream(self) -> None:
         await self._stream_finalization_lock.acquire()
@@ -4646,16 +4846,18 @@ class _StreamResourceFinalizer:
             if self.budget_reservation is not None:
                 # An abandoned stream must not be treated as a free request.
                 operations.append(lambda: self.current.budget.settle(self.budget_reservation, self.budget_usage))
-            for operation in (*operations,
-                self.lease.release,
-                lambda: self.current.limiter.release_parallel(
-                    self.client_id,
-                    self.lease.owner_token,
-                ),
-                lambda: self.current.track_request_finished(
-                    self.lease.owner_token
-                ),
-            ):
+            if not self._retain_request:
+                operations.extend((
+                    self.lease.release,
+                    lambda: self.current.limiter.release_parallel(
+                        self.client_id,
+                        self.lease.owner_token,
+                    ),
+                    lambda: self.current.track_request_finished(
+                        self.lease.owner_token
+                    ),
+                ))
+            for operation in operations:
                 try:
                     await operation()
                 except Exception as exc:
@@ -4793,6 +4995,15 @@ def _stream_error_event(
     ).encode("utf-8")
 
 
+async def _prepend_stream_chunk(
+    first_chunk: bytes,
+    iterator: AsyncIterator[bytes],
+) -> AsyncIterator[bytes]:
+    yield first_chunk
+    async for chunk in iterator:
+        yield chunk
+
+
 async def _stream_response(
     current: RouterRuntime,
     upstream: httpx.Response,
@@ -4813,6 +5024,8 @@ async def _stream_response(
     identifiers: tuple[str, ...],
     response_model: str | None = None,
     budget_reservation: Any = None,
+    retryable_empty_output: bool = False,
+    outcome: dict[str, Any] | None = None,
 ) -> AsyncIterator[bytes]:
     await resource_finalizer.begin_stream()
     accumulator = SSEAccumulator(api_kind)
@@ -4948,13 +5161,16 @@ async def _stream_response(
                 transport_interrupted = True
         if invalid_output:
             pending_public_chunks.clear()
-            error_event = _stream_error_event(
-                api_kind,
-                code="invalid_upstream_response",
-                message="the model completed without effective output",
-            )
-            accumulator.feed(error_event)
-            yield error_event
+            if retryable_empty_output and not effective_output_exposed:
+                resource_finalizer.retain_request_for_retry()
+            else:
+                error_event = _stream_error_event(
+                    api_kind,
+                    code="invalid_upstream_response",
+                    message="the model completed without effective output",
+                )
+                accumulator.feed(error_event)
+                yield error_event
         elif transport_interrupted:
             pending_public_chunks.clear()
             error_event = _stream_error_event(
@@ -4979,13 +5195,16 @@ async def _stream_response(
             raise
         invalid_output = True
         pending_public_chunks.clear()
-        error_event = _stream_error_event(
-            api_kind,
-            code="invalid_upstream_response",
-            message="the model returned an invalid stream",
-        )
-        accumulator.feed(error_event)
-        yield error_event
+        if retryable_empty_output and not effective_output_exposed:
+            resource_finalizer.retain_request_for_retry()
+        else:
+            error_event = _stream_error_event(
+                api_kind,
+                code="invalid_upstream_response",
+                message="the model returned an invalid stream",
+            )
+            accumulator.feed(error_event)
+            yield error_event
     finally:
         accumulator.finish()
         private_accumulator.finish()
@@ -4995,6 +5214,20 @@ async def _stream_response(
         )
         output_integrity["transport_interrupted"] = transport_interrupted
         _record_output_integrity(decision, output_integrity)
+        intermediate_empty_output = bool(
+            invalid_output
+            and retryable_empty_output
+            and not effective_output_exposed
+        )
+        if outcome is not None:
+            outcome.update(
+                completed=completed,
+                invalid_output=invalid_output,
+                transport_interrupted=transport_interrupted,
+                effective_output_exposed=effective_output_exposed,
+                retryable_empty_output=intermediate_empty_output,
+                output_integrity=copy.deepcopy(output_integrity),
+            )
 
         async def finalize_stream() -> None:
             try:
@@ -5006,7 +5239,9 @@ async def _stream_response(
                     # Keep observed usage even if settlement must be retried.
                     resource_finalizer.budget_usage = final_usage
                 await upstream.aclose()
-                await resource_finalizer.lease.release_deployment()
+                stream_lease = getattr(resource_finalizer, "lease", None)
+                if stream_lease is not None:
+                    await stream_lease.release_deployment()
                 if completed:
                     await persist_history(
                         current.compactor,
@@ -5050,7 +5285,7 @@ async def _stream_response(
                                 usage=private_accumulator.usage,
                             )
                         )
-                elif current.training is not None:
+                elif current.training is not None and not intermediate_empty_output:
                     failure_status = 502 if invalid_output else 499
                     failure_code = (
                         "invalid_upstream_response"
@@ -5081,7 +5316,7 @@ async def _stream_response(
                             interrupted=not invalid_output,
                         )
                     )
-                if not completed and decision.trace:
+                if not completed and decision.trace and not intermediate_empty_output:
                     failure_status = 502 if invalid_output else 499
                     failure_code = (
                         "invalid_upstream_response"
@@ -5115,28 +5350,29 @@ async def _stream_response(
                         decision.trace,
                     )
                 decision.response_redactions = sanitizer.redactions
-                await _audit(
-                    current,
-                    request_id=request_id,
-                    client_id=client_id,
-                    key_id=key_id,
-                    conversation_id=conversation_id,
-                    decision=decision,
-                    status_code=(
-                        status_code
-                        if completed
-                        else 502
-                        if invalid_output
-                        else 499
-                    ),
-                    started_at=started_at,
-                    usage=adapter_usage if api_kind == "responses" and decision.native_or_adapter == "adapter" else private_accumulator.usage,
-                    usage_complete=(
-                        private_accumulator.usage is not None
-                        and not private_accumulator.usage_incomplete
-                    ),
-                    cache_snapshot=cache_snapshot,
-                )
+                if not intermediate_empty_output:
+                    await _audit(
+                        current,
+                        request_id=request_id,
+                        client_id=client_id,
+                        key_id=key_id,
+                        conversation_id=conversation_id,
+                        decision=decision,
+                        status_code=(
+                            status_code
+                            if completed
+                            else 502
+                            if invalid_output
+                            else 499
+                        ),
+                        started_at=started_at,
+                        usage=adapter_usage if api_kind == "responses" and decision.native_or_adapter == "adapter" else private_accumulator.usage,
+                        usage_complete=(
+                            private_accumulator.usage is not None
+                            and not private_accumulator.usage_incomplete
+                        ),
+                        cache_snapshot=cache_snapshot,
+                    )
             finally:
                 try:
                     await _run_stream_resource_finalizer(resource_finalizer)

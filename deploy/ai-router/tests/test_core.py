@@ -762,6 +762,386 @@ def test_legacy_five_weight_runtime_remains_loadable(
     assert sum(value.section("routing")["weights"].values()) == 1
 
 
+def _empty_output_recovery_runtime(
+    tmp_path: Path,
+    monkeypatch,
+    upstream,
+    *,
+    recovery_enabled: bool = True,
+):
+    monkeypatch.setenv("AI_ROUTER_1PANEL_API_KEY", "client-key")
+    monkeypatch.setenv("AI_ROUTER_LITELLM_MASTER_KEY", "internal-key")
+    monkeypatch.setenv("AI_ROUTER_STATE_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("AI_ROUTER_GLM_API_KEY", "glm-key")
+    monkeypatch.setenv("AI_ROUTER_AI_BACKEND_KEY", "local-key")
+    monkeypatch.setenv(
+        "AI_ROUTER_AUDIT_PATH",
+        str(tmp_path / "empty-output-recovery-audit.jsonl"),
+    )
+    value = settings(tmp_path)
+    value.write_runtime(
+        {
+            "routing": {
+                "objectives": {
+                    "enabled": True,
+                    "mode": "efficiency",
+                    "schedule": {
+                        "enabled": True,
+                        "timezone": "Asia/Shanghai",
+                        "work_windows": [
+                            {
+                                "days": [
+                                    "MO", "TU", "WE", "TH", "FR", "SA", "SU"
+                                ],
+                                "ranges": ["00:00-23:59"],
+                            }
+                        ],
+                        "work_flash_order": {
+                            "general": ["zhipu-glm-5.3-flash"],
+                            "code": ["zhipu-glm-5.3-flash"],
+                            "multimodal": ["zhipu-glm-5.3-flash"],
+                        },
+                    },
+                }
+            },
+            "failover": {
+                "empty_output_recovery": {
+                    "enabled": recovery_enabled,
+                    "client_ids": ["1panel"],
+                    "same_endpoint_retries": 1,
+                    "scheduled_cloud_fallback": True,
+                }
+            },
+            "cloud": {
+                "enabled": True,
+                "auto_escalate": True,
+                "monthly_budget": 100,
+                "allowed_providers": ["zhipu-coding"],
+                "allowed_models": ["zhipu/glm-5.3-flash"],
+            },
+        }
+    )
+    base_registry = Registry(ROOT / "config" / "registry.yaml")
+    registry = base_registry.with_endpoints(
+        [
+            base_registry.by_id("ai-qwen38-27b"),
+            base_registry.by_id("zhipu-glm-5.3-flash"),
+        ]
+    )
+    runtime = build_runtime(
+        settings=value,
+        registry=registry,
+        store=InMemoryStateStore(),
+        token_counter=SimpleTokenCounter(),
+    )
+    runtime.health = FakeHealth(
+        {
+            endpoint.id: healthy(
+                endpoint.id,
+                context=endpoint.safe_context_tokens,
+            )
+            for endpoint in registry.endpoints
+        }
+    )
+    runtime.policy = RoutingPolicy(
+        registry,
+        runtime.settings,
+        runtime.health,
+    )
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    return runtime
+
+
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_empty_output_recovery_retries_local_then_scheduled_cloud(
+    tmp_path: Path,
+    monkeypatch,
+    api_kind: str,
+    stream: bool,
+) -> None:
+    calls: list[dict] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        local = payload["model"] == "siyuan/qwen38-v100-196k"
+        if local and api_kind == "responses":
+            response = {
+                "id": "resp-empty",
+                "object": "response",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 10, "output_tokens": 1},
+            }
+            if stream:
+                wire = (
+                    b'data: {"type":"response.completed","response":'
+                    + json.dumps(response).encode()
+                    + b"}\n\ndata: [DONE]\n\n"
+                )
+                return httpx.Response(
+                    200,
+                    content=wire,
+                    headers={"content-type": "text/event-stream"},
+                )
+            return httpx.Response(200, json=response)
+        if local:
+            response = {
+                "id": "chatcmpl-empty",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 1},
+            }
+            if stream:
+                wire = (
+                    b'data: {"choices":[{"index":0,"delta":{},'
+                    b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+                )
+                return httpx.Response(
+                    200,
+                    content=wire,
+                    headers={"content-type": "text/event-stream"},
+                )
+            return httpx.Response(200, json=response)
+        assert payload["model"] == "zhipu-glm-5.3-flash"
+        if stream:
+            wire = (
+                b'data: {"choices":[{"index":0,"delta":'
+                b'{"content":"RECOVERED"},"finish_reason":null}]}\n\n'
+                b'data: {"choices":[{"index":0,"delta":{},'
+                b'"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+            )
+            return httpx.Response(
+                200,
+                content=wire,
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-recovered",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "RECOVERED",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime = _empty_output_recovery_runtime(tmp_path, monkeypatch, upstream)
+    app = create_app(runtime)
+    path = "/v1/responses" if api_kind == "responses" else "/v1/chat/completions"
+    body = (
+        {"model": "auto", "input": "hello", "stream": stream}
+        if api_kind == "responses"
+        else {
+            "model": "auto",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": stream,
+        }
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            path,
+            headers={"Authorization": "Bearer client-key"},
+            json=body,
+        )
+    assert response.status_code == 200
+    assert "RECOVERED" in response.text
+    assert [call["model"] for call in calls] == [
+        "siyuan/qwen38-v100-196k",
+        "siyuan/qwen38-v100-196k",
+        "zhipu-glm-5.3-flash",
+    ]
+    if api_kind == "chat":
+        assert response.text.count("RECOVERED") == 1
+    run(runtime.close())
+
+
+@pytest.mark.parametrize(
+    ("request_patch", "recovery_enabled", "expected_models"),
+    [
+        (
+            {"seed": 7},
+            True,
+            ["siyuan/qwen38-v100-196k", "zhipu-glm-5.3-flash"],
+        ),
+        (
+            {"model": "siyuan/qwen38-v100-196k"},
+            True,
+            ["siyuan/qwen38-v100-196k"],
+        ),
+        ({}, False, ["siyuan/qwen38-v100-196k"]),
+    ],
+)
+def test_empty_output_recovery_boundaries(
+    tmp_path: Path,
+    monkeypatch,
+    request_patch: dict,
+    recovery_enabled: bool,
+    expected_models: list[str],
+) -> None:
+    calls: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload["model"])
+        if payload["model"] == "zhipu-glm-5.3-flash":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "chatcmpl-recovered",
+                    "object": "chat.completion",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": "RECOVERED",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-empty",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": ""},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime = _empty_output_recovery_runtime(
+        tmp_path,
+        monkeypatch,
+        upstream,
+        recovery_enabled=recovery_enabled,
+    )
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hello"}],
+        **request_patch,
+    }
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json=body,
+        )
+    assert calls == expected_models
+    assert response.status_code == (200 if len(calls) == 2 else 502)
+    run(runtime.close())
+
+
+def test_empty_output_recovery_keeps_cloud_conversation_affinity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload["model"])
+        if len(calls) <= 2:
+            content = ""
+        else:
+            content = "CLOUD_OK"
+        return httpx.Response(
+            200,
+            json={
+                "id": f"chatcmpl-{len(calls)}",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    runtime = _empty_output_recovery_runtime(tmp_path, monkeypatch, upstream)
+    body = {
+        "model": "auto",
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    headers = {
+        "Authorization": "Bearer client-key",
+        "X-1Panel-Conversation-ID": "recovery-affinity",
+    }
+    with TestClient(create_app(runtime)) as client:
+        first = client.post("/v1/chat/completions", headers=headers, json=body)
+        second = client.post("/v1/chat/completions", headers=headers, json=body)
+    assert first.status_code == second.status_code == 200
+    assert calls == [
+        "siyuan/qwen38-v100-196k",
+        "siyuan/qwen38-v100-196k",
+        "zhipu-glm-5.3-flash",
+        "zhipu-glm-5.3-flash",
+    ]
+    run(runtime.close())
+
+
+def test_empty_output_recovery_never_replays_after_effective_stream_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload["model"])
+        return httpx.Response(
+            200,
+            content=(
+                b'data: {"choices":[{"index":0,"delta":'
+                b'{"content":"PARTIAL"},"finish_reason":null}]}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    runtime = _empty_output_recovery_runtime(tmp_path, monkeypatch, upstream)
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer client-key"},
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "hello"}],
+                "stream": True,
+            },
+        )
+    assert response.status_code == 200
+    assert "PARTIAL" in response.text
+    assert "stream_interrupted" in response.text
+    assert calls == ["siyuan/qwen38-v100-196k"]
+    run(runtime.close())
+
+
 @pytest.mark.parametrize("ttl_seconds", [299, 86401])
 def test_affinity_ttl_is_limited_to_cache_lease_range(
     tmp_path: Path,

@@ -198,6 +198,12 @@ health:
 failover:
   max_attempts: 2
   cooldown_seconds: 20
+  empty_output_recovery:
+    enabled: false
+    client_ids:
+      - workbuddy-public
+    same_endpoint_retries: 1
+    scheduled_cloud_fallback: true
 
 evaluator:
   enabled: false
