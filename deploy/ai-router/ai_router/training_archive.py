@@ -16,6 +16,7 @@ from typing import Any
 from cryptography.fernet import Fernet, InvalidToken
 
 from .errors import TrainingArchiveUnavailableError
+from .phase_timing import timed_async
 
 
 SCHEMA_VERSION = 1
@@ -64,6 +65,7 @@ class TrainingArchive:
             anchor.close()
             self._wal_anchor = None
 
+    @timed_async("archive_begin")
     async def begin(
         self,
         *,
@@ -268,6 +270,7 @@ class TrainingArchive:
                 "training archive backfill failed"
             ) from exc
 
+    @timed_async("archive_update")
     async def _merge(
         self,
         token: str,

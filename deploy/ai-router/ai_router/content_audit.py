@@ -12,6 +12,7 @@ from contextlib import closing
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+from .phase_timing import timed
 
 
 def encoded(body):
@@ -25,11 +26,12 @@ class ContentObservation:
         self.bodies = {}
         self.checks = []
 
+    @timed("content_snapshot")
     def capture(self, stage, body, *, archive_body=True):
         raw = encoded(body)
         digest = hashlib.sha256(raw).hexdigest()
-        if archive_body:
-            self.bodies.setdefault(digest, json.loads(raw))
+        if archive_body and digest not in self.bodies:
+            self.bodies[digest] = json.loads(raw)
         self.stages.append({"stage": stage, "sha256": digest, "bytes": len(raw),
                             "archived": archive_body,
                             "last_role": (body.get("messages") or [{}])[-1].get("role") if isinstance(body.get("messages"), list) and all(isinstance(m,dict) for m in body["messages"]) else None,

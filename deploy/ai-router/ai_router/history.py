@@ -14,6 +14,7 @@ from .compaction import (
     replace_messages,
 )
 from .errors import ConversationStateConflictError
+from .phase_timing import timed_async
 from .types import ConversationState, Endpoint
 
 
@@ -608,6 +609,7 @@ async def apply_stored_history(
         return result
 
 
+@timed_async("history_persist")
 async def persist_history(
     compactor: ContextCompactor,
     conversations: ConversationWriter,

@@ -4,9 +4,11 @@ from .workbuddy_history import WorkBuddyHistory
 import copy
 
 from .content_audit import ContentObservation, ArchiveReader
+from .phase_timing import PhaseTimingMiddleware, current_timings, phase
 from .protocol import stabilize_workbuddy_tools
 from .prefix_break import PrefixBreakCollector
 from .cache_audit import TelemetryCollector, OutputClock
+from .request_observation import install_observer, observe_dispatch, observe_response
 from .routing_modes import resolve as resolve_objectives, settings_value as objective_settings, finite as finite_metric
 from .usage_evidence import UsageOnlyFilter, token_count, usage_dict, usage_measurement
 
@@ -287,6 +289,8 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     async def responses(request: Request) -> Response:
         return await _proxy(request, "responses")
 
+    app.add_middleware(PhaseTimingMiddleware)
+    install_observer(app)
     return app
 
 
@@ -710,6 +714,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         disclosure_mode=authenticated.policy.disclosure_mode,
     )
     request.state.route_trace = trace
+    if current_timings() is not None:
+        trace.payload.setdefault("observation", {})["router_phase_timings"] = current_timings()
     await _save_request_trace(current, trace)
     request_headers = {
         key.lower(): value for key, value in request.headers.items()
@@ -797,7 +803,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     body = dynamic_context_move.body
     observation.check_workbuddy(before_reorder, body, dynamic_context_move)
     observation.capture("workbuddy_reordered", body)
-    trace.payload["observation"] = {"content": observation.metadata()}
+    trace.payload.setdefault("observation", {})["content"] = observation.metadata()
     if dynamic_context_move.skip_reason != "not_applicable":
         current.audit.write(
             "workbuddy_dynamic_context_moved" if dynamic_context_move.moved
@@ -1491,7 +1497,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 if current.training is not None:
                     await current.training.mark_routed(
                         training_token,
-                        effective_body=effective_body,
+                        effective_body=persistence_body,
                         routed_body=routed_body,
                         route={
                             "attempt": attempt,
@@ -1598,16 +1604,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current,
                     decision,
                 )
-                if current.training is not None:
-                    # Archive the final conversation context, not the earlier
-                    # pre-compaction body. Manual background jobs must use the
-                    # same history that is persisted after this response.
-                    # Recall and identity injection happen in _send_upstream
-                    # and must not become part of this reusable source.
-                    await current.training.set_effective_context(
-                        training_token,
-                        effective_body=persistence_body,
-                    )
+                # mark_routed already persisted the reusable context before
+                # recall/identity injection; do not rewrite the entire archive.
                 upstream = await _send_upstream(
                     current,
                     request,
@@ -1842,7 +1840,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     stream_owned = True
                     return response
 
-                payload = await upstream.aread()
+                with phase("upstream_body_read"):
+                    payload = await upstream.aread()
                 await upstream.aclose()
                 raw_usage = usage_dict(payload)
                 private_payload = payload
@@ -1859,11 +1858,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         payload,
                         model=decision.endpoint.public_model,
                     )
-                public_payload, redactions = sanitize_payload(
-                    payload,
-                    identity,
-                    identifiers,
-                )
+                with phase("response_sanitize"):
+                    public_payload, redactions = sanitize_payload(
+                        payload,
+                        identity,
+                        identifiers,
+                    )
                 public_payload = rewrite_response_model(
                     public_payload,
                     (
@@ -3559,6 +3559,7 @@ async def _send_upstream(
             await _save_request_trace(current, decision.trace)
         if current.training:
             await current.training.record_pipeline(getattr(request.state, "training_token", None), observation.archive())
+    observe_dispatch(request, decision, payload, headers)
     upstream_request = current.internal_client.build_request(
         "POST",
         url,
@@ -3566,7 +3567,9 @@ async def _send_upstream(
         json=payload,
         timeout=timeout,
     )
-    response = await current.internal_client.send(upstream_request, stream=True)
+    with phase("upstream_headers_wait"):
+        response = await current.internal_client.send(upstream_request, stream=True)
+    observe_response(response)
     response.extensions["internal_cache_usage"] = internal_usage
     if direct and response.headers.get("X-Prefix-Telemetry") == "1":
         if not getattr(current, "cache_collector", None):
@@ -5052,11 +5055,23 @@ async def _audit(
     usage_complete: bool = True,
     cache_snapshot: dict[str, float] | None = None,
 ) -> None:
-    cached_prompt_tokens_fallback = await _prefix_cache_delta(
-        current,
-        decision,
-        cache_snapshot,
-    )
+    backend_usage = usage_measurement(response_payload, usage)
+    # Exact zero is a measurement too. Never wait for global counters when
+    # per-request evidence is present, invalid, or the response is incomplete.
+    response_complete = usage_complete
+    if response_payload:
+        try:
+            response_value = json.loads(response_payload)
+            if isinstance(response_value, dict) and response_value.get("status") in {"incomplete", "failed", "cancelled", "in_progress", "queued"}:
+                response_complete = False
+        except (ValueError, TypeError):
+            pass
+    cached_prompt_tokens_fallback = None
+    if (response_complete and backend_usage["state"] == "missing"
+            and backend_usage["cached_tokens"] is None
+            and decision.endpoint.metadata.get("cache_usage") != "per_request"
+            and cache_snapshot is not None):
+        cached_prompt_tokens_fallback = await _prefix_cache_delta(current, decision, cache_snapshot)
     cached_prompt_tokens, cache_hit_ratio = _cache_metrics(
         response_payload,
         usage,
@@ -5064,14 +5079,7 @@ async def _audit(
         prompt_tokens_fallback=decision.prompt_tokens,
     )
     explicit_cached, _ = _cache_metrics(response_payload, usage, prompt_tokens_fallback=decision.prompt_tokens)
-    backend_usage = usage_measurement(response_payload, usage)
-    if response_payload:
-        try:
-            response_value = json.loads(response_payload)
-            if isinstance(response_value, dict) and response_value.get("status") in {"incomplete", "failed", "cancelled", "in_progress", "queued"}:
-                usage_complete = False
-        except (ValueError, TypeError):
-            pass
+    usage_complete = response_complete
     if not usage_complete:
         backend_usage = {**backend_usage, "state": "incomplete", "cached_tokens": None}
     cache_measurement_source = "upstream_usage" if explicit_cached is not None else "backend_counter_delta" if cached_prompt_tokens_fallback is not None else "unavailable"
@@ -5377,12 +5385,14 @@ async def _prefix_cache_snapshot(
     current: RouterRuntime,
     decision: RouteDecision,
 ) -> dict[str, float] | None:
-    if decision.endpoint.backend_type != "vllm":
+    if (decision.endpoint.backend_type != "vllm"
+            or decision.endpoint.metadata.get("cache_usage") == "per_request"):
         return None
     reader = getattr(current.health, "prefix_cache_counters", None)
     if reader is None:
         return None
-    return await reader(decision.endpoint)
+    with phase("cache_metrics_http"):
+        return await reader(decision.endpoint)
 
 
 async def _prefix_cache_delta(

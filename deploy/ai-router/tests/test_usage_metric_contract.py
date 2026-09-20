@@ -350,7 +350,7 @@ class RealAuditContract(unittest.IsolatedAsyncioTestCase):
                             conversation_id=None,decision=decision,status_code=200,started_at=time.monotonic()-.01,response_payload=payload)
                     self.assertEqual(saved.await_count,1)
                     row=metrics(decision.trace.payload,[])
-                    expected=('hit' if complete_usage else 'estimated') if state=='completed' else 'unknown'
+                    expected='hit' if complete_usage and state=='completed' else 'unknown'
                     self.assertEqual(row['cache_status'],expected)
                     if state!='completed':
                         self.assertIsNone(row['backend_cached_tokens'])
