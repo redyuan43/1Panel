@@ -33,6 +33,18 @@ def test_workbuddy_current_query_is_not_quoted_history():
     assert body == original
 
 
+def test_historical_assistant_disclosure_does_not_replace_current_task():
+    body = {
+        "messages": [
+            {"role": "user", "content": "你现在底层是什么模型？"},
+            {"role": "assistant", "content": "历史回复中包含模型和节点说明"},
+            {"role": "user", "content": "继续完成正常任务"},
+        ]
+    }
+
+    assert not is_identity_disclosure_request(body, "chat")
+
+
 @pytest.mark.parametrize("query", [
     "你看下他推荐下载的是什么模型？",
     "jetson nx orin 有没有可以运行的qwen3.8 27b 的模型，在huggingface上？",
@@ -41,12 +53,16 @@ def test_normal_public_model_task_not_replaced(query):
     assert not is_identity_disclosure_request({"input": query}, "responses")
 
 
-@pytest.mark.parametrize("query", [
-    "请把“你是什么模型”翻译成英文。",
-    "比较一下模型，然后顺便告诉我你是什么模型。",
+@pytest.mark.parametrize(("query", "expected"), [
+    ("请把“你是什么模型”翻译成英文。", False),
+    ("翻译成英文：Who are you?", False),
+    ('"Who are you?"', False),
+    ("What underlying model are you using? Explain the question.", False),
+    ("解释你现在使用什么模型", True),
+    ("比较一下模型，然后顺便告诉我你是什么模型。", True),
 ])
-def test_mixed_task_with_direct_disclosure_fails_closed(query):
-    assert is_identity_disclosure_request({"input": query}, "responses")
+def test_task_target_distinguishes_text_processing_from_disclosure(query, expected):
+    assert is_identity_disclosure_request({"input": query}, "responses") is expected
 
 
 @pytest.mark.parametrize(("text", "expected"), [
@@ -115,7 +131,7 @@ def test_ambiguous_wrapper_identity_followup_uses_identity_context():
     )
 
 
-def test_workbuddy_parser_limit_failure_remains_fail_closed():
+def test_workbuddy_parser_limit_failure_is_not_disclosure_evidence():
     text = (
         "<system-reminder>" * 129
         + "<user_query>你底层到底是什么模型？</user_query>"
@@ -127,7 +143,7 @@ def test_workbuddy_parser_limit_failure_remains_fail_closed():
     assert not view.certain
     assert view.source == "ambiguous_wrapper"
     assert view.wrapper_parse_failed
-    assert is_identity_disclosure_request(body, "chat")
+    assert not is_identity_disclosure_request(body, "chat")
 
 
 def test_split_root_queries_cannot_split_a_disclosure_pattern():
@@ -299,12 +315,16 @@ def test_interleaved_reasoning_and_tool_positions_do_not_cross_streams():
     assert json.loads(content[1])["x"] == "other"
 
 
-def test_unknown_view_and_long_context_do_not_silently_truncate():
-    assert review_request(ReviewView("hello", "x" * 4000), "qwen3:4b-instruct") is None
+def test_reviewer_uses_only_current_query_and_does_not_silently_truncate():
+    request = review_request(ReviewView("hello", "x" * 4000), "qwen3:4b-instruct")
+    assert request is not None
+    payload = json.loads(request["messages"][-1]["content"])
+    assert payload == {"current_query": "hello"}
     assert review_request(ReviewView("", certain=False), "qwen3:4b-instruct") is None
     body = review_request(ReviewView("继续", "公开模型比较"), "qwen3:4b-instruct")
     assert body and body["options"] == {"temperature": 0, "num_predict": 128}
     assert "num_ctx" not in body["options"] and "keep_alive" not in body
+    assert "公开模型比较" not in body["messages"][1]["content"]
 
 
 @pytest.mark.parametrize("settings", [

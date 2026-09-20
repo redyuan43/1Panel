@@ -8567,6 +8567,79 @@ def test_public_client_catalog_permissions_and_identity_intercept(
     run(runtime.close())
 
 
+def test_public_workbuddy_identity_check_uses_input_before_dynamic_context_move(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime, secret = _public_test_runtime(
+        tmp_path,
+        monkeypatch,
+        client_id="workbuddy-public",
+    )
+    upstream_calls = []
+
+    async def upstream(request: httpx.Request) -> httpx.Response:
+        upstream_calls.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-dynamic-context",
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "任务已继续",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 3},
+            },
+        )
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream)
+    )
+    reviewed = []
+    runtime.review_privacy = lambda body, api_kind, **kwargs: reviewed.append(
+        (copy.deepcopy(body), api_kind, kwargs)
+    )
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {secret}"},
+            json={
+                "model": "siyuan/auto",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "stable instructions\n"
+                            "<workbuddy_dynamic_context>\n"
+                            "当前 Router 运行在什么模型上\n"
+                            "</workbuddy_dynamic_context>"
+                        ),
+                    },
+                    {"role": "user", "content": "请继续处理刚才的任务。"},
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert "任务已继续" in response.text
+    assert len(upstream_calls) == 1
+    assert len(reviewed) == 1
+    assert reviewed[0][0]["messages"][-1]["content"] == "请继续处理刚才的任务。"
+    assert "当前 Router 运行在什么模型上" in reviewed[0][0]["messages"][0]["content"]
+    assert upstream_calls[0]["messages"][-1]["content"].startswith(
+        "<workbuddy_dynamic_context>"
+    )
+    run(runtime.internal_client.aclose())
+    run(runtime.close())
+
+
 def test_public_client_fails_closed_when_identity_is_disabled(
     tmp_path: Path,
     monkeypatch,

@@ -972,8 +972,15 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         ),
     )
     trace.payload["history_match"] = lineage.history_match
+    identity_input_body = (
+        lineage_body
+        if api_kind == "chat"
+        and authenticated.policy.id
+        in {"workbuddy-public", "workbuddy-qwen36-shared"}
+        else body
+    )
     if identity.enabled:
-        identity_view = review_view(body, api_kind)
+        identity_view = review_view(identity_input_body, api_kind)
         trace.payload["privacy_input"] = {
             "source": identity_view.source,
             "certain": identity_view.certain,
@@ -982,7 +989,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     disclosure_detected = bool(
         identity.enabled
         and is_identity_disclosure_request(
-            body,
+            identity_input_body,
             api_kind,
             identity_context=bool(
                 lineage.parent is not None
@@ -995,6 +1002,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         return await _identity_intercept_response(
             current,
             body=body,
+            review_body=identity_input_body,
             api_kind=api_kind,
             request_id=request_id,
             client_id=authenticated.policy.id,
@@ -1206,7 +1214,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
 
         if authenticated.policy.disclosure_mode == "public":
             current.review_privacy(
-                effective_body, api_kind, request_id=request_id,
+                identity_input_body, api_kind, request_id=request_id,
                 client_id=authenticated.policy.id,
                 lr_decision=disclosure_detected,
             )
@@ -2356,6 +2364,7 @@ async def _identity_intercept_response(
     current: RouterRuntime,
     *,
     body: dict[str, Any],
+    review_body: dict[str, Any],
     api_kind: str,
     request_id: str,
     client_id: str,
@@ -2430,7 +2439,7 @@ async def _identity_intercept_response(
 
         if trace.payload.get("disclosure_mode") == "public":
             current.review_privacy(
-                effective_body, api_kind, request_id=request_id, client_id=client_id,
+                review_body, api_kind, request_id=request_id, client_id=client_id,
                 lr_decision=True,
             )
         headers = {

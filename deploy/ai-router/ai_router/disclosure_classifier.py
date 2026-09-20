@@ -22,6 +22,7 @@ degrades to the regex verdict instead of raising.
 from __future__ import annotations
 
 import re
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,6 +57,107 @@ _MIXED_TASK_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _QUOTE_MARKER_PATTERN = re.compile(r'["\'`\u201c\u201d\u2018\u2019<>]')
+_SERVICE_TARGET_PATTERN = re.compile(
+    r"(?:你|您|这个助手|该助手|当前助手|思源|SIYUAN|"
+    r"(?:这|本|当前)(?:次|轮)?(?:请求|回答|回复|响应|服务|对话|会话|调用|回合)|"
+    r"(?:当前|这个|该)\s*Router|(?:现在|当前)(?:回答|回复)我|"
+    r"\b(?:you|your|siyuan|this\s+(?:request|service|assistant|turn|"
+    r"conversation|response|backend|router)|current\s+router)\b)",
+    re.IGNORECASE,
+)
+_FULL_QUOTED_TEXT_PATTERN = re.compile(
+    r"^\s*(?:[\"'`\u201c\u2018].*[\"'`\u201d\u2019])\s*[。.!?？]?\s*$",
+    re.DOTALL,
+)
+_DATA_TASK_PATTERN = re.compile(
+    r"(?:"
+    r"^(?:请)?(?:把|将)?\s*[\"'`\u201c\u2018].*[\"'`\u201d\u2019]"
+    r"[^。！？!?]{0,40}(?:翻译|译成|改写|润色|总结|分析|解释|提取|分类)"
+    r"|^(?:请)?(?:翻译|译成|改写|润色|总结|分析|提取|分类)"
+    r"(?:成[^：:]{0,20})?[：:]"
+    r"|^(?:please\s+)?(?:translate|rewrite|summari[sz]e|analy[sz]e|classify)"
+    r"[^:]{0,30}:"
+    r"|\b(?:explain|analy[sz]e)\s+(?:the|this)\s+"
+    r"(?:question|sentence|text|quote)\b"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+_FOLLOW_ON_DISCLOSURE_PATTERN = re.compile(
+    r"(?:然后|另外|顺便|再|同时|and\s+then|also)"
+    r"[^。！？!?]{0,80}"
+    r"(?:告诉|说明|确认|披露|输出|tell|show|confirm|reveal|disclose)"
+    r"[^。！？!?]{0,40}"
+    r"(?:你|您|思源|SIYUAN|this\s+(?:assistant|service)|you|your)"
+    r"[^。！？!?]{0,30}"
+    r"(?:模型|节点|供应商|厂商|路由|端点|model|node|provider|routing|endpoint)",
+    re.IGNORECASE,
+)
+_SENTENCE_BOUNDARY_PATTERN = re.compile(r"[。！？!?]|\.(?:\s|$)")
+_FULL_SCAN_LIMIT = 4096
+_TARGET_WINDOW_BEFORE = 256
+_TARGET_WINDOW_AFTER = 512
+_TARGET_WINDOW_EDGE_COUNT = 16
+
+
+def _target_evidence_text(text: str) -> str:
+    """Keep bounded context around edge service targets in a large request."""
+    if len(text) <= _FULL_SCAN_LIMIT:
+        return text
+    first: list[tuple[int, int]] = []
+    last: deque[tuple[int, int]] = deque(maxlen=_TARGET_WINDOW_EDGE_COUNT)
+    target_count = 0
+    for match in _SERVICE_TARGET_PATTERN.finditer(text):
+        item = (match.start(), match.end())
+        target_count += 1
+        if len(first) < _TARGET_WINDOW_EDGE_COUNT:
+            first.append(item)
+        else:
+            last.append(item)
+    targets = first if target_count <= len(first) else [*first, *last]
+    windows: list[tuple[int, int]] = []
+    for target_start, target_end in targets:
+        start = max(0, target_start - _TARGET_WINDOW_BEFORE)
+        end = min(len(text), target_end + _TARGET_WINDOW_AFTER)
+        if windows and start <= windows[-1][1]:
+            windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+        else:
+            windows.append((start, end))
+    return "\n".join(text[start:end] for start, end in windows)
+
+
+def _has_follow_on_disclosure(
+    text: str,
+    patterns: tuple[re.Pattern, ...],
+) -> bool:
+    """Detect an independent disclosure ask after a transform payload."""
+    boundaries = iter(_SENTENCE_BOUNDARY_PATTERN.finditer(text))
+    boundary = next(boundaries, None)
+    while boundary is not None:
+        following = next(boundaries, None)
+        end = following.start() if following is not None else len(text)
+        tail = text[boundary.end():end].lstrip()
+        if (
+            tail
+            and _SERVICE_TARGET_PATTERN.search(tail)
+            and any(pattern.search(tail) for pattern in patterns)
+        ):
+            return True
+        boundary = following
+    return False
+
+
+def _text_is_data_task(
+    text: str,
+    patterns: tuple[re.Pattern, ...],
+) -> bool:
+    """Recognize quoted/transform tasks whose subject is text, not SIYUAN."""
+    if _FULL_QUOTED_TEXT_PATTERN.fullmatch(text):
+        return True
+    if _FOLLOW_ON_DISCLOSURE_PATTERN.search(text):
+        return False
+    if not _DATA_TASK_PATTERN.search(text):
+        return False
+    return not _has_follow_on_disclosure(text, patterns)
 
 
 @dataclass(frozen=True)
@@ -232,20 +334,41 @@ class DisclosureClassifier:
         two-stage internals, while tests and diagnostics can still drive
         extract_features() and predict() separately.
 
-        Input size is bounded by privacy_view before this method is called.
-        Length is a feature, never an allow condition: padding a disclosure
+        Large inputs are reduced to bounded windows around explicit service
+        targets at both edges before the disclosure patterns run. Length alone is
+        never an allow or deny condition, and padding around a disclosure
         request must not bypass the deterministic patterns.
         """
         if not text:
             return False, 0.0
-        return self.predict(self.extract_features(
-            text,
+        service_target = bool(_SERVICE_TARGET_PATTERN.search(text))
+        contextual_followup = bool(
+            identity_context
+            and len(text) <= 160
+            and any(pattern.search(text) for pattern in followup_patterns)
+        )
+        # Reject ordinary technical text before extracting the more expensive
+        # disclosure features. This ordering is load-bearing for large prompts:
+        # a keyword-only request must not pay for every identity regex.
+        if not (service_target or contextual_followup):
+            return False, 0.0
+        evidence_text = _target_evidence_text(text) if service_target else text
+        features = self.extract_features(
+            evidence_text,
             identity_context=identity_context,
             has_tool_choice=has_tool_choice,
             has_response_format=has_response_format,
             patterns=patterns,
             followup_patterns=followup_patterns,
-        ))
+        )
+        # Enforcement is about the target of the current task. Internal words,
+        # obfuscation markers, role-play, or a positive model bias are never
+        # sufficient without an explicit reference to this service. A narrow
+        # contextual follow-up is the only exception because its target was
+        # established by the immediately preceding identity-only exchange.
+        if _text_is_data_task(text, patterns):
+            return False, 0.0
+        return self.predict(features)
 
     def extract_features(
         self,

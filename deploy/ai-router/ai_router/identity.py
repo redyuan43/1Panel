@@ -54,7 +54,7 @@ _IDENTITY_DISCLOSURE_PATTERNS = tuple(
             #   "现在回答我的模型来自哪一家厂商"
             # Unqualified infrastructure questions are ordinary tasks, not
             # evidence of a request for this service's private internals.
-            r"(?=[^。？！\n]*(?:你|您|SIYUAN|\bRouter\b|"
+            r"(?=[^。？！\n]{0,160}(?:你|您|SIYUAN|\bRouter\b|"
             r"(?:这|本)(?:次|轮)(?:请求|回答|回复|响应|服务|对话|会话|调用|回合)|"
             r"当前请求|当前服务|这个服务|该服务|"
             r"(?:现在|当前)(?:回答|回复)我|"
@@ -600,11 +600,10 @@ def _ambiguous_wrapper_disclosure(
     *,
     identity_context: bool,
 ) -> bool:
-    # Parser resource-limit failures are structurally untrustworthy and stay
-    # fail-closed. Ordinary WorkBuddy wrapper ambiguity is handled more
-    # narrowly from parser-identified root queries.
+    # A parser failure is not evidence of disclosure. Only root user-query
+    # candidates recovered by the provenance parser may drive enforcement.
     if view.wrapper_parse_failed:
-        return True
+        return False
     queries = tuple(query for query in view.fallback_queries if query)
     if not queries:
         return False
@@ -613,13 +612,15 @@ def _ambiguous_wrapper_disclosure(
         # Scan the aggregate as well so splitting one disclosure request across
         # multiple root <user_query> blocks cannot bypass the local gate.
         candidates = (*queries, " ".join(queries))
-    patterns = _IDENTITY_DISCLOSURE_PATTERNS
-    if identity_context:
-        patterns = (*patterns, *_IDENTITY_FOLLOWUP_PATTERNS)
+    clf = _get_disclosure_classifier()
     return any(
-        pattern.search(candidate)
+        clf.classify(
+            candidate,
+            identity_context=identity_context,
+            patterns=_IDENTITY_DISCLOSURE_PATTERNS,
+            followup_patterns=_IDENTITY_FOLLOWUP_PATTERNS,
+        )[0]
         for candidate in candidates
-        for pattern in patterns
     )
 
 
@@ -632,14 +633,10 @@ def is_identity_disclosure_request(
     view = review_view(body, api_kind)
     text = view.current_query
     if not view.certain:
-        # Missing input is left to normal request validation. An oversized
-        # current message remains fail-closed. For an ambiguous WorkBuddy
-        # wrapper, inspect only parser-identified root <user_query> candidates
-        # with the high-confidence patterns. Treating every malformed wrapper
-        # as disclosure blocks ordinary automation prompts whose wrapper tail
-        # contains memory or delivery instructions.
-        if view.source == "oversize":
-            return True
+        # Missing input is left to normal request validation. For an ambiguous
+        # WorkBuddy wrapper, inspect only parser-identified root <user_query>
+        # candidates. Syntax errors or resource limits are not disclosure
+        # evidence by themselves.
         if view.source == "ambiguous_wrapper":
             return _ambiguous_wrapper_disclosure(
                 view,

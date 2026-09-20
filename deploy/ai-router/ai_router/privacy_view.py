@@ -93,8 +93,6 @@ def review_view(body: dict[str, Any], api_kind: str) -> ReviewView:
         return ReviewView("", source="missing", certain=False)
     text = users[-1].strip()
     context = "\n".join(users[-3:-1])
-    if len(text) > 262144:
-        return ReviewView("", source="oversize", certain=False)
     if any(marker in text.lower() for marker in (
         "<user_query", "<system-reminder", "<previous_user_message",
     )):
