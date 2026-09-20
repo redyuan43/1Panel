@@ -1,0 +1,49 @@
+name: Context Governance
+
+on:
+  pull_request:
+    paths:
+      - "AGENTS.md"
+      - "docs/project-context.md"
+      - "docs/h3-platform-current-state.md"
+      - "docs/context-governance.json"
+      - "deploy/ai-router/**"
+      - "deploy/h3-fleet/**"
+      - "deploy/h3-mcp/**"
+      - "deploy/h3-video-studio/**"
+      - "deploy/runtime-release/**"
+      - "scripts/check_context_governance.py"
+      - "scripts/test_context_governance.py"
+  push:
+    paths:
+      - "AGENTS.md"
+      - "docs/project-context.md"
+      - "docs/h3-platform-current-state.md"
+      - "docs/context-governance.json"
+      - "deploy/ai-router/**"
+      - "deploy/h3-fleet/**"
+      - "deploy/h3-mcp/**"
+      - "deploy/h3-video-studio/**"
+      - "deploy/runtime-release/**"
+      - "scripts/check_context_governance.py"
+      - "scripts/test_context_governance.py"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Test context checker
+        run: python3 scripts/test_context_governance.py
+      - name: Validate context governance
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: python3 scripts/check_context_governance.py --base "$BASE_SHA"

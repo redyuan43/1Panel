@@ -10,7 +10,10 @@ import yaml
 
 from ai_router.api import _model_descriptor
 from ai_router.config import Registry, Settings
-from ai_router.errors import RouteDirectiveIncompatibleError
+from ai_router.errors import (
+    ContextTooLargeForSelectedModelError,
+    RouteDirectiveIncompatibleError,
+)
 from ai_router.policy import RoutingPolicy
 from ai_router.types import (
     EndpointStatus,
@@ -247,7 +250,7 @@ def test_route_directive_cannot_bypass_semantic_profile_budget(tmp_path):
         ),
         StaticHealth(status),
     )
-    with pytest.raises(RouteDirectiveIncompatibleError):
+    with pytest.raises(ContextTooLargeForSelectedModelError) as raised:
         asyncio.run(
             policy.choose(
                 requested_model="siyuan/agent-fast",
@@ -266,6 +269,8 @@ def test_route_directive_cannot_bypass_semantic_profile_budget(tmp_path):
                 conversation=None,
             )
         )
+    assert raised.value.details["required_context_tokens"] == 49154
+    assert raised.value.details["model_context_tokens"] == 49153
 
 
 def test_route_directive_cannot_escape_explicit_model_scope(tmp_path):

@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "instruction_budget_bytes": 24576,
+  "freshness_warning_days": 30,
+  "instruction_files": [
+    "AGENTS.md",
+    "deploy/ai-router/AGENTS.md"
+  ],
+  "forbidden_instruction_literals": [
+    "safe_context_tokens:",
+    "work_flash_order:",
+    "off_hours_flash_order:"
+  ],
+  "documents": [
+    {
+      "id": "project",
+      "path": "docs/project-context.md",
+      "triggers": [
+        "AGENTS.md",
+        "deploy/runtime-release/**"
+      ]
+    },
+    {
+      "id": "ai-router",
+      "path": "deploy/ai-router/docs/current-state.md",
+      "triggers": [
+        "deploy/ai-router/AGENTS.md",
+        "deploy/ai-router/ai_router/api.py",
+        "deploy/ai-router/ai_router/policy.py",
+        "deploy/ai-router/ai_router/context_policy.py",
+        "deploy/ai-router/ai_router/errors.py",
+        "deploy/ai-router/ai_router/routing_modes.py",
+        "deploy/ai-router/ai_router/prompt_directives.py",
+        "deploy/ai-router/ai_router/runtime.py",
+        "deploy/ai-router/ai_router/compaction*.py",
+        "deploy/ai-router/ai_router/history*.py",
+        "deploy/ai-router/ai_router/identity.py",
+        "deploy/ai-router/ai_router/responses_adapter.py",
+        "deploy/ai-router/config/**",
+        "deploy/ai-router/compose.yaml",
+        "deploy/ai-router/Dockerfile*"
+      ]
+    },
+    {
+      "id": "h3-platform",
+      "path": "docs/h3-platform-current-state.md",
+      "triggers": [
+        "deploy/h3-fleet/app/**",
+        "deploy/h3-fleet/config/**",
+        "deploy/h3-fleet/systemd/**",
+        "deploy/h3-mcp/fleet/**",
+        "deploy/h3-mcp/shared/**",
+        "deploy/h3-mcp/studio/**",
+        "deploy/h3-mcp/workbuddy/**",
+        "deploy/h3-video-studio/app/**",
+        "deploy/h3-video-studio/deploy/**",
+        "deploy/h3-video-studio/workflows/**"
+      ]
+    }
+  ]
+}

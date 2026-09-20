@@ -16,6 +16,7 @@ from .compaction import (
 from .errors import ConversationStateConflictError
 from .phase_timing import timed_async
 from .privacy_view import content_text
+from .reasoning_fields import chat_reasoning
 from .types import ConversationState, Endpoint
 
 
@@ -63,8 +64,14 @@ def normalize_history_for_provider(
     accepts_reasoning_content = bool(
         contract.get("accepts_reasoning_content")
         or contract.get("requires_reasoning_content")
+        or (provider_family(endpoint) == "deepseek"
+            and endpoint is not None
+            and "history_contract" not in endpoint.metadata)
     )
-    accepts_reasoning_items = bool(contract.get("accepts_reasoning_items")) and (
+    accepts_reasoning_items = bool(contract.get("accepts_reasoning_items") or (
+        provider_family(endpoint) == "deepseek" and endpoint is not None
+        and "history_contract" not in endpoint.metadata
+    )) and (
         endpoint is None or endpoint.capabilities.responses == "native"
     )
     value = copy.deepcopy(body)
@@ -168,6 +175,10 @@ def _normalize_chat_item(
         for key, value in item.items()
         if key in allowed
     }
+    if role == "assistant" and accepts_reasoning_content:
+        reasoning = chat_reasoning(item)
+        if reasoning is not None:
+            result["reasoning_content"] = reasoning
     if isinstance(result.get("tool_calls"), list):
         result["tool_calls"] = [
             normalized
@@ -218,6 +229,7 @@ def _normalize_responses_item(
             "id",
             "encrypted_content",
             "summary",
+            "content",
             "status",
         }
     elif item_type == "function_call":
@@ -254,6 +266,12 @@ def _normalize_responses_item(
         for key, value in item.items()
         if key in allowed
     }
+    if accepts_reasoning_content and (
+        item_type == "function_call" or item.get("role") == "assistant"
+    ):
+        reasoning = chat_reasoning(item)
+        if reasoning is not None:
+            result["reasoning_content"] = reasoning
     if item_type == "function_call" and "arguments" in result:
         result["arguments"] = _canonical_tool_arguments(
             result["arguments"]
@@ -635,6 +653,7 @@ def strip_identity_intercept_history(
         return body, False
     return replace_messages(body, api_kind, [*messages[:-3], messages[-1]]), True
 
+
 @timed_async("history_persist")
 async def persist_history(
     compactor: ContextCompactor,
@@ -705,6 +724,11 @@ def assistant_items_from_response(
         if not isinstance(message, dict):
             return []
         result = copy.deepcopy(message)
+        reasoning = chat_reasoning(result)
+        if reasoning is not None:
+            result["reasoning_content"] = reasoning
+            if isinstance(result.get("reasoning"), str):
+                result.pop("reasoning")
         result["role"] = "assistant"
         return [result]
     output = value.get("output", [])
@@ -1008,10 +1032,9 @@ class SSEAccumulator:
                     self._text.append(delta["content"])
                 if isinstance(delta.get("refusal"), str):
                     self._chat_refusal.append(delta["refusal"])
-                if isinstance(delta.get("reasoning_content"), str):
-                    self._chat_reasoning_content.append(
-                        delta["reasoning_content"]
-                    )
+                reasoning = chat_reasoning(delta)
+                if reasoning is not None:
+                    self._chat_reasoning_content.append(reasoning)
                 self._consume_chat_tool_calls(delta.get("tool_calls"))
                 if isinstance(
                     delta.get("codex_reasoning_items"),

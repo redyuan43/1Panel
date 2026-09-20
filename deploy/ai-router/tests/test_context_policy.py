@@ -12,12 +12,24 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 
-from ai_router.api import _compaction_allowed, _maybe_compact_for_route, _compact_body_for_target
+from ai_router.api import (
+    _compact_body_for_target,
+    _compaction_allowed,
+    _error_response,
+    _maybe_compact_for_route,
+    _public_error_message,
+    _target_allows_compaction,
+)
 from ai_router.codex_adapter import _catalog_context_limits
 from ai_router.compaction import CapsuleCipher, ContextCompactor
 from ai_router.config import Registry, Settings, validate_settings
 from ai_router.context_policy import apply_context_policy, request_strategy, validate_target
-from ai_router.errors import CompactionUnavailableError, RouteDirectiveIncompatibleError, RouteDirectiveUnavailableError
+from ai_router.errors import (
+    CompactionUnavailableError,
+    ContextTooLargeForSelectedModelError,
+    RouteDirectiveIncompatibleError,
+    RouteDirectiveUnavailableError,
+)
 from ai_router.identity import IdentityProfile
 from ai_router.health import HealthMonitor
 from ai_router.policy import RoutingPolicy
@@ -63,7 +75,7 @@ def test_extended_window_routes_without_mutating_registry_or_health(setup):
     assert setup.registry.by_id(TARGET).safe_context_tokens == 272000
     assert setup.status.detail["workers"][0]["safe_context_tokens"] == 272000
     setup.settings._value["context_policy"]["mode"] = "compact"
-    with pytest.raises(RouteDirectiveIncompatibleError):
+    with pytest.raises(ContextTooLargeForSelectedModelError):
         asyncio.run(choose(setup))
 
 
@@ -97,7 +109,11 @@ def test_extended_does_not_bypass_other_constraints(setup, failure):
         setup.status.detail["workers"][0].pop("model_context_limits")
     if failure == "capacity":
         setup.status.detail["available_worker_ids"] = []
-    with pytest.raises((RouteDirectiveIncompatibleError, RouteDirectiveUnavailableError)):
+    with pytest.raises((
+        ContextTooLargeForSelectedModelError,
+        RouteDirectiveIncompatibleError,
+        RouteDirectiveUnavailableError,
+    )):
         asyncio.run(choose(setup, modalities={"audio"} if failure == "modality" else None))
 
 
@@ -111,6 +127,21 @@ def test_compaction_mode_scoped_permission_and_expanded_mode_no_compaction(setup
     assert not _compaction_allowed(setup, True, "true", context_strategy="extended")
     evaluation.required_endpoint_id = "ai-qwen38-27b"
     assert request_strategy(setup.settings, setup.registry, "auto", evaluation) == "legacy"
+
+
+def test_selected_target_disables_automatic_compaction():
+    automatic = Evaluation("general", None, 1, "test")
+    directed = Evaluation(
+        "general",
+        None,
+        1,
+        "test",
+        required_endpoint_id=TARGET,
+    )
+
+    assert _target_allows_compaction("auto", automatic)
+    assert not _target_allows_compaction("auto", directed)
+    assert not _target_allows_compaction("codex-pro/gpt-6-astra", automatic)
 
 
 def test_compaction_acquires_bounded_capacity_and_releases_on_error(setup, monkeypatch):
@@ -195,7 +226,7 @@ def test_local_only_request_never_sends_history_to_cloud_compactor(
 
 
 @pytest.mark.parametrize("api_kind", ["chat", "responses"])
-def test_directed_overflow_compacts_same_target_and_preserves_reserve(setup, monkeypatch, api_kind):
+def test_directed_overflow_is_rejected_without_compaction(setup, monkeypatch, api_kind):
     setup.settings._value["context_policy"]["mode"] = "compact"
     body = {"model": "auto", "messages" if api_kind == "chat" else "input": [
         {"role": "user", "content": "old " * 100}, {"role": "user", "content": "latest task"}]}
@@ -215,15 +246,65 @@ def test_directed_overflow_compacts_same_target_and_preserves_reserve(setup, mon
                 conversation=None, excluded_endpoints=set(),
                 identity=IdentityProfile.from_settings(setup.settings.section("identity")),
                 routing_options=routing_options)
-    routed, tokens, capsule = asyncio.run(_maybe_compact_for_route(setup, body, **args))
-    assert routed["compacted"] and tokens == 1000 and capsule is not None
-    assert mock.await_count == 1
-    assert choose.await_count == 2
+    with pytest.raises(ContextTooLargeForSelectedModelError) as raised:
+        asyncio.run(_maybe_compact_for_route(setup, body, **args))
+    assert raised.value.status_code == 422
+    assert raised.value.code == "context_too_large_for_selected_model"
+    assert raised.value.details == {
+        "requested_model": "auto",
+        "endpoint_id": TARGET,
+        "required_context_tokens": 339102,
+        "model_context_tokens": 272000,
+    }
+    assert "larger-context model" in _public_error_message(raised.value)
+    response = _error_response(raised.value, public=True)
+    payload = json.loads(response.body)
+    assert response.status_code == 422
+    assert payload["error"]["code"] == "context_too_large_for_selected_model"
+    assert "larger-context model" in payload["error"]["message"]
+    assert mock.await_count == 0
+    assert choose.await_count == 1
     assert all(call.kwargs["routing_options"] is routing_options for call in choose.await_args_list)
     args["modalities"] = {"audio"}
     with pytest.raises(RouteDirectiveIncompatibleError):
         asyncio.run(_maybe_compact_for_route(setup, body, **args))
-    assert mock.await_count == 1
+    assert mock.await_count == 0
+
+
+def test_explicit_model_overflow_is_rejected_without_compaction(setup, monkeypatch):
+    body = {
+        "model": "codex-pro/gpt-6-astra",
+        "messages": [{"role": "user", "content": "large history"}],
+    }
+    compact = AsyncMock()
+    monkeypatch.setattr("ai_router.api._compact_body_for_target", compact)
+
+    with pytest.raises(ContextTooLargeForSelectedModelError) as raised:
+        asyncio.run(_maybe_compact_for_route(
+            setup,
+            body,
+            api_kind="chat",
+            request_id="explicit-overflow",
+            requested_model="codex-pro/gpt-6-astra",
+            evaluation=Evaluation("long-context", None, 1, "test"),
+            prompt_tokens=322718,
+            output_reserve_tokens=16384,
+            modalities={"text"},
+            image_count=0,
+            has_tools=False,
+            required_capabilities=RequestCapabilities(protocol="chat"),
+            conversation=None,
+            excluded_endpoints=set(),
+            identity=IdentityProfile.from_settings(
+                setup.settings.section("identity")
+            ),
+            routing_options=resolve_objectives(
+                setup.settings.section("routing")
+            ),
+        ))
+
+    assert raised.value.details["requested_model"] == "codex-pro/gpt-6-astra"
+    compact.assert_not_awaited()
 
 
 @pytest.mark.parametrize("changes", [{"mode":"other"}, {"extended_context_tokens":True},

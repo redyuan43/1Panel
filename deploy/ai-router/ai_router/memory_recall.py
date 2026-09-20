@@ -1,6 +1,8 @@
 """Bounded inference-only history projection. Never changes stored messages."""
 from __future__ import annotations
 
+from .compute import count_tokens
+
 import asyncio
 import copy
 import hashlib
@@ -82,11 +84,11 @@ async def prepare_recall(current, body, *, api_kind, decision, identity, client_
                 return None, "no_trustworthy_match" if reason == "disabled" else "rewrite_" + reason + "_no_match"
         window = decision.deployment_safe_context_tokens or decision.endpoint.safe_context_tokens
         limit = min(4096, int(window * 0.1))
-        base_count = current.token_counter.count_request(identity.inject(body, api_kind), api_kind)
+        base_count = await count_tokens(current, identity.inject(body, api_kind), api_kind)
         while hits:
             projected = projected_body(body, api_kind, hits[:6])
             inferred = identity.inject(projected, api_kind)
-            count = current.token_counter.count_request(inferred, api_kind)
+            count = await count_tokens(current, inferred, api_kind)
             added = max(0, count - base_count)
             if added <= limit:
                 counted = await current.endpoint_token_counter.count(decision.endpoint, inferred, api_kind, count)

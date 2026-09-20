@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from .workbuddy_history import WorkBuddyHistory
+from .compute import compute, count_tokens
+from .errors import TrainingArchiveUnavailableError
 import copy
 
 from .content_audit import ContentObservation, ArchiveReader
@@ -26,7 +28,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from starlette.background import BackgroundTask
 
-from .compaction import extract_messages, replace_messages
+from .compaction import SummaryResponseError, extract_messages, replace_messages
 from .client_route_binding import (
     SSEModelRewriter,
     resolve_client_route,
@@ -685,7 +687,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     )
     request.state.identity_profile = identity
     observation = ContentObservation()
-    observation.capture("received", body, archive_body=False)
+    await compute(current, observation.capture, "received", body, archive_body=False)
     request.state.content_observation = observation
     prompt_directive_settings = current.settings.section("routing").get(
         "prompt_directives",
@@ -697,7 +699,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         prompt_directive_settings,
     )
     body = prompt_directive_result.body
-    observation.capture("after_directives", body)
+    await compute(current, observation.capture, "after_directives", body)
     received_body = json.loads(json.dumps(body))
     trace = DecisionTrace(
         request_id=request_id,
@@ -803,7 +805,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     before_reorder = body
     body = dynamic_context_move.body
     observation.check_workbuddy(before_reorder, body, dynamic_context_move)
-    observation.capture("workbuddy_reordered", body)
+    await compute(current, observation.capture, "workbuddy_reordered", body)
     trace.payload.setdefault("observation", {})["content"] = observation.metadata()
     if dynamic_context_move.skip_reason != "not_applicable":
         current.audit.write(
@@ -835,12 +837,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         history_report["raw_identities"] = ["wb-raw-v1:" + key for key in history_identities(extract_messages(lineage_body, api_kind))]
         history_report.setdefault("positions", list(range(len(lineage_body.get("messages", [])))))
         observation.checks.append({"check":"workbuddy_history", **history_report})
-        observation.capture("workbuddy_history_preserved", body)
+        await compute(current, observation.capture, "workbuddy_history_preserved", body)
         current.audit.write("workbuddy_history", request_id=request_id,
             **{k:v for k,v in history_report.items() if k != "positions"})
     body, tool_stability = stabilize_workbuddy_tools(body, api_kind, client_id=authenticated.policy.id)
     observation.checks.append({"check": "tool_serialization_stability", **tool_stability})
-    observation.capture("tools_stabilized", body)
+    await compute(current, observation.capture, "tools_stabilized", body)
     normalized = normalize_request(
         body,
         api_kind,
@@ -850,7 +852,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         ),
     )
     body = normalized.body
-    observation.capture("normalized", body)
+    await compute(current, observation.capture, "normalized", body)
     tool_history_repairs = normalized.repairs
     client_compacted = _truthy_header(
         request.headers.get("x-1panel-context-compacted", "")
@@ -898,14 +900,19 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             "certain": identity_view.certain,
         }
     await _save_request_trace(current, trace)
-    if identity.enabled and is_identity_disclosure_request(
-        body,
-        api_kind,
-        identity_context=bool(
-            lineage.parent is not None
-            and lineage.parent.identity_only
-        ),
-    ):
+    disclosure_detected = bool(
+        identity.enabled
+        and is_identity_disclosure_request(
+            body,
+            api_kind,
+            identity_context=bool(
+                lineage.parent is not None
+                and lineage.parent.identity_only
+            ),
+        )
+    )
+    trace.payload["disclosure_detected"] = disclosure_detected
+    if disclosure_detected:
         return await _identity_intercept_response(
             current,
             body=body,
@@ -1002,7 +1009,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     "reason": conversation_control["reset"].get("reason"),
                 },
                 path=False,
-            )
+        )
         effective_body = json.loads(json.dumps(body))
         identity_history_removed = False
         if stored_conversation is not None and stored_conversation.identity_only:
@@ -1029,7 +1036,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             api_kind,
         )
         effective_body = normalized_effective.body
-        observation.capture("effective", effective_body)
+        await compute(current, observation.capture, "effective", effective_body)
         trace.payload["observation"]["content"] = observation.metadata()
         tool_history_repairs += normalized_effective.repairs
         required_capabilities = normalized_effective.required
@@ -1038,7 +1045,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 training_token,
                 effective_body=effective_body,
             )
-        prompt_tokens = current.token_counter.count_request(
+        prompt_tokens = await count_tokens(current,
             identity.inject(effective_body, api_kind),
             api_kind,
         )
@@ -1047,6 +1054,40 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             effective_body,
             api_kind,
             int(current.settings.section("routing").get("default_output_reserve_tokens", 4096)),
+        )
+        trace.record(
+            1,
+            "context_ingress",
+            "evaluated",
+            reason="raw_context_before_compaction",
+            evidence={
+                "prompt_tokens": prompt_tokens,
+                "requested_output_tokens": reserve_tokens,
+                "required_context_tokens": prompt_tokens + reserve_tokens,
+                "message_count": len(extract_messages(effective_body, api_kind)),
+                "stored_history_available": bool(
+                    stored_conversation is not None
+                    and stored_conversation.encrypted_capsule
+                ),
+                "stored_history_mode": (
+                    stored_conversation.history_mode
+                    if stored_conversation is not None
+                    else None
+                ),
+                "stored_compacted_capsule_available": bool(
+                    stored_conversation is not None
+                    and stored_conversation.encrypted_capsule
+                    and stored_conversation.history_mode == "capsule"
+                ),
+                "chat_capsule_reuse_deferred": bool(
+                    api_kind == "chat"
+                    and not client_compacted
+                    and stored_conversation is not None
+                    and stored_conversation.encrypted_capsule
+                    and stored_conversation.history_mode == "capsule"
+                ),
+            },
+            path=False,
         )
         parallel_acquired = await current.limiter.acquire_parallel(
             authenticated.policy.id,
@@ -1065,6 +1106,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             rpm_limit=authenticated.policy.rpm_limit,
             tpm_limit=authenticated.policy.tpm_limit,
         )
+        trace.record(
+            1,
+            "rate_limit_input",
+            "passed" if allowed else "failed",
+            reason=limit_code or "rate_limit_allowed",
+            evidence={
+                "prompt_tokens": prompt_tokens,
+                "tpm_limit": authenticated.policy.tpm_limit,
+                "context_state": "raw_before_compaction",
+            },
+            path=False,
+        )
         if not allowed:
             raise _rate_limit_error(
                 limit_code,
@@ -1076,6 +1129,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             current.review_privacy(
                 effective_body, api_kind, request_id=request_id,
                 client_id=authenticated.policy.id,
+                lr_decision=disclosure_detected,
             )
         header_values = (
             route_resolution.normalized_headers(request_headers)
@@ -1162,11 +1216,18 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 effective_body.pop(key, None)
         has_tools = required_capabilities.tools
         context_strategy = request_strategy(current.settings, current.registry, requested_model, evaluation)
-        allow_compaction = _compaction_allowed(
-            current,
-            authenticated.policy.allow_compaction,
-            request.headers.get("x-1panel-allow-compaction", ""),
-            context_strategy=context_strategy,
+        target_allows_compaction = _target_allows_compaction(
+            requested_model,
+            evaluation,
+        )
+        allow_compaction = (
+            target_allows_compaction
+            and _compaction_allowed(
+                current,
+                authenticated.policy.allow_compaction,
+                request.headers.get("x-1panel-allow-compaction", ""),
+                context_strategy=context_strategy,
+            )
         )
         routing_options = resolve_objectives(
             current.settings.section("routing"),
@@ -1175,6 +1236,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         trace.payload.setdefault("request", {})["context_policy"] = {
             "mode": context_strategy,
+            "target_allows_compaction": target_allows_compaction,
             "configured": current.settings.section("context_policy"),
         }
         excluded: set[str] = {
@@ -1201,9 +1263,29 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 and lineage.relation == "continuation"
                 and current.settings.section("compaction").get("background_enabled", False)
             ):
-                effective_body = summary_scope.restore_chat_parent(effective_body, stored_conversation)
-                prompt_tokens = current.token_counter.count_request(
+                before_restore = effective_body
+                effective_body = summary_scope.restore_chat_parent(
+                    effective_body,
+                    stored_conversation,
+                )
+                capsule_reused = effective_body is not before_restore
+                prompt_tokens = await count_tokens(current,
                     identity.inject(effective_body, api_kind), api_kind,
+                )
+                trace.record(
+                    1,
+                    "context_capsule_reuse",
+                    "passed" if capsule_reused else "evaluated",
+                    reason=(
+                        "stored_capsule_reused"
+                        if capsule_reused
+                        else "stored_capsule_not_matched"
+                    ),
+                    evidence={
+                        "reused": capsule_reused,
+                        "prompt_tokens_after_reuse": prompt_tokens,
+                    },
+                    path=False,
                 )
             effective_body, background_capsule = await apply_background(
                 current, effective_body, owner=authenticated.policy.id,
@@ -1719,6 +1801,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 if upstream.status_code >= 400:
                     payload = await upstream.aread()
                     await upstream.aclose()
+                    await lease.release_deployment()
                     await current.budget.release(budget_reservation)
                     budget_reservation = None
                     if identity.enabled:
@@ -1780,8 +1863,6 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     decision, routed_body, client_id=authenticated.policy.id,
                     request_id=request_id, api_kind=api_kind,
                 )
-                await current.budget.commit(budget_reservation)
-                budget_reservation = None
                 if summary_scope is not None:
                     summary_messages = extract_messages(
                         persistence_body,
@@ -1804,6 +1885,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         current,
                         lease,
                         authenticated.policy.id,
+                        budget_reservation=budget_reservation,
                     )
                     response = _FinalizingStreamingResponse(
                         _stream_response(
@@ -1828,6 +1910,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                                 if route_resolution is not None
                                 else None
                             ),
+                            budget_reservation=budget_reservation,
                         ),
                         status_code=upstream.status_code,
                         headers=headers,
@@ -1847,12 +1930,24 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         ),
                     )
                     stream_owned = True
+                    budget_reservation = None
                     return response
 
-                with phase("upstream_body_read"):
-                    payload = await upstream.aread()
-                await upstream.aclose()
-                raw_usage = usage_dict(payload)
+                raw_usage = None
+                try:
+                    with phase("upstream_body_read"):
+                        payload = await upstream.aread()
+                    raw_usage = usage_dict(payload)
+                finally:
+                    settlement_reservation = budget_reservation
+                    budget_reservation = None
+                    async def close_and_settle():
+                        try:
+                            await upstream.aclose()
+                            await lease.release_deployment()
+                        finally:
+                            await current.budget.settle(settlement_reservation, raw_usage)
+                    await _run_stream_finalization(close_and_settle())
                 private_payload = payload
                 if (
                     api_kind == "responses"
@@ -1976,6 +2071,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         decision,
                         excluded,
                         excluded_deployments,
+                        apply_cooldown=not isinstance(exc, httpx.ReadTimeout),
                     )
                 await lease.release_deployment()
                 legacy_subscription_fallback = bool(
@@ -2114,7 +2210,7 @@ async def _identity_intercept_response(
             effective_body,
             api_kind,
         ).body
-        input_tokens = current.token_counter.count_request(
+        input_tokens = await count_tokens(current,
             identity.inject(effective_body, api_kind),
             api_kind,
         )
@@ -2140,6 +2236,7 @@ async def _identity_intercept_response(
         if trace.payload.get("disclosure_mode") == "public":
             current.review_privacy(
                 effective_body, api_kind, request_id=request_id, client_id=client_id,
+                lr_decision=True,
             )
         headers = {
             "Cache-Control": "no-store",
@@ -2481,6 +2578,7 @@ async def _candidate_history_token_evidence(
         projection_key = json.dumps(
             {
                 "contract": contract if isinstance(contract, dict) else {},
+                "provider_family": provider_family(endpoint),
                 "responses_mode": endpoint.capabilities.responses,
             },
             sort_keys=True,
@@ -2511,14 +2609,19 @@ async def _candidate_history_token_evidence(
         projection_cache[projection_key] = (projected, shared_tokens)
         return projected, shared_tokens
 
+    # Provider projection and tokenization are CPU work, not async I/O.
+    # Serialize access to the per-request projection cache while off-loop.
+    import threading
+    projection_lock = threading.Lock()
+
+    def prepare_candidate(endpoint):
+        with projection_lock:
+            projected, shared_tokens = projected_candidate(endpoint)
+        count_payload, count_api_kind = _target_count_payload(identity, projected, api_kind, endpoint)
+        return shared_tokens, count_payload, count_api_kind
+
     async def count_candidate(endpoint: Endpoint):
-        projected, shared_tokens = projected_candidate(endpoint)
-        count_payload, count_api_kind = _target_count_payload(
-            identity,
-            projected,
-            api_kind,
-            endpoint,
-        )
+        shared_tokens, count_payload, count_api_kind = await compute(current, prepare_candidate, endpoint)
         result = (
             await counter.count(
                 endpoint,
@@ -3009,7 +3112,7 @@ async def _acquire_route_capacity(
             if "tools" in body and routed_body.get("tools") != body["tools"]:
                 # Re-selection must start with backend-neutral tool definitions.
                 routed_body = {**routed_body, "tools": body["tools"]}
-                prompt_tokens = current.token_counter.count_request(
+                prompt_tokens = await count_tokens(current,
                     identity.inject(routed_body, api_kind),
                     api_kind,
                 )
@@ -3451,6 +3554,11 @@ async def _send_upstream(
         payload = responses_request_to_chat(payload)
         payload = normalize_request(payload, "chat").body
     upstream_api_kind = "chat" if responses_adapter else api_kind
+    if upstream_api_kind == "chat" and provider_family(decision.endpoint) == "deepseek":
+        from .reasoning_fields import deepseek_tool_history
+        payload, compatibility = deepseek_tool_history(payload)
+        if decision.trace:
+            decision.trace.payload["deepseek_history_compatibility"] = compatibility
     send_contract_violations = history_contract_violations(
         decision.endpoint,
         payload,
@@ -3562,7 +3670,7 @@ async def _send_upstream(
             payload["stream_options"] = {**(options or {}), "include_usage": True}
     observation = getattr(request.state, "content_observation", None)
     if observation:
-        observation.capture("forwarded_" + str(attempt), payload)
+        await compute(current, observation.capture, "forwarded_" + str(attempt), payload)
         if decision.trace:
             decision.trace.payload.setdefault("observation", {})["content"] = observation.metadata()
             decision.trace.payload["observation"]["queue_wait_ms"] = decision.queue_wait_ms
@@ -3632,6 +3740,8 @@ async def _exclude_failed_decision(
     decision: RouteDecision,
     excluded_endpoints: set[str],
     excluded_deployments: set[str],
+    *,
+    apply_cooldown: bool = True,
 ) -> None:
     cooldown = int(
         current.settings.section("failover").get("cooldown_seconds", 20)
@@ -3645,7 +3755,8 @@ async def _exclude_failed_decision(
             excluded_deployments.add(decision.deployment_id)
         else:
             excluded_endpoints.add(decision.endpoint.id)
-        await current.health.mark_failure(decision.deployment_id, cooldown)
+        if apply_cooldown:
+            await current.health.mark_failure(decision.deployment_id, cooldown)
         return
     if (
         decision.endpoint.backend_type == "ai_pool"
@@ -3653,10 +3764,14 @@ async def _exclude_failed_decision(
         and decision.deployment_id
     ):
         excluded_deployments.add(decision.deployment_id)
-        await current.health.mark_failure(decision.deployment_id, cooldown)
+        if apply_cooldown:
+            await current.health.mark_failure(decision.deployment_id, cooldown)
         return
     excluded_endpoints.add(decision.endpoint.id)
-    await current.health.mark_failure(decision.endpoint.id, cooldown)
+    # A read deadline is request-scoped: other concurrent requests may still
+    # succeed. Keep this request's exclusions without cooling the shared target.
+    if apply_cooldown:
+        await current.health.mark_failure(decision.endpoint.id, cooldown)
 
 
 def _is_ai_vision_workspace_failure(
@@ -3932,7 +4047,7 @@ async def _prepare_routed_body(
         )
         return apply_target_tool_schema(projected)
 
-    routed = project_history(body)
+    routed = await compute(current, project_history, body)
     contract_body = (
         responses_request_to_chat(routed)
         if (
@@ -3975,7 +4090,7 @@ async def _prepare_routed_body(
         api_kind,
         decision.endpoint,
     )
-    routed_prompt_tokens = current.token_counter.count_request(
+    routed_prompt_tokens = await count_tokens(current,
         count_payload,
         count_api_kind,
     )
@@ -4023,7 +4138,7 @@ async def _prepare_routed_body(
                 **({"summary_scope": summary_scope} if summary_scope is not None else {}),
             )
         )
-        routed = project_history(compacted_history)
+        routed = await compute(current, project_history, compacted_history)
         count_payload, count_api_kind = _target_count_payload(
             identity,
             routed,
@@ -4031,7 +4146,7 @@ async def _prepare_routed_body(
             decision.endpoint,
         )
         routed_prompt_tokens = (
-            current.token_counter.count_request(
+            await count_tokens(current,
                 count_payload,
                 count_api_kind,
             )
@@ -4216,7 +4331,7 @@ async def _compact_body_for_target(
         api_kind,
         compacted_messages,
     )
-    prompt_tokens = current.token_counter.count_request(
+    prompt_tokens = await count_tokens(current,
         identity.inject(routed, api_kind),
         api_kind,
     )
@@ -4243,6 +4358,13 @@ def _compaction_allowed(
     if compaction.get("mode", "explicit_only") == "automatic":
         return True
     return client_allows or _truthy_header(header_value)
+
+
+def _target_allows_compaction(
+    requested_model: str,
+    evaluation: Evaluation,
+) -> bool:
+    return requested_model == "auto" and not evaluation.required_endpoint_id
 
 
 def _truthy_header(value: str) -> bool:
@@ -4492,10 +4614,14 @@ class _StreamResourceFinalizer:
         current: RouterRuntime,
         lease: Any,
         client_id: str,
+        *,
+        budget_reservation: Any = None,
     ) -> None:
         self.current = current
         self.lease = lease
         self.client_id = client_id
+        self.budget_reservation = budget_reservation
+        self.budget_usage: dict[str, Any] | None = None
         self._lock = asyncio.Lock()
         self._stream_finalization_lock = asyncio.Lock()
         self._released = False
@@ -4516,7 +4642,11 @@ class _StreamResourceFinalizer:
             if self._released:
                 return
             first_error: Exception | None = None
-            for operation in (
+            operations = []
+            if self.budget_reservation is not None:
+                # An abandoned stream must not be treated as a free request.
+                operations.append(lambda: self.current.budget.settle(self.budget_reservation, self.budget_usage))
+            for operation in (*operations,
                 self.lease.release,
                 lambda: self.current.limiter.release_parallel(
                     self.client_id,
@@ -4682,6 +4812,7 @@ async def _stream_response(
     identity: IdentityProfile,
     identifiers: tuple[str, ...],
     response_model: str | None = None,
+    budget_reservation: Any = None,
 ) -> AsyncIterator[bytes]:
     await resource_finalizer.begin_stream()
     accumulator = SSEAccumulator(api_kind)
@@ -4713,7 +4844,14 @@ async def _stream_response(
     invalid_output = False
     transport_interrupted = False
     pending_public_chunks: list[bytes] = []
+    held_terminal_chunks: list[bytes] = []
+    archive_failure = False
+    queued_archive = getattr(current.training, "queue", None) is not None
     effective_output_exposed = False
+    # Keep bounded evidence only in the existing encrypted failure archive.
+    # Never log raw model output or mark an incomplete response trainable.
+    raw_upstream_tail = bytearray()
+    raw_upstream_bytes = 0
     try:
         source = (
             chat_stream_to_responses(
@@ -4729,6 +4867,11 @@ async def _stream_response(
             else upstream.aiter_bytes()
         )
         async for chunk in source:
+            if current.training is not None:
+                raw_upstream_bytes += len(chunk)
+                raw_upstream_tail.extend(chunk)
+                if len(raw_upstream_tail) > 65536:
+                    del raw_upstream_tail[:-65536]
             private_accumulator.feed(chunk)
             batch_completed = False
             visible = b"".join(usage_filter.feed(chunk)) if usage_filter else chunk
@@ -4740,6 +4883,12 @@ async def _stream_response(
                         decision.trace.payload.setdefault(
                             "observation", {}
                         ).update(output_clock.values)
+                    if queued_archive and accumulator.completed and accumulator.has_effective_output():
+                        held_terminal_chunks.extend(pending_public_chunks)
+                        pending_public_chunks.clear()
+                        held_terminal_chunks.append(public_chunk)
+                        batch_completed = True
+                        continue
                     if effective_output_exposed:
                         yield public_chunk
                     else:
@@ -4772,6 +4921,11 @@ async def _stream_response(
                 output_clock.feed(public_chunk)
                 if decision.trace:
                     decision.trace.payload.setdefault("observation", {}).update(output_clock.values)
+                if queued_archive and accumulator.completed and accumulator.has_effective_output():
+                    held_terminal_chunks.extend(pending_public_chunks)
+                    pending_public_chunks.clear()
+                    held_terminal_chunks.append(public_chunk)
+                    continue
                 if effective_output_exposed:
                     yield public_chunk
                 else:
@@ -4844,7 +4998,15 @@ async def _stream_response(
 
         async def finalize_stream() -> None:
             try:
+                if budget_reservation is not None:
+                    final_usage = adapter_usage if api_kind == "responses" and decision.native_or_adapter == "adapter" else private_accumulator.usage
+                    if private_accumulator.usage_incomplete:
+                        final_usage = None
+                    # Settle once in resource cleanup, after history and audit.
+                    # Keep observed usage even if settlement must be retried.
+                    resource_finalizer.budget_usage = final_usage
                 await upstream.aclose()
+                await resource_finalizer.lease.release_deployment()
                 if completed:
                     await persist_history(
                         current.compactor,
@@ -4908,6 +5070,14 @@ async def _stream_response(
                                 "type": failure_code,
                                 "message": failure_message,
                             },
+                            response_payload=json.dumps({
+                                "diagnostic": {
+                                    "stream_format": "responses_adapter" if api_kind == "responses" and decision.native_or_adapter == "adapter" else api_kind,
+                                    "upstream_sse_tail": raw_upstream_tail.decode("utf-8", errors="replace"),
+                                    "truncated": raw_upstream_bytes > len(raw_upstream_tail),
+                                    "output_integrity": output_integrity,
+                                },
+                            }, ensure_ascii=False).encode("utf-8"),
                             interrupted=not invalid_output,
                         )
                     )
@@ -4973,7 +5143,21 @@ async def _stream_response(
                 finally:
                     resource_finalizer.finish_stream()
 
-        await _run_stream_finalization(finalize_stream())
+        try:
+            await _run_stream_finalization(finalize_stream())
+        except TrainingArchiveUnavailableError:
+            held_terminal_chunks.clear()
+            if decision.trace and not decision.trace.terminal:
+                decision.trace.fail(status_code=503, code="training_archive_unavailable",
+                    message="archive queue admission failed", interrupted=True, attempt=decision.attempts)
+                await _save_request_trace(current, decision.trace)
+            archive_failure = True
+    if archive_failure:
+        yield _stream_error_event(api_kind, code="training_archive_unavailable",
+                                  message="archive queue admission failed")
+        return
+    for terminal_chunk in held_terminal_chunks:
+        yield terminal_chunk
 
 
 async def _fail_training_record(
@@ -5169,14 +5353,17 @@ async def _audit(
     if client_id in {"workbuddy-public", "workbuddy-qwen36-shared"} and decision.trace and decision.trace.terminal:
         if decision.trace.payload.get("status") == "succeeded":
             try:
-                from .history_index import index_completed
-                await index_completed(current, decision.trace.payload)
-                await asyncio.to_thread(WorkBuddyHistory(current.route_traces.database_path).record, decision.trace.payload)
-                history = next((c for c in decision.trace.payload.get("observation", {}).get("content", {}).get("checks", []) if c.get("check") == "workbuddy_history"), {})
-                # Only metadata aliases are stored in Redis; raw content remains encrypted.
-                aliases = [value for value in history.get("raw_identities", []) if "v5-history-" not in value]
-                if aliases and decision.trace.payload.get("branch_id"):
-                    await current.conversations.map_history(client_id, tuple(aliases), decision.trace.payload["branch_id"])
+                if getattr(current.training, "publish_history", None) is not None:
+                    await current.training.publish_history(decision.trace.payload)
+                else:
+                    from .history_index import index_completed
+                    await index_completed(current, decision.trace.payload)
+                    await asyncio.to_thread(WorkBuddyHistory(current.route_traces.database_path).record, decision.trace.payload)
+                    history = next((c for c in decision.trace.payload.get("observation", {}).get("content", {}).get("checks", []) if c.get("check") == "workbuddy_history"), {})
+                    # Only metadata aliases are stored in Redis; raw content remains encrypted.
+                    aliases = [value for value in history.get("raw_identities", []) if "v5-history-" not in value]
+                    if aliases and decision.trace.payload.get("branch_id"):
+                        await current.conversations.map_history(client_id, tuple(aliases), decision.trace.payload["branch_id"])
             except Exception as error:
                 current.audit.write("workbuddy_history_index_unavailable", request_id=request_id, error_type=type(error).__name__)
         if not getattr(current, "prefix_break_collector", None):
@@ -5525,6 +5712,7 @@ async def _finish_request_trace_error(
     if trace is None or trace.terminal:
         return
     current = _runtime(request)
+    _record_compaction_validation_failure(current, trace, exc)
     trace.fail(
         status_code=exc.status_code,
         code=exc.code,
@@ -5541,6 +5729,7 @@ async def _finish_trace_exception(
     if trace is None or trace.terminal:
         return
     interrupted = isinstance(exc, asyncio.CancelledError)
+    _record_compaction_validation_failure(current, trace, exc)
     trace.fail(
         status_code=(
             499
@@ -5566,6 +5755,42 @@ async def _finish_trace_exception(
         interrupted=interrupted,
     )
     await _save_request_trace(current, trace)
+
+
+def _record_compaction_validation_failure(
+    current: RouterRuntime,
+    trace: DecisionTrace,
+    exc: BaseException,
+) -> None:
+    if not isinstance(exc, SummaryResponseError):
+        return
+    evidence = {
+        "reason_code": exc.reason_code,
+        "upstream_status_code": int(exc.status_code),
+        "retryable": bool(exc.retryable),
+        **exc.diagnostics,
+    }
+    attempt = max(
+        (int(item["number"]) for item in trace.payload.get("attempts", [])),
+        default=1,
+    )
+    trace.record(
+        attempt,
+        "context_compaction",
+        "error",
+        reason=exc.reason_code,
+        evidence=evidence,
+        path=False,
+    )
+    try:
+        current.audit.write(
+            "compaction_validation_failed",
+            request_id=trace.request_id,
+            client_request_id=trace.payload.get("client_request_id"),
+            **evidence,
+        )
+    except Exception as audit_exc:
+        evidence["audit_write_error"] = type(audit_exc).__name__
 
 
 def _record_trace_retry(
@@ -5674,6 +5899,8 @@ def _public_error_message(exc: RouterError) -> str:
         "rate_limit_exceeded": "rate limit exceeded",
         "rpm_limit_exceeded": "client request-per-minute limit exceeded",
         "tpm_limit_exceeded": "client token-per-minute limit exceeded",
+        "cloud_budget_exceeded": "Router cloud budget is insufficient; retrying will not restore the budget",
+        "cloud_budget_not_configured": "Router cloud budget is not configured",
         "request_exceeds_tpm_limit": (
             "request exceeds the client token-per-minute limit"
         ),
@@ -5683,6 +5910,11 @@ def _public_error_message(exc: RouterError) -> str:
         "no_eligible_model": "no eligible model is available",
         "no_compatible_model": (
             "no model can satisfy the request constraints"
+        ),
+        "context_too_large_for_selected_model": (
+            "the selected model context is too small for this conversation; "
+            "switch to a larger-context model, compact the conversation, or "
+            "start a new conversation"
         ),
         "router_draining": "service is restarting",
     }

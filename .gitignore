@@ -75,6 +75,8 @@ agent/.golangci.yml
 openspec
 CLAUDE.md
 AGENTS.md
+!/AGENTS.md
+!/deploy/ai-router/AGENTS.md
 opencode.json
 superpowers
 .worktrees/

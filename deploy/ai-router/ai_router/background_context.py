@@ -1,6 +1,8 @@
 """Foreground-owned submission and application of background candidates."""
 from __future__ import annotations
 
+from .compute import count_tokens
+
 from .compaction import Capsule, extract_messages, message_hash
 from .memory_service import _thread
 from .routing_modes import resolve
@@ -53,8 +55,8 @@ async def apply_background(current, body, *, owner, branch, api_kind, identity, 
             applied = await _thread(jobs.apply_candidate, owner, job["id"], job["branch"], body, api_kind)
             if applied is None:
                 continue
-            before = current.token_counter.count_request(identity.inject(body, api_kind), api_kind)
-            after = current.token_counter.count_request(identity.inject(applied, api_kind), api_kind)
+            before = await count_tokens(current, identity.inject(body, api_kind), api_kind)
+            after = await count_tokens(current, identity.inject(applied, api_kind), api_kind)
             if after >= before:
                 continue
             messages = extract_messages(applied, api_kind)

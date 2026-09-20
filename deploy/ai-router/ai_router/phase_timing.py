@@ -60,8 +60,11 @@ class PhaseTimingMiddleware:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope.get("path") not in ("/v1/chat/completions", "/v1/responses"):
             return await self.app(scope, receive, send)
+        from .compute import token_cache
+        cache_token = token_cache.set({})
         token = _current.set({"version": 1, "stages": {}})
         try:
             return await self.app(scope, receive, send)
         finally:
             _current.reset(token)
+            token_cache.reset(cache_token)

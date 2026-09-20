@@ -11,6 +11,7 @@ from uuid import uuid4
 from .config import Registry, Settings
 from .context_policy import apply_context_policy
 from .errors import (
+    ContextTooLargeForSelectedModelError,
     NoCompatibleModelError,
     NoEligibleModelError,
     RouteDirectiveIncompatibleError,
@@ -612,6 +613,72 @@ class RoutingPolicy:
             message = "no eligible model is available: " + ", ".join(
                 rejections
             )
+            selected_model_is_constrained = directed or requested_model != "auto"
+            if (
+                selected_model_is_constrained
+                and endpoints
+                and all(
+                    rejection_by_endpoint.get(endpoint.id) == "context"
+                    for endpoint in endpoints
+                )
+            ):
+                context_fits: list[tuple[Endpoint, int, int]] = []
+                for endpoint in endpoints:
+                    candidate_prompt_tokens = counts.get(
+                        endpoint.id,
+                        prompt_tokens,
+                    )
+                    required_context_tokens = (
+                        candidate_prompt_tokens + output_reserve_tokens
+                    )
+                    status = statuses[endpoint.id]
+                    model_context_tokens = min(
+                        endpoint.safe_context_tokens,
+                        status.eligible_context_tokens
+                        or endpoint.safe_context_tokens,
+                    )
+                    if endpoint.backend_type == "ai_pool":
+                        physical_context_limits = []
+                        for worker in status.detail.get("workers", []):
+                            try:
+                                physical_limit = int(
+                                    worker.get("safe_context_tokens", 0)
+                                )
+                            except (AttributeError, TypeError, ValueError):
+                                continue
+                            if physical_limit > 0:
+                                physical_context_limits.append(physical_limit)
+                        if physical_context_limits:
+                            model_context_tokens = min(
+                                model_context_tokens,
+                                max(physical_context_limits),
+                            )
+                    alias_max_input = endpoint.metadata.get(
+                        "model_alias_max_input_tokens"
+                    )
+                    if alias_max_input is not None:
+                        model_context_tokens = min(
+                            model_context_tokens,
+                            int(alias_max_input) + output_reserve_tokens,
+                        )
+                    context_fits.append(
+                        (
+                            endpoint,
+                            required_context_tokens,
+                            model_context_tokens,
+                        )
+                    )
+                target, required_context_tokens, model_context_tokens = min(
+                    context_fits,
+                    key=lambda item: item[1] - item[2],
+                )
+                if model_context_tokens > 0:
+                    raise ContextTooLargeForSelectedModelError(
+                        requested_model=requested_model,
+                        endpoint_id=target.id,
+                        required_context_tokens=required_context_tokens,
+                        model_context_tokens=model_context_tokens,
+                    )
             if directed:
                 if endpoint_constraint_source == "client_route_binding":
                     if any(

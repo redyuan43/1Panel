@@ -751,7 +751,9 @@ def test_candidate_count_uses_projected_shared_fallback(
         projected = normalize_history_for_provider(body, "chat", target)
         projected_tokens = token_counter.count_request(projected, "chat")
         assert evidence[target.id]["tokens"] == projected_tokens
-        assert projected_tokens < original_tokens
+        # DeepSeek must retain real reasoning; fallback counting includes it.
+        assert projected_tokens == original_tokens
+        assert projected["messages"][0]["reasoning_content"] == "private " * 1000
         assert evidence[target.id]["source"] == "shared_estimate"
         assert len(calls) == int(tokenizer_enabled)
         if tokenizer_enabled:

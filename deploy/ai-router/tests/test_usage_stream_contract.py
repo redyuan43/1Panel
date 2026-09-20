@@ -73,32 +73,81 @@ class StreamContract(unittest.IsolatedAsyncioTestCase):
         actual=await self.sent({'model':'synthetic','messages':[{'role':'user','content':'synthetic'}]})
         self.assertNotIn('stream_options',actual)
 
-    async def streamed(self, parts, include_usage):
+    async def streamed(self, parts, include_usage, capture_failure=False, settlement_failure=False):
         decision=self.decision()
         decision.native_or_adapter='native'
         decision.trace=None
-        finalizer=SimpleNamespace(begin_stream=mock.AsyncMock(),finish_stream=mock.Mock())
         stream=Chunks(parts)
         body={'stream':True,'messages':[{'role':'user','content':'synthetic'}]}
         if include_usage is not None: body['stream_options']={'include_usage':include_usage}
         audit_mock=mock.AsyncMock()
         async def handle(request): return httpx.Response(200,stream=stream)
         client=httpx.AsyncClient(transport=httpx.MockTransport(handle))
-        current=SimpleNamespace(compactor=None,conversations=None,training=None,internal_client=client,internal_api_key='synthetic')
+        training = mock.AsyncMock() if capture_failure else None
+        budget = SimpleNamespace(settle=mock.AsyncMock())
+        if settlement_failure:
+            budget.settle.side_effect = [api.RouterError('busy', status_code=503, code='cloud_budget_busy'), None]
+        current=SimpleNamespace(compactor=None,conversations=None,training=training,internal_client=client,internal_api_key='synthetic',budget=budget)
+        current.limiter = SimpleNamespace(release_parallel=mock.AsyncMock())
+        current.track_request_finished = mock.AsyncMock()
+        finalizer = api._StreamResourceFinalizer(current,
+            SimpleNamespace(release=mock.AsyncMock(), release_deployment=mock.AsyncMock(), owner_token='synthetic-owner'),
+            'synthetic-client', budget_reservation='reservation')
         request=Request({'type':'http','method':'POST','path':'/v1/chat/completions','headers':[]})
         request.state.server_request_id='synthetic-request'
         decision.upstream_api_base='http://synthetic.invalid/v1'
         upstream=await api._send_upstream(current,request,body,api_kind='chat',decision=decision,identity=IdentityProfile.from_settings({'enabled':False}))
-        with mock.patch.object(api,'persist_history',new=mock.AsyncMock()),mock.patch.object(api,'_audit',new=audit_mock),mock.patch.object(api,'_run_stream_resource_finalizer',new=mock.AsyncMock()):
-            chunks=[part async for part in api._stream_response(current,upstream,resource_finalizer=finalizer,
+        with mock.patch.object(api,'persist_history',new=mock.AsyncMock()) as history_mock,mock.patch.object(api,'_audit',new=audit_mock):
+            chunks = []
+            generator = api._stream_response(current,upstream,resource_finalizer=finalizer,
                 client_id='synthetic-client',key_id='synthetic-key',request_id='synthetic-request',
                 conversation_id=None,decision=decision,state=None,body=body,api_kind='chat',
                 training_token=None,started_at=time.monotonic()-.01,cache_snapshot=None,
-                identity=IdentityProfile.from_settings({'enabled':False}),identifiers=())]
+                identity=IdentityProfile.from_settings({'enabled':False}),identifiers=(),budget_reservation='reservation')
+            try:
+                async for part in generator:
+                    chunks.append(part)
+            except api.RouterError as exc:
+                if not settlement_failure:
+                    raise
+                self.assertEqual(exc.code, 'cloud_budget_busy')
+            else:
+                self.assertFalse(settlement_failure, 'settlement errors must remain visible')
+            if settlement_failure:
+                history_mock.assert_awaited_once()
+                audit_mock.assert_awaited_once()
+                finalizer.lease.release.assert_awaited_once()
+                current.limiter.release_parallel.assert_awaited_once()
+                current.track_request_finished.assert_awaited_once()
+                self.assertTrue(stream.closed)
         await client.aclose()
+        if training is not None:
+            self.last_failure = training.fail.await_args.kwargs
         self.assertTrue(stream.closed)
         self.assertEqual(audit_mock.await_count,1)
+        budget.settle.assert_awaited_once()
+        self.assertEqual(budget.settle.await_args.args[0], 'reservation')
+        if audit_mock.await_args.kwargs.get('usage_complete'):
+            self.assertEqual(budget.settle.await_args.args[1], audit_mock.await_args.kwargs['usage'])
+        if settlement_failure:
+            original_call = budget.settle.await_args
+            await finalizer()
+            self.assertEqual(budget.settle.await_count, 2)
+            self.assertEqual(budget.settle.await_args, original_call)
+            self.assertIsNotNone(original_call.args[1])
+            await finalizer()
+            self.assertEqual(budget.settle.await_count, 2)
         return b''.join(chunks),audit_mock.await_args.kwargs
+
+    async def test_settlement_failure_preserves_usage_history_audit_and_cleanup(self):
+        frames = [
+            {'choices': [{'index': 0, 'delta': {'content': 'OK'}, 'finish_reason': None}]},
+            {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
+            {'choices': [], 'usage': {'prompt_tokens': 100, 'completion_tokens': 1,
+                'prompt_tokens_details': {'cached_tokens': 90}}},
+        ]
+        wire = b''.join(b'data: ' + json.dumps(frame).encode() + b'\n\n' for frame in frames)
+        await self.streamed([wire + b'data: [DONE]\n\n'], False, settlement_failure=True)
 
     async def test_private_usage_survives_frame_filtering_chunk_matrix(self):
         usage={'prompt_tokens':100,'completion_tokens':1,'total_tokens':101,'prompt_tokens_details':{'cached_tokens':75}}
@@ -121,5 +170,33 @@ class StreamContract(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(''.join(v.get('choices',[{}])[0].get('delta',{}).get('content','') for v in events if v.get('choices')),'合成')
                         usage_events=[v for v in events if v.get('choices')==[] and isinstance(v.get('usage'),dict)]
                         self.assertEqual(len(usage_events),1 if include is True else 0)
+
+    async def test_vllm_reasoning_alias_is_not_misreported_as_empty(self):
+        frames = [
+            {'choices': [{'index': 0, 'delta': {'reasoning': 'synthetic thought'}, 'finish_reason': None}]},
+            {'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]},
+            {'choices': [], 'usage': {'prompt_tokens': 10, 'completion_tokens': 27, 'total_tokens': 37}},
+        ]
+        wire = b''.join(b'data: ' + json.dumps(frame).encode() + b'\n\n' for frame in frames) + b'data: [DONE]\n\n'
+        public, final = await self.streamed([wire], True)
+        self.assertNotIn(b'invalid_upstream_response', public)
+        self.assertEqual(final['status_code'], 200)
+        self.assertIn(b'synthetic thought', public)
+
+    async def test_genuinely_empty_response_still_fails(self):
+        wire = b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        public, final = await self.streamed([wire], True)
+        self.assertIn(b'invalid_upstream_response', public)
+        self.assertEqual(final['status_code'], 502)
+
+    async def test_empty_response_keeps_bounded_encrypted_archive_evidence(self):
+        wire = b': ' + b'x' * 70000 + b'\n\n' + b'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+        public, final = await self.streamed([wire], True, capture_failure=True)
+        diagnostic = json.loads(self.last_failure['response_payload'])['diagnostic']
+        self.assertLessEqual(len(diagnostic['upstream_sse_tail'].encode()), 65536)
+        self.assertTrue(diagnostic['truncated'])
+        self.assertIn('[DONE]', diagnostic['upstream_sse_tail'])
+        self.assertNotIn(b'upstream_sse_tail', public)
+        self.assertEqual(final['status_code'], 502)
 
 if __name__=='__main__': unittest.main(verbosity=2)

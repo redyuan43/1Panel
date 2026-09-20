@@ -70,6 +70,32 @@ class NoCompatibleModelError(RouterError):
         )
 
 
+class ContextTooLargeForSelectedModelError(RouterError):
+    def __init__(
+        self,
+        *,
+        requested_model: str,
+        endpoint_id: str,
+        required_context_tokens: int,
+        model_context_tokens: int,
+    ) -> None:
+        super().__init__(
+            (
+                "the selected model cannot process this conversation without "
+                "compaction; switch to a larger-context model, compact the "
+                "conversation, or start a new conversation"
+            ),
+            status_code=422,
+            code="context_too_large_for_selected_model",
+            details={
+                "requested_model": requested_model,
+                "endpoint_id": endpoint_id,
+                "required_context_tokens": required_context_tokens,
+                "model_context_tokens": model_context_tokens,
+            },
+        )
+
+
 class RouteDirectiveIncompatibleError(RouterError):
     def __init__(self, message: str) -> None:
         super().__init__(

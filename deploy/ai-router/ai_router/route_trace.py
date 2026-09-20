@@ -1344,6 +1344,8 @@ class RouteTraceStore:
             "request_id", "client_id", "mode", "policy_version", "review_model", "backend",
             "source", "status", "decision", "reason", "valid", "skipped", "elapsed_ms",
             "review_request_id", "updated_at", "deadline_at",
+            # A/B cross-check between the synchronous LR gate and this LLM review.
+            "lr_decision", "agreement",
         }
         payload = {key: item for key, item in value.items() if key in allowed}
         with self._connect() as connection:

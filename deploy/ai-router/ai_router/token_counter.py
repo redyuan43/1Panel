@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -97,8 +98,13 @@ class HuggingFaceTokenCounter:
         self.image_token_estimate = max(1, int(image_token_estimate))
         self.audio_token_estimate = max(1, int(audio_token_estimate))
         self._tokenizer: Any | None = None
+        self._load_lock = threading.Lock()
 
     def _load(self) -> Any:
+        with self._load_lock:
+            return self._load_locked()
+
+    def _load_locked(self) -> Any:
         if self._tokenizer is not None:
             return self._tokenizer
         if not self.tokenizer_path.exists():

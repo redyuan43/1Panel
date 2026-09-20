@@ -338,6 +338,25 @@ def test_non_pool_image_limit_rejects_only_excess_images(
     )
     assert text.endpoint.id == endpoint.id
 
+    images = run(
+        policy.choose(
+            requested_model=endpoint.public_model,
+            evaluation=Evaluation(
+                "general",
+                None,
+                1.0,
+                "test",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text", "image"},
+            image_count=8,
+            has_tools=False,
+            conversation=None,
+        )
+    )
+    assert images.endpoint.id == endpoint.id
+
     with pytest.raises(NoEligibleModelError) as error:
         run(
             policy.choose(
@@ -351,7 +370,7 @@ def test_non_pool_image_limit_rejects_only_excess_images(
                 prompt_tokens=100,
                 output_reserve_tokens=100,
                 modalities={"text", "image"},
-                image_count=2,
+                image_count=9,
                 has_tools=False,
                 conversation=None,
             )
@@ -413,13 +432,36 @@ def test_affinity_cannot_bypass_non_pool_image_limit(
             prompt_tokens=100,
             output_reserve_tokens=100,
             modalities={"text", "image"},
-            image_count=2,
+            image_count=8,
             has_tools=False,
             conversation=conversation,
         )
     )
-    assert images.endpoint.id != endpoint.id
-    assert f"{endpoint.id}:image_count" in images.candidate_rejections
+    assert images.endpoint.id == endpoint.id
+    assert images.affinity == "hit"
+
+    excess_images = run(
+        policy.choose(
+            requested_model="auto",
+            evaluation=Evaluation(
+                "long-context",
+                None,
+                1.0,
+                "test",
+                route_profile="multimodal",
+            ),
+            prompt_tokens=100,
+            output_reserve_tokens=100,
+            modalities={"text", "image"},
+            image_count=9,
+            has_tools=False,
+            conversation=conversation,
+        )
+    )
+    assert excess_images.endpoint.id != endpoint.id
+    assert f"{endpoint.id}:image_count" in (
+        excess_images.candidate_rejections
+    )
 
 
 def test_v2_cloud_conversation_keeps_original_expert(

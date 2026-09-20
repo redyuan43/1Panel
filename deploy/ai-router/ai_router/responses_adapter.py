@@ -9,6 +9,8 @@ from uuid import uuid4
 
 import httpx
 
+from .reasoning_fields import chat_reasoning
+
 
 SSE_EVENT_SEPARATOR = re.compile(r"(?:(?:\r\n)|\r|\n){2,}")
 
@@ -191,7 +193,7 @@ async def chat_stream_to_responses(
         delta = choice.get("delta")
         if not isinstance(delta, dict):
             continue
-        reasoning_delta = delta.get("reasoning_content")
+        reasoning_delta = chat_reasoning(delta)
         if isinstance(reasoning_delta, str) and reasoning_delta:
             reasoning_parts.append(reasoning_delta)
         content_delta = delta.get("content")
@@ -411,7 +413,7 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
                     },
                 }
             )
-            reasoning_content = item.get("reasoning_content")
+            reasoning_content = chat_reasoning(item)
             if (
                 isinstance(reasoning_content, str)
                 and reasoning_content not in pending_reasoning
@@ -439,7 +441,7 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
             "role": role,
             "content": _responses_content_to_chat(item.get("content")),
         }
-        reasoning_content = item.get("reasoning_content")
+        reasoning_content = chat_reasoning(item)
         if isinstance(reasoning_content, str):
             message["reasoning_content"] = reasoning_content
         result.append(message)
@@ -540,7 +542,7 @@ def _chat_value_to_response(
     )
     status, incomplete_reason = _response_completion(finish_reason)
     text = _text(message.get("content"))
-    reasoning = message.get("reasoning_content")
+    reasoning = chat_reasoning(message)
     message_item = _message_item(
         f"msg_{uuid4().hex}",
         text,

@@ -51,6 +51,19 @@ def test_invalid_or_truncated_summaries_are_rejected(finish, content, reason):
             assert error.value.status_code == 200
             assert error.value.reason_code == reason
             assert not error.value.retryable
+            diagnostics = error.value.diagnostics
+            assert diagnostics["response_bytes"] > 0
+            assert len(diagnostics["response_sha256"]) == 64
+            assert diagnostics["finish_reason"] == finish
+            if reason == "invalid_json":
+                assert diagnostics["validation_exception"] == "JSONDecodeError"
+                assert diagnostics["json_error_position"] == 0
+            elif reason == "invalid_fields":
+                assert diagnostics["invalid_field_types"] == {"facts": "str"}
+            elif reason == "non_object":
+                assert diagnostics["value_type"] == "list"
+            elif reason == "empty_handoff":
+                assert diagnostics["present_handoff_fields"] == []
     asyncio.run(scenario())
 
 

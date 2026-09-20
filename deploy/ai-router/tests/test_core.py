@@ -52,6 +52,7 @@ from ai_router.errors import (
     AllLocalCapacityBusyError,
     AuthenticationError,
     CapacityBusyError,
+    ContextTooLargeForSelectedModelError,
     ConversationBusyError,
     ConversationStateConflictError,
     InvalidToolHistoryError,
@@ -2415,7 +2416,7 @@ def test_ai_pool_filters_workers_by_required_context(tmp_path: Path) -> None:
     assert decision.deployment_candidates == (
         ("worker-priority-0", "http://127.0.0.1:18110/v1"),
     )
-    with pytest.raises(NoEligibleModelError):
+    with pytest.raises(ContextTooLargeForSelectedModelError) as raised:
         run(
             policy.choose(
                 requested_model=endpoint.public_model,
@@ -2427,6 +2428,8 @@ def test_ai_pool_filters_workers_by_required_context(tmp_path: Path) -> None:
                 conversation=None,
             )
         )
+    assert raised.value.details["required_context_tokens"] == 196700
+    assert raised.value.details["model_context_tokens"] == 196608
 
 
 def test_explicit_model_change_is_marked_for_compaction(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ import sqlite3
 import time
 import zlib
 from contextlib import closing
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,12 @@ from .phase_timing import timed_async
 
 SCHEMA_VERSION = 1
 TERMINAL_STATES = {"completed", "failed", "interrupted"}
+archive_event = ContextVar("archive_event", default=None)
+
+
+def _event_time():
+    event = archive_event.get()
+    return event[1] if event else time.time()
 
 
 class TrainingArchive:
@@ -85,7 +92,7 @@ class TrainingArchive:
             "record_type": "request",
             "state": "received",
             "trainable": False,
-            "received_at": time.time(),
+            "received_at": _event_time(),
             "request": {
                 "request_id": request_id,
                 "conversation_id": conversation_id,
@@ -133,7 +140,7 @@ class TrainingArchive:
             payload["routing_attempts"].append(
                 {
                     **route,
-                    "routed_at": time.time(),
+                    "routed_at": _event_time(),
                     "routed_body": routed_body,
                 }
             )
@@ -179,7 +186,7 @@ class TrainingArchive:
         def update(payload: dict[str, Any]) -> None:
             payload["state"] = "completed"
             payload["trainable"] = 200 <= status_code < 300
-            payload["completed_at"] = time.time()
+            payload["completed_at"] = _event_time()
             payload["response"] = {
                 "status_code": status_code,
                 "body": _response_value(response_payload),
@@ -210,7 +217,7 @@ class TrainingArchive:
         def update(payload: dict[str, Any]) -> None:
             payload["state"] = "interrupted" if interrupted else "failed"
             payload["trainable"] = False
-            payload["completed_at"] = time.time()
+            payload["completed_at"] = _event_time()
             payload["response"] = {
                 "status_code": status_code,
                 "body": _response_value(response_payload),
@@ -301,6 +308,10 @@ class TrainingArchive:
             with connection:
                 connection.executescript(
                     """
+                    CREATE TABLE IF NOT EXISTS training_applied_events (
+                        event_id TEXT PRIMARY KEY,
+                        applied_at REAL NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS training_records (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         request_hash TEXT NOT NULL UNIQUE,
@@ -370,6 +381,9 @@ class TrainingArchive:
         now = time.time()
         with closing(self._connect()) as connection:
             with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._event_applied(connection):
+                    return False
                 cursor = connection.execute(
                     """
                     INSERT OR IGNORE INTO training_records(
@@ -397,6 +411,7 @@ class TrainingArchive:
                         SCHEMA_VERSION,
                     ),
                 )
+                self._record_event(connection)
                 return cursor.rowcount == 1
 
     def _merge_sync(
@@ -410,6 +425,9 @@ class TrainingArchive:
     ) -> None:
         with closing(self._connect()) as connection:
             with connection:
+                connection.execute("BEGIN IMMEDIATE")
+                if self._event_applied(connection):
+                    return
                 row = connection.execute(
                     """
                     SELECT payload_ciphertext
@@ -424,6 +442,7 @@ class TrainingArchive:
                     )
                 payload = self._decrypt(bytes(row["payload_ciphertext"]))
                 if str(payload.get("state", "")) in TERMINAL_STATES:
+                    self._record_event(connection)
                     return
                 update(payload)
                 ciphertext, payload_bytes = self._encrypt(payload)
@@ -452,6 +471,25 @@ class TrainingArchive:
                         token,
                     ),
                 )
+                self._record_event(connection)
+
+    @staticmethod
+    def _event_applied(connection):
+        event = archive_event.get()
+        return bool(event and connection.execute(
+            "SELECT 1 FROM training_applied_events WHERE event_id=?", (event[0],)
+        ).fetchone())
+
+    @staticmethod
+    def _record_event(connection):
+        event = archive_event.get()
+        if event:
+            connection.execute("INSERT INTO training_applied_events VALUES(?,?)", (event[0], time.time()))
+
+    def forget_event(self, event_id):
+        # Only called after Redis confirms removal; an uncertain ACK retains it.
+        with closing(self._connect()) as connection, connection:
+            connection.execute("DELETE FROM training_applied_events WHERE event_id=?", (event_id,))
 
     def _status(self) -> dict[str, Any]:
         with closing(self._connect()) as connection:

@@ -29,6 +29,7 @@ def test_observation_survives_trace_updates_and_feedback_is_separate(tmp_path):
         value = {
             "request_id": "original", "updated_at": time.time(), "status": "completed",
             "decision": "normal", "reason": "technical_task", "valid": True,
+            "lr_decision": False, "agreement": "agree_negative",
             "raw_prompt": "NEVER_PERSIST",
         }
         await store.save_privacy_assessment(value)
@@ -39,6 +40,8 @@ def test_observation_survives_trace_updates_and_feedback_is_separate(tmp_path):
         )
         result = await store.get("original")
         assert result["privacy_assessment"]["status"] == "completed"
+        assert result["privacy_assessment"]["lr_decision"] is False
+        assert result["privacy_assessment"]["agreement"] == "agree_negative"
         assert "raw_prompt" not in result["privacy_assessment"]
         assert result["privacy_feedback"][0]["decision"] == "internal_info"
         assert result["current_review"] is None and result["review_status"] == "unreviewed"

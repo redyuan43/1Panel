@@ -42,6 +42,7 @@ from .store import InMemoryStateStore, RedisStateStore, StateStore
 from .token_counter import HuggingFaceTokenCounter, TokenCounter
 from .endpoint_tokens import EndpointTokenCounter
 from .training_archive import TrainingArchive
+from .compute import BoundedExecutor
 
 
 @dataclass
@@ -76,6 +77,7 @@ class RouterRuntime:
     boot_id: str
     state_encryption_key: str = field(repr=False)
     endpoint_token_counter: EndpointTokenCounter = field(default_factory=EndpointTokenCounter, init=False)
+    compute_executor: BoundedExecutor = field(default_factory=BoundedExecutor, init=False, repr=False)
     privacy_reviewer: PrivacyReviewer | None = field(default=None, init=False)
     prefix_prewarmer: PrefixPrewarmer | None = field(default=None, init=False, repr=False)
     track_instance: bool = False
@@ -550,9 +552,11 @@ class RouterRuntime:
             except asyncio.CancelledError:
                 pass
         await self.endpoint_token_counter.close()
-        close_archive = getattr(self.training, "close", None)
-        if close_archive is not None:
-            close_archive()
+        self.compute_executor.close()
+        if getattr(self.training, "aclose", None) is not None:
+            await self.training.aclose()
+        elif self.training is not None:
+            self.training.close()
         backfill = getattr(self, "_verified_history_backfill", None)
         if backfill is not None:
             backfill.cancel()
@@ -600,7 +604,15 @@ class RouterRuntime:
             decision, body, client_id=client_id, request_id=request_id, api_kind=api_kind,
         )
 
-    def review_privacy(self, body: dict[str, Any], api_kind: str, *, request_id: str, client_id: str) -> None:
+    def review_privacy(
+        self,
+        body: dict[str, Any],
+        api_kind: str,
+        *,
+        request_id: str,
+        client_id: str,
+        lr_decision: bool | None = None,
+    ) -> None:
         settings = self.settings.section("identity").get("review", {})
         if settings.get("mode", "off") != "shadow":
             return
@@ -609,6 +621,7 @@ class RouterRuntime:
                 self.privacy_reviewer = PrivacyReviewer(self.store, self.audit, traces=self.route_traces)
             self.privacy_reviewer.submit(
                 body, api_kind, settings, request_id=request_id, client_id=client_id,
+                lr_decision=lr_decision,
             )
         except Exception:
             # Shadow mode is not an availability dependency of the serving path.
@@ -686,10 +699,13 @@ def build_runtime(
     )
     training = None
     if _enabled_env("AI_ROUTER_TRAINING_ENABLED"):
-        training = TrainingArchive(
-            _required_env("AI_ROUTER_TRAINING_DB_PATH"),
-            _required_env("AI_ROUTER_TRAINING_KEY_PATH"),
-        )
+        archive_arguments = (_required_env("AI_ROUTER_TRAINING_DB_PATH"),
+                             _required_env("AI_ROUTER_TRAINING_KEY_PATH"))
+        if _enabled_env("AI_ROUTER_ARCHIVE_QUEUE_ENABLED"):
+            from .archive_queue import QueuedTrainingArchive
+            training = QueuedTrainingArchive(*archive_arguments, _required_env("AI_ROUTER_REDIS_URL"))
+        else:
+            training = TrainingArchive(*archive_arguments)
     prompt_directive_store = PromptDirectiveStore(
         os.environ.get(
             "AI_ROUTER_PROMPT_DIRECTIVE_DB_PATH",
