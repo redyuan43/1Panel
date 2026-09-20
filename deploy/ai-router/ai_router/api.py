@@ -57,6 +57,7 @@ from .history import (
     persist_history,
     provider_family,
     response_output_observation,
+    strip_identity_intercept_history,
 )
 from .identity import (
     IdentityProfile,
@@ -1003,6 +1004,14 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 path=False,
             )
         effective_body = json.loads(json.dumps(body))
+        identity_history_removed = False
+        if stored_conversation is not None and stored_conversation.identity_only:
+            effective_body, identity_history_removed = strip_identity_intercept_history(
+                effective_body,
+                api_kind,
+                identity.identity_response,
+            )
+            trace.payload["identity_history_removed"] = identity_history_removed
         if (
             not client_compacted
             and api_kind == "responses"
@@ -1011,7 +1020,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             effective_body = await apply_stored_history(
                 current.compactor,
                 current.conversations,
-                body,
+                effective_body,
                 api_kind=api_kind,
                 conversation=stored_conversation,
             )
@@ -2197,6 +2206,7 @@ async def _identity_intercept_response(
             body=effective_body,
             api_kind=api_kind,
             response_payload=response_payload,
+            persist_messages=False,
         )
         await _map_response_id(current, response_payload, state)
         current.audit.write(

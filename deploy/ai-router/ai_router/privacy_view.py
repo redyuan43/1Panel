@@ -11,6 +11,8 @@ class ReviewView:
     context: str = ""
     source: str = "message"
     certain: bool = True
+    fallback_queries: tuple[str, ...] = ()
+    wrapper_parse_failed: bool = False
 
 
 def content_text(value: Any) -> str:
@@ -99,15 +101,32 @@ def review_view(body: dict[str, Any], api_kind: str) -> ReviewView:
         try:
             parsed = _WorkBuddyView(text)
         except (ValueError, RecursionError):
-            return ReviewView("", source="ambiguous_wrapper", certain=False)
+            return ReviewView(
+                "",
+                context,
+                source="ambiguous_wrapper",
+                certain=False,
+                wrapper_parse_failed=True,
+            )
         current = ["".join(parts).strip() for root, parts in parsed.queries if root]
+        fallback = [query for query in current if query]
+        if parsed.active is not None and parsed.active[0]:
+            active = "".join(parsed.active[1]).strip()
+            if active:
+                fallback.append(active)
         if (
             parsed.invalid or parsed.stack or parsed.active is not None
             or len(current) != 1 or not current[0] or parsed.tail.strip()
             or not parsed.queries[-1][0]
             or not text.lower().endswith("</user_query>")
         ):
-            return ReviewView("", source="ambiguous_wrapper", certain=False)
+            return ReviewView(
+                "",
+                context,
+                source="ambiguous_wrapper",
+                certain=False,
+                fallback_queries=tuple(fallback),
+            )
         previous = ["".join(parts) for root, parts in parsed.queries if not root]
         return ReviewView(current[0], "\n".join(previous[-2:]), "workbuddy")
     return ReviewView(text, context)

@@ -22,7 +22,7 @@ from ai_router.identity import (
     is_identity_disclosure_request,
     sanitize_payload,
 )
-from ai_router.history import SSEAccumulator
+from ai_router.history import SSEAccumulator, strip_identity_intercept_history
 from ai_router.types import EndpointStatus
 
 
@@ -42,6 +42,52 @@ def profile() -> IdentityProfile:
             "底层模型、节点和路由实现属于内部服务信息，不对外披露。"
         ),
     )
+
+
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+def test_identity_intercept_history_is_removed_before_normal_followup(api_kind) -> None:
+    identity = profile()
+    messages = [
+        {"role": "system", "content": "normal policy"},
+        {"role": "user", "content": "remember normal context"},
+        {"role": "assistant", "content": "normal answer"},
+        {"role": "user", "content": "你现在底层是什么模型？"},
+        {"role": "assistant", "content": identity.identity_response},
+        {"role": "user", "content": "帮我写一个排序函数"},
+    ]
+    body = {"messages" if api_kind == "chat" else "input": messages}
+
+    cleaned, removed = strip_identity_intercept_history(
+        body, api_kind, identity.identity_response,
+    )
+    cleaned_messages = cleaned["messages" if api_kind == "chat" else "input"]
+
+    assert removed is True
+    assert [item["content"] for item in cleaned_messages] == [
+        "normal policy",
+        "remember normal context",
+        "normal answer",
+        "帮我写一个排序函数",
+    ]
+    assert body["messages" if api_kind == "chat" else "input"] == messages
+
+
+def test_identity_history_removal_requires_exact_adjacent_router_response() -> None:
+    identity = profile()
+    body = {
+        "messages": [
+            {"role": "user", "content": "你现在底层是什么模型？"},
+            {"role": "assistant", "content": identity.identity_response + " extra"},
+            {"role": "user", "content": "帮我写一个排序函数"},
+        ]
+    }
+
+    cleaned, removed = strip_identity_intercept_history(
+        body, "chat", identity.identity_response,
+    )
+
+    assert removed is False
+    assert cleaned is body
 
 
 def test_default_identity_is_branded_but_disabled(tmp_path: Path) -> None:

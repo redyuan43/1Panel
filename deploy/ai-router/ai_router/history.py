@@ -15,6 +15,7 @@ from .compaction import (
 )
 from .errors import ConversationStateConflictError
 from .phase_timing import timed_async
+from .privacy_view import content_text
 from .types import ConversationState, Endpoint
 
 
@@ -609,6 +610,31 @@ async def apply_stored_history(
         return result
 
 
+def strip_identity_intercept_history(
+    body: dict[str, Any],
+    api_kind: str,
+    identity_response: str,
+) -> tuple[dict[str, Any], bool]:
+    """Remove the immediately preceding Router-only identity exchange.
+
+    The pair is recognized narrowly: current user message, preceded by the
+    exact configured identity response, preceded by one user message. Older
+    normal history and the current request remain model-visible.
+    """
+    messages = extract_messages(body, api_kind)
+    if len(messages) < 3 or messages[-1].get("role") != "user":
+        return body, False
+    assistant = messages[-2]
+    prior_user = messages[-3]
+    if (
+        assistant.get("role") != "assistant"
+        or prior_user.get("role") != "user"
+        or content_text(assistant.get("content")).strip()
+        != identity_response.strip()
+    ):
+        return body, False
+    return replace_messages(body, api_kind, [*messages[:-3], messages[-1]]), True
+
 @timed_async("history_persist")
 async def persist_history(
     compactor: ContextCompactor,
@@ -621,6 +647,7 @@ async def persist_history(
     response_payload: bytes | None = None,
     assistant_message: dict[str, Any] | None = None,
     assistant_items: list[dict[str, Any]] | None = None,
+    persist_messages: bool = True,
 ) -> None:
     if state is None:
         return
@@ -636,8 +663,9 @@ async def persist_history(
     messages.extend(response_items)
     if not messages:
         return
-    state.encrypted_capsule = compactor.cipher.encrypt(messages)
-    state.boundary_hash = message_hash(messages[-1])
+    if persist_messages:
+        state.encrypted_capsule = compactor.cipher.encrypt(messages)
+        state.boundary_hash = message_hash(messages[-1])
     await conversations.save(state)
     await conversations.map_history(
         client_id,

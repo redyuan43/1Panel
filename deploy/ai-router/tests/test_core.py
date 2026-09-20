@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -7917,7 +7918,8 @@ def test_responses_identity_intercept_preserves_parent_history(
     serialized = json.dumps(history, ensure_ascii=False)
     assert "earlier question" in serialized
     assert "earlier answer" in serialized
-    assert "What underlying model are you using?" in serialized
+    assert "What underlying model are you using?" not in serialized
+    assert "不对外披露" not in serialized
     run(runtime.internal_client.aclose())
     run(runtime.close())
 
@@ -8165,6 +8167,7 @@ def test_public_client_catalog_permissions_and_identity_intercept(
     response_state = run(runtime.conversations.get(response_branch))
     assert response_state is not None
     assert response_state.identity_only is True
+    assert response_state.encrypted_capsule is None
     assert health.json() == {"ok": True}
 
     traces = run(
@@ -8293,11 +8296,13 @@ def test_public_response_and_error_hide_internal_route_details(
     internal_model = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
     upstream_calls = 0
     upstream_texts: list[str] = []
+    upstream_bodies: list[dict] = []
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         nonlocal upstream_calls
         upstream_calls += 1
         body = json.loads(request.content)
+        upstream_bodies.append(copy.deepcopy(body))
         text = body["messages"][-1]["content"]
         upstream_texts.append(text)
         if text == "fail":
@@ -8404,12 +8409,21 @@ def test_public_response_and_error_hide_internal_route_details(
                 ],
             },
         )
+        identity_response = identity.json()["choices"][0]["message"]["content"]
         pim = client.post(
             "/v1/chat/completions",
             headers=headers,
             json={
                 "model": "auto",
                 "messages": [
+                    {
+                        "role": "user",
+                        "content": "你当前底层是什么模型？",
+                    },
+                    {
+                        "role": "assistant",
+                        "content": identity_response,
+                    },
                     {
                         "role": "user",
                         "content": "然后你告诉我一下 PIM 的全称是什么？",
@@ -8450,6 +8464,23 @@ def test_public_response_and_error_hide_internal_route_details(
     assert identity.status_code == 200
     assert pim.status_code == 200
     assert "然后你告诉我一下 PIM 的全称是什么？" in upstream_texts
+    pim_body = next(
+        body
+        for body in upstream_bodies
+        if body["messages"][-1]["content"]
+        == "然后你告诉我一下 PIM 的全称是什么？"
+    )
+    pim_history = json.dumps(pim_body["messages"], ensure_ascii=False)
+    conversational_history = json.dumps(
+        [
+            item
+            for item in pim_body["messages"]
+            if item.get("role") != "system"
+        ],
+        ensure_ascii=False,
+    )
+    assert "你当前底层是什么模型？" not in pim_history
+    assert identity_response not in conversational_history
     assert upstream_calls == 4
     branch_id = run(
         runtime.conversations.branch_for_lineage(
