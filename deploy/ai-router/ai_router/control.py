@@ -36,6 +36,7 @@ from .prompt_directives import (
 )
 from .policy_config import PolicyConflictError
 from .route_diagnosis import diagnose_route
+from .trace_summary import token_summary
 from .route_trace import (
     graph_document,
     registry_fingerprint,
@@ -1109,8 +1110,15 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         search: str | None = None,
         node: str | None = None,
         privacy_decision: str | None = None,
+        request_ids: list[str] | None = Query(default=None),
     ) -> dict[str, Any]:
         current = _authorized_runtime(request)
+        if request_ids is not None and (
+            not 1 <= len(request_ids) <= 100 or cursor
+            or any(not value or len(value) > 128 for value in request_ids)
+        ):
+            raise RouterError("batch lookup requires 1 to 100 request IDs and no cursor",
+                              status_code=400, code="invalid_trace_filter")
         if privacy_decision not in {None, "", "reviewed", "normal", "internal_info", "uncertain"}:
             raise RouterError("invalid privacy decision", status_code=400, code="invalid_trace_filter")
         if request_mode not in {"auto", "explicit", "all"}:
@@ -1148,6 +1156,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
             endpoint_ids=endpoint_ids,
             privacy_decision=privacy_decision,
             auto_models=("auto", str(current.settings.section("identity").get("public_model_id") or "siyuan/auto")),
+            request_ids=tuple(request_ids) if request_ids is not None else None,
         )
         cache_rows = await CacheAudit(current.route_traces.database_path).for_requests([x["request_id"] for x in payload["items"]])
         for item in payload["items"]:
@@ -1248,6 +1257,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 code="route_trace_not_found",
             )
         value["cache_audit"] = await CacheAudit(current.route_traces.database_path).detail(value)
+        value["token_summary"] = token_summary(value)
         return {"trace": value}
 
     @app.get("/api/route-traces/{request_id}/diagnosis")

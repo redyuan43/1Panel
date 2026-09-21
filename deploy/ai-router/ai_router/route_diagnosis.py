@@ -392,6 +392,7 @@ def _alternative(item: dict[str, Any]) -> dict[str, Any]:
         "load_headroom": item.get("load_headroom"),
         "quality_score": item.get("quality_score"),
         "healthy": item.get("healthy"),
+        "health_evidence": item.get("health_evidence"),
         "fresh": item.get("fresh"),
         "tier": item.get("tier"),
         "cloud": bool(item.get("cloud")),

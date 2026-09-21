@@ -8,10 +8,12 @@ import os
 import re
 import time
 from typing import Any
+from uuid import uuid4
 
 import httpx
 
 from .store import StateStore
+from .health_evidence import HealthAuditWriter, probe_failure
 from .types import (
     DeploymentProfile,
     Endpoint,
@@ -83,6 +85,9 @@ class HealthMonitor:
         stale_after_seconds: float = 15.0,
         probe_timeout_seconds: float = 3.0,
         client: httpx.AsyncClient | None = None,
+        audit: Any = None,
+        instance_id: str = "",
+        boot_id: str = "",
     ) -> None:
         self.store = store
         self.refresh_seconds = refresh_seconds
@@ -95,6 +100,11 @@ class HealthMonitor:
         self._closing = False
         self._owns_client = client is None
         self.client = client or self._new_client()
+        self.audit = audit
+        self.instance_id = instance_id
+        self.boot_id = boot_id
+        self._failed_probes: dict[str, str] = {}
+        self._audit_writer = HealthAuditWriter()
 
     def configure(
         self,
@@ -175,6 +185,7 @@ class HealthMonitor:
         self._vllm_watch_tasks.clear()
         self._vllm_watch_targets.clear()
         self._vllm_progress.clear()
+        await self._audit_writer.close()
         if self._owns_client:
             await self.client.aclose()
 
@@ -293,40 +304,58 @@ class HealthMonitor:
 
     async def _probe(self, endpoint: Endpoint) -> EndpointStatus:
         checked_at = time.time()
+        started = time.monotonic()
+        failure = None
         try:
             if endpoint.backend_type == "ai_pool":
-                return await self._probe_ai_pool(endpoint, checked_at)
-            if endpoint.backend_type == "codex_pool":
-                return await self._probe_codex_pool(endpoint, checked_at)
-            if endpoint.backend_type == "vllm":
-                return await self._probe_vllm(endpoint, checked_at)
-            if endpoint.backend_type == "llama_cpp":
-                return await self._probe_llama_cpp(endpoint, checked_at)
-            headers = {}
-            api_key = os.environ.get(endpoint.backend_api_key_env, "")
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
-            response = await self.client.get(
-                endpoint.health_url,
-                headers=headers,
-            )
-            return EndpointStatus(
-                endpoint_id=endpoint.id,
-                healthy=response.is_success,
-                checked_at=checked_at,
-                cache_generation=_generation(response.headers.get("server", ""), response.headers.get("date", "")),
-                detail={"status_code": response.status_code},
-            )
+                status = await self._probe_ai_pool(endpoint, checked_at)
+            elif endpoint.backend_type == "codex_pool":
+                status = await self._probe_codex_pool(endpoint, checked_at)
+            elif endpoint.backend_type == "vllm":
+                status = await self._probe_vllm(endpoint, checked_at)
+            elif endpoint.backend_type == "llama_cpp":
+                status = await self._probe_llama_cpp(endpoint, checked_at)
+            else:
+                headers = {}
+                api_key = os.environ.get(endpoint.backend_api_key_env, "")
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                response = await self.client.get(endpoint.health_url, headers=headers)
+                status = EndpointStatus(
+                    endpoint_id=endpoint.id,
+                    healthy=response.is_success,
+                    checked_at=checked_at,
+                    cache_generation=_generation(response.headers.get("server", ""), response.headers.get("date", "")),
+                    detail={"status_code": response.status_code},
+                )
         except Exception as exc:
             if endpoint.backend_type == "vllm":
                 self._vllm_progress.pop(endpoint.id, None)
-            return EndpointStatus(
+            failure = probe_failure(error=exc)
+            status = EndpointStatus(
                 endpoint_id=endpoint.id,
                 healthy=False,
                 checked_at=checked_at,
                 load_headroom=0,
                 detail={"error": f"{type(exc).__name__}: {exc}"},
             )
+        probe = {"probe_id": uuid4().hex, "instance_id": self.instance_id,
+                 "boot_id": self.boot_id, "endpoint_id": endpoint.id,
+                 "checked_at": checked_at, "completed_at": time.time(),
+                 "elapsed_ms": round((time.monotonic() - started) * 1000, 3),
+                 "healthy": status.healthy, "failure": failure or probe_failure(status=status)}
+        status.detail = {**status.detail, "probe": probe}
+        previous = self._failed_probes.get(endpoint.id)
+        event = None
+        if not status.healthy:
+            self._failed_probes[endpoint.id] = probe["probe_id"]
+            event = "health_probe_failed"
+        elif previous:
+            self._failed_probes.pop(endpoint.id, None)
+            event = "health_probe_recovered"
+        if event and self.audit is not None:
+            self._audit_writer.submit(self.audit, event, **probe, previous_failure_id=previous)
+        return status
 
     async def _probe_ai_pool(self, endpoint: Endpoint, checked_at: float) -> EndpointStatus:
         response = await self.client.get(endpoint.health_url)

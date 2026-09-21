@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .config import Registry, Settings
 from .context_policy import apply_context_policy
+from .health_evidence import health_snapshot
 from .errors import (
     ContextTooLargeForSelectedModelError,
     NoCompatibleModelError,
@@ -1477,6 +1478,7 @@ class RoutingPolicy:
             ),
             "healthy": status.healthy,
             "fresh": status.is_fresh(time.time(), stale_after),
+            "health_evidence": health_snapshot(status, time.time(), stale_after),
             "load_headroom": status.load_headroom,
             "latency_score": status.latency_score,
             "required_context_tokens": (

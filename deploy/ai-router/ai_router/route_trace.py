@@ -15,6 +15,7 @@ from typing import Any
 from .config import Registry, Settings
 from .cache_audit import initialize as initialize_cache_audit
 from .costs import initialize as initialize_costs, consume_trace as record_cost_trace
+from .trace_summary import token_summary
 
 
 SCHEMA_VERSION = 3
@@ -1283,6 +1284,7 @@ class RouteTraceStore:
         endpoint_ids: tuple[str, ...] | None = None,
         privacy_decision: str | None = None,
         auto_models: tuple[str, ...] = ("auto", "siyuan/auto"),
+        request_ids: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         return await asyncio.to_thread(
             self._list,
@@ -1300,6 +1302,7 @@ class RouteTraceStore:
             endpoint_ids,
             privacy_decision,
             auto_models,
+            request_ids,
         )
 
     async def add_review(
@@ -1663,10 +1666,18 @@ class RouteTraceStore:
         endpoint_ids: tuple[str, ...] | None,
         privacy_decision: str | None = None,
         auto_models: tuple[str, ...] = ("auto", "siyuan/auto"),
+        request_ids: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         limit = max(1, min(100, int(limit)))
         base_where: list[str] = []
         base_values: list[Any] = []
+        if request_ids is not None:
+            if not request_ids or len(request_ids) > 100 or cursor:
+                raise ValueError("batch lookup requires 1 to 100 request IDs and no cursor")
+            request_ids = tuple(dict.fromkeys(request_ids))
+            limit = len(request_ids)
+            base_where.append(f"t.request_id IN ({', '.join('?' for _ in request_ids)})")
+            base_values.extend(request_ids)
         if privacy_decision:
             if privacy_decision == "reviewed":
                 base_where.append("EXISTS (SELECT 1 FROM privacy_assessments p WHERE p.request_id=t.request_id)")
@@ -1947,6 +1958,7 @@ class RouteTraceStore:
             "capacity_attempts": capacity_attempts,
             "queue_wait_ms": queue_wait_ms,
             "prompt_tokens": int(request.get("prompt_tokens") or 0),
+            "token_summary": token_summary(payload),
             "input_tokens": int(
                 upstream_evidence.get("input_tokens") or 0
             ),

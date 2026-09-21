@@ -9860,6 +9860,8 @@ def test_router_persists_real_decision_trace_without_changing_route(
         store=InMemoryStateStore(),
         token_counter=SimpleTokenCounter(),
     )
+    assert runtime.health.audit.path == runtime.audit.path
+    assert runtime.health.audit._lock is not runtime.audit._lock
     runtime.health = FakeHealth(
         {
             endpoint.id: healthy(
@@ -9994,6 +9996,12 @@ def test_router_persists_real_decision_trace_without_changing_route(
         "x-1panel-route-model"
     ]
     steps = trace_detail["attempts"][0]["steps"]
+    final_binding = next(item["evidence"] for item in reversed(steps)
+                         if item["reason"] == "deployment_finalized")
+    selection = trace_detail["attempts"][0]["selection"]
+    assert final_binding["endpoint_id"] == selection["endpoint_id"]
+    assert final_binding["deployment_id"] == (selection["deployment_id"] or selection["endpoint_id"])
+    assert trace_summary["token_summary"]["safe_context_tokens"] == final_binding["safe_context_tokens"]
     step_ids = {item["node_id"] for item in steps}
     assert {
         "request_received",

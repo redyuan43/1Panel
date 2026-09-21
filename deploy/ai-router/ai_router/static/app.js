@@ -144,6 +144,7 @@ let traceGraphNeedsInitialFocus = false;
 let traceSearchTimer = null;
 let requestSearchTimer = null;
 let requestTraceLoadSequence = 0;
+let requestPageGeneration = 0;
 const conversationTurnLoads = new Map();
 const REQUEST_PAGE_SIZE = 30;
 
@@ -1928,6 +1929,7 @@ function requestFilterQuery({
 async function loadRequestTraces(silent = false) {
   if (!state.key) return;
   const sequence = ++requestTraceLoadSequence;
+  const generation = requestPageGeneration;
   const listState = byId("request-list-state");
   if (!silent) {
     listState.textContent = "正在加载";
@@ -1941,7 +1943,9 @@ async function loadRequestTraces(silent = false) {
       `/api/route-traces?${requestFilterQuery({cursor})}`,
     );
     if (sequence !== requestTraceLoadSequence) return;
-    state.requestTraces = payload.items || [];
+    const freshIds = new Set((payload.items || []).map((item) => item.request_id));
+    state.requestTraces = mergeRequestItems(state.requestTraces, payload.items || [])
+      .filter((item) => freshIds.has(item.request_id)).reverse();
     state.requestTraceTotal = Number(payload.total_count || 0);
     state.requestTraceNextCursor = payload.next_cursor || null;
     state.requestConversationSummaries = new Map(
@@ -1950,7 +1954,11 @@ async function loadRequestTraces(silent = false) {
         item,
       ]),
     );
+    await refreshExpandedRequestConversations(sequence, generation);
+    if (sequence !== requestTraceLoadSequence || generation !== requestPageGeneration) return;
+    const anchor = requestScrollAnchor();
     renderRequestTable();
+    restoreRequestScrollAnchor(anchor);
     listState.textContent = "";
     byId("last-updated").textContent =
       `更新于 ${formatTime(Date.now() / 1000)}`;
@@ -1966,12 +1974,77 @@ async function loadRequestTraces(silent = false) {
 }
 
 function resetRequestPagination() {
+  requestPageGeneration += 1;
+  requestTraceLoadSequence += 1;
   state.requestTracePage = 1;
   state.requestTraceCursors = [null];
   state.requestTraceNextCursor = null;
   state.requestExpandedConversations.clear();
   state.requestExpandedRequests.clear();
   state.requestConversationPages.clear();
+}
+
+function requestIsTerminal(item) {
+  return ["succeeded", "failed", "interrupted"].includes(item.status);
+}
+
+function mergeRequestItems(previous = [], fresh = []) {
+  const rows = new Map(previous.map((item) => [item.request_id, item]));
+  for (const item of fresh) {
+    const old = rows.get(item.request_id);
+    if (old && (Number(old.updated_at || 0) > Number(item.updated_at || 0)
+      || (requestIsTerminal(old) && !requestIsTerminal(item)))) continue;
+    rows.set(item.request_id, item);
+  }
+  // The audit timeline shares this cache and remains chronological.
+  return [...rows.values()].sort((left, right) => (
+    Number(left.started_at) - Number(right.started_at)
+    || String(left.request_id).localeCompare(String(right.request_id))
+  ));
+}
+
+async function refreshExpandedRequestConversations(sequence, generation) {
+  const visible = new Set(state.requestTraces.map((item) => item.conversation_id));
+  const ids = [...state.requestExpandedConversations].filter((id) => visible.has(id));
+  await Promise.all(ids.map((id) => fetchConversationTurns(id, null, true)));
+  if (sequence !== requestTraceLoadSequence || generation !== requestPageGeneration) return;
+  const pending = [...new Set(ids.flatMap((id) => (
+    state.requestConversationPages.get(id)?.items || []
+  )).filter((item) => !requestIsTerminal(item)).map((item) => item.request_id))];
+  for (let offset = 0; offset < pending.length; offset += 100) {
+    const query = new URLSearchParams({request_mode: "all", limit: "100"});
+    pending.slice(offset, offset + 100).forEach((id) => query.append("request_ids", id));
+    const payload = await api(`/api/route-traces?${query}`);
+    if (sequence !== requestTraceLoadSequence || generation !== requestPageGeneration) return;
+    for (const id of ids) {
+      const page = state.requestConversationPages.get(id);
+      if (!page) continue;
+      page.items = mergeRequestItems(page.items,
+        (payload.items || []).filter((item) => item.conversation_id === id));
+    }
+  }
+}
+
+function requestScrollAnchor() {
+  const row = [...document.querySelectorAll("[data-request-round-id]")]
+    .find((item) => item.getBoundingClientRect().bottom > 0);
+  const tables = [...document.querySelectorAll("[data-request-conversation-detail]")].map((item) => ({
+    id: item.dataset.requestConversationDetail,
+    left: item.querySelector(".request-round-table-wrap")?.scrollLeft || 0,
+  }));
+  return {id: row?.dataset.requestRoundId, top: row?.getBoundingClientRect().top, tables};
+}
+
+function restoreRequestScrollAnchor(anchor) {
+  if (!anchor) return;
+  for (const item of document.querySelectorAll("[data-request-conversation-detail]")) {
+    const position = anchor.tables.find((table) => table.id === item.dataset.requestConversationDetail);
+    const table = item.querySelector(".request-round-table-wrap");
+    if (position && table) table.scrollLeft = position.left;
+  }
+  const row = [...document.querySelectorAll("[data-request-round-id]")]
+    .find((item) => item.dataset.requestRoundId === anchor.id);
+  if (row) window.scrollBy({top: row.getBoundingClientRect().top - anchor.top, behavior: "auto"});
 }
 
 function requestGroups() {
@@ -2189,7 +2262,7 @@ function requestRoundTable(items) {
             <th>耗时</th>
           </tr>
         </thead>
-        <tbody>${items.map(requestRoundRow).join("")}</tbody>
+        <tbody>${mergeRequestItems([], items).reverse().map(requestRoundRow).join("")}</tbody>
       </table>
     </div>
   `;
@@ -2272,14 +2345,54 @@ function requestRoundRow(item) {
       <td>${escapeHtml(affinityLabel(item.affinity))}</td>
       <td>${item.attempts || 1} / ${item.capacity_attempts || 1}</td>
       <td>${item.queue_wait_ms == null ? "—" : formatDuration(item.queue_wait_ms)}</td>
-      <td>
-        <strong class="table-primary">${formatTokens(item.prompt_tokens || 0)}</strong>
-        <span class="table-secondary">输入 ${formatTokens(item.input_tokens || 0)} · 输出 ${formatTokens(item.output_tokens || 0)}</span>
-      </td>
+      <td>${requestTokenSummary(item)}</td>
       <td>${formatCacheHit(item.cached_prompt_tokens, item.cache_hit_ratio)}</td>
       <td>${item.latency_ms == null ? formatRelative(item.started_at) : formatDuration(item.latency_ms)}</td>
     </tr>
   `;
+}
+
+function requestTokenSummary(item) {
+  const tokens = item.token_summary || {};
+  const number = (value) => value == null ? "未知" : formatTokens(value);
+  const pending = requestIsTerminal(item) ? "未提供" : "待返回";
+  const measured = (value) => value == null ? pending : formatTokens(value);
+  const kind = tokens.target_count_exact === true ? "精确" : tokens.target_count_exact === false ? "估算" : "来源未知";
+  const ingress = Object.hasOwn(tokens, "ingress_estimated_input_tokens")
+    ? tokens.ingress_estimated_input_tokens : (item.prompt_tokens ?? item.request?.prompt_tokens);
+  const fullContext = [tokens.target_input_tokens, tokens.output_reserve_tokens,
+    tokens.required_context_tokens, tokens.safe_context_tokens].map((value) => value == null ? "未知" : String(value));
+  return `<strong class="table-primary">目标输入 ${number(tokens.target_input_tokens)}（${kind}）</strong>
+    <span class="table-secondary">原始估算 ${number(ingress)}</span>
+    <span class="table-secondary">实际输入 ${measured(tokens.measured_input_tokens)} · 输出 ${measured(tokens.measured_output_tokens)}</span>
+    <span class="table-secondary" title="输入 ${fullContext[0]} + 预留输出 ${fullContext[1]} = ${fullContext[2]} / 窗口 ${fullContext[3]}">上下文 ${number(tokens.target_input_tokens)} + ${number(tokens.output_reserve_tokens)} = ${number(tokens.required_context_tokens)} / ${number(tokens.safe_context_tokens)}</span>`;
+}
+
+function healthEvidenceLabel(item) {
+  const health = item.health_evidence;
+  if (!health) return item.healthy === false ? "健康异常（原因未留存）"
+    : item.fresh === false ? "健康状态已过期" : "健康";
+  const names = {dns_error: "DNS 解析失败", tls_error: "TLS 连接失败",
+    pool_timeout: "连接池等待超时", connect_timeout: "建立连接超时",
+    read_timeout: "读取响应超时", write_timeout: "发送请求超时",
+    proxy_error: "代理连接失败", connect_error: "连接失败", read_error: "读取失败",
+    write_error: "发送失败", protocol_error: "协议错误", authentication: "鉴权失败",
+    rate_limit: "健康接口限流", server_error: "健康接口服务端错误",
+    http_error: "健康接口 HTTP 错误", backend_unhealthy: "后端报告不健康",
+    backend_no_progress: "后端排队且持续无进展", unknown: "探测异常（阶段未知）"};
+  const parts = [];
+  if (!health.healthy) {
+    parts.push(names[health.failure?.category] || "探测失败（原因未留存）");
+    if (health.failure?.http_status != null) parts.push(`HTTP ${health.failure.http_status}`);
+  }
+  if (health.stale) parts.push(`状态过期（${Number(health.age_seconds).toFixed(1)} 秒前）`);
+  return parts.join(" · ") || "健康";
+}
+
+function healthEvidenceHtml(item) {
+  const evidence = item.health_evidence;
+  return `<span class="table-secondary">${escapeHtml(healthEvidenceLabel(item))}</span>`
+    + (evidence?.probe_id ? `<span class="table-secondary" title="${escapeHtml(evidence.probe_id)}">探测 ${escapeHtml(shortId(evidence.probe_id, 12))} · ${evidence.elapsed_ms == null ? "耗时未知" : formatDuration(evidence.elapsed_ms)}</span>` : "");
 }
 
 function requestLineageLabel(item) {
@@ -2350,15 +2463,16 @@ async function toggleRequestConversation(conversationId) {
 }
 
 async function fetchConversationTurns(conversationId, cursor = null, preserveEarlier = false) {
+  const generation = requestPageGeneration;
   const pending = conversationTurnLoads.get(conversationId);
-  if (pending?.cursor === cursor && pending.preserveEarlier === preserveEarlier) {
+  if (pending?.generation === generation && pending.cursor === cursor && pending.preserveEarlier === preserveEarlier) {
     return pending.promise;
   }
   // Serialize refresh and pagination for this conversation; other conversations stay independent.
   const promise = (pending?.promise || Promise.resolve()).then(
-    () => fetchConversationTurnsPage(conversationId, cursor, preserveEarlier),
+    () => fetchConversationTurnsPage(conversationId, cursor, preserveEarlier, generation),
   );
-  const load = {cursor, preserveEarlier, promise};
+  const load = {cursor, preserveEarlier, generation, promise};
   conversationTurnLoads.set(conversationId, load);
   try {
     await promise;
@@ -2369,7 +2483,8 @@ async function fetchConversationTurns(conversationId, cursor = null, preserveEar
   }
 }
 
-async function fetchConversationTurnsPage(conversationId, cursor, preserveEarlier) {
+async function fetchConversationTurnsPage(conversationId, cursor, preserveEarlier, generation = requestPageGeneration) {
+  if (generation !== requestPageGeneration) return;
   const current = state.requestConversationPages.get(conversationId);
   state.requestConversationPages.set(conversationId, {
     items: [],
@@ -2385,35 +2500,26 @@ async function fetchConversationTurnsPage(conversationId, cursor, preserveEarlie
         limit: 100,
       })}`,
     );
+    if (generation !== requestPageGeneration) return;
+    const latest = state.requestConversationPages.get(conversationId) || current;
     const fresh = payload.items || [];
-    const previousIds = new Set((current?.items || []).map((item) => item.request_id));
-    const keepEarlier = !cursor && preserveEarlier
-      && (current?.items?.length || 0) > fresh.length
-      && Number(payload.total_count) >= Number(current?.totalCount || 0)
-      && fresh.some((item) => previousIds.has(item.request_id));
-    const combined = cursor || keepEarlier
-      ? [...(current?.items || []), ...(payload.items || [])]
-      : (payload.items || []);
-    const unique = new Map(
-      combined.map((item) => [item.request_id, item]),
-    );
-    const items = [...unique.values()].sort(
-      (left, right) => (
-        Number(left.started_at) - Number(right.started_at)
-        || String(left.request_id).localeCompare(String(right.request_id))
-      ),
-    );
+    const previousIds = new Set((latest?.items || []).map((item) => item.request_id));
+    const keepEarlier = !cursor && preserveEarlier && previousIds.size > 0;
+    const overlaps = fresh.some((item) => previousIds.has(item.request_id));
+    const items = mergeRequestItems(cursor || keepEarlier ? (latest?.items || []) : [], fresh);
     state.requestConversationPages.set(conversationId, {
       items,
-      nextCursor: keepEarlier ? current.nextCursor : (payload.next_cursor || null),
+      // With a gap, start pagination below the new head to recover missing turns.
+      nextCursor: keepEarlier && overlaps ? latest.nextCursor : (payload.next_cursor || null),
       totalCount: Number(payload.total_count || items.length),
       loading: false,
       error: null,
     });
   } catch (error) {
+    if (generation !== requestPageGeneration) return;
     state.requestConversationPages.set(conversationId, {
       items: [],
-      ...(current || {}),
+      ...(state.requestConversationPages.get(conversationId) || current || {}),
       loading: false,
       error: error.message,
     });
@@ -2907,7 +3013,7 @@ function renderTraceDetail(preserveReviews = {}) {
     `会话 <code title="${escapeHtml(trace.conversation_id || "")}">${escapeHtml(shortId(trace.conversation_id || "—", 24))}</code>`,
     `上下文 <strong>${trace.request?.context_compacted ? `${trace.request?.context_compaction_source === "client" ? "客户端" : "Router"}压缩` : trace.request?.conversation_mode === "stateful" ? "显式 ID" : "推断 ID"}</strong>`,
     `画像 <strong>${escapeHtml(trace.task || "—")}</strong>`,
-    `Token <strong>${formatTokens(trace.request?.prompt_tokens || 0)} + ${formatTokens(trace.request?.output_reserve_tokens || 0)}</strong>`,
+    requestTokenSummary(trace),
     `策略 <code>${escapeHtml(trace.settings_fingerprint || "—")}</code>`,
     `注册表 <code>${escapeHtml(trace.registry_fingerprint || "—")}</code>`,
   ].map((item) => `<span>${item}</span>`).join("");
@@ -2950,6 +3056,7 @@ function renderRouteDiagnosis() {
       <strong>${escapeHtml(item.endpoint_id || "—")}</strong>
       <span>${escapeHtml(item.node || "—")} · ${escapeHtml(item.tier || "—")}</span>
       <span>${item.eligible ? "合格" : escapeHtml(item.rejection_label)}</span>
+      ${healthEvidenceHtml(item)}
       <span>容量 ${formatTokens(item.required_context_tokens)} / ${formatTokens(item.safe_context_tokens)}</span>
       <span>负载余量 ${item.load_headroom == null ? "—" : formatPercent(Number(item.load_headroom))}</span>
     </div>`).join("") || '<span class="section-meta">未记录候选快照</span>';
@@ -3634,7 +3741,8 @@ function renderTraceCandidates(candidates) {
             </td>
             <td>${item.cloud ? "云端" : "本地"}</td>
             <td>
-              <strong class="table-primary">${item.healthy && item.fresh ? "健康" : "不可用"} · ${Math.round(Number(item.load_headroom || 0) * 100)}%</strong>
+              <strong class="table-primary">${escapeHtml(healthEvidenceLabel(item))} · ${Math.round(Number(item.load_headroom || 0) * 100)}%</strong>
+              ${item.health_evidence?.probe_id ? `<span class="table-secondary">探测 ${escapeHtml(item.health_evidence.probe_id)}</span>` : ""}
               <span class="table-secondary">${Number(item.physical_deployments?.available || 0)}/${Number(item.physical_deployments?.total || 0)} 物理部署空闲</span>
             </td>
             <td>${formatTokens(item.required_context_tokens)} / ${formatTokens(item.safe_context_tokens)}</td>

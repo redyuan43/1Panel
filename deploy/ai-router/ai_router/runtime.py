@@ -692,6 +692,11 @@ def build_runtime(
     )
     resolved_instance_id = configured_instance_id or "standalone"
     resolved_boot_id = boot_id or uuid4().hex
+    audit = AuditLog(audit_path)
+    # Separate locks: a blocked health writer must not hold the request audit lock.
+    health.audit = AuditLog(audit_path)
+    health.instance_id = resolved_instance_id
+    health.boot_id = resolved_boot_id
     clients = ClientAccountManager(
         store,
         settings,
@@ -755,7 +760,7 @@ def build_runtime(
         evaluator=evaluator,
         compactor=compactor,
         policy=RoutingPolicy(registry, settings, health, store=store),
-        audit=AuditLog(audit_path),
+        audit=audit,
         route_traces=RouteTraceStore(
             trace_database_path,
             retention_days=int(

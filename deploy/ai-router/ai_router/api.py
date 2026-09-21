@@ -3452,6 +3452,17 @@ async def _acquire_route_capacity(
                     decision.remote_fallback_position
                 ),
             )
+            trace.record(
+                route_attempt, "deployment_binding", "selected", reason="deployment_finalized",
+                evidence={
+                    "endpoint_id": decision.endpoint.id,
+                    "deployment_id": decision.deployment_id or decision.endpoint.id,
+                    "safe_context_tokens": min(
+                        decision.endpoint.safe_context_tokens,
+                        decision.deployment_safe_context_tokens or decision.endpoint.safe_context_tokens,
+                    ),
+                },
+            )
             trace.confirm_selection(attempt=route_attempt)
             await _save_request_trace(current, trace)
 
