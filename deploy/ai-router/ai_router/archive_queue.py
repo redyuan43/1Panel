@@ -24,14 +24,17 @@ from .training_archive import TrainingArchive
 
 
 ENQUEUE = """
-if ARGV[5] == '1' and redis.call('GET', KEYS[7]) == 'blocked' then return -1 end
+if redis.call('HEXISTS', KEYS[7], ARGV[6]) == 1 then return 2 end
+if ARGV[5] == '1' and redis.call('GET', KEYS[8]) == 'blocked' then return -1 end
 local size = string.len(ARGV[2])
-for i = 6, #ARGV, 2 do
+for i = 7, #ARGV, 2 do
   if redis.call('HEXISTS', KEYS[6], ARGV[i]) == 0 then size = size + string.len(ARGV[i+1]) end
 end
 local used = tonumber(redis.call('GET', KEYS[3]) or '0')
 if used + size > tonumber(ARGV[4]) then return 0 end
-for i = 6, #ARGV, 2 do redis.call('HSETNX', KEYS[6], ARGV[i], ARGV[i+1]) end
+for i = 7, #ARGV, 2 do redis.call('HSETNX', KEYS[6], ARGV[i], ARGV[i+1]) end
+redis.call('HSET', KEYS[7], ARGV[6], '1')
+redis.call('EXPIRE', KEYS[7], 86400)
 redis.call('RPUSH', KEYS[1], ARGV[2])
 redis.call('INCRBY', KEYS[3], size)
 redis.call('ZADD', KEYS[4], 'NX', ARGV[3], ARGV[1])
@@ -46,7 +49,7 @@ if redis.call('LINDEX', KEYS[1], 0) ~= ARGV[2] then return 0 end
 redis.call('LPOP', KEYS[1])
 redis.call('INCRBY', KEYS[3], -string.len(ARGV[2]))
 redis.call('HDEL', KEYS[5], ARGV[1])
-redis.call('HDEL', KEYS[7], ARGV[1])
+redis.call('HDEL', KEYS[8], ARGV[1])
 if redis.call('LLEN', KEYS[1]) == 0 then
   local blobs = redis.call('HVALS', KEYS[6])
   local size = 0
@@ -144,21 +147,23 @@ class ArchiveQueue:
 
     def keys(self, token):
         return [self.key("request:" + token), self.key("ready"), self.key("bytes"),
-                self.key("oldest"), self.key("quarantine"), self.key("bodies:" + token)]
+                self.key("oldest"), self.key("quarantine"), self.key("bodies:" + token),
+                self.key("event-ids:" + token)]
 
     @timed_async("archive_enqueue")
-    async def enqueue(self, operation, token, kwargs):
-        event = {"version": 1, "id": uuid4().hex, "operation": operation,
+    async def enqueue(self, operation, token, kwargs, *, event_id=None):
+        event_id = event_id or uuid4().hex
+        event = {"version": 1, "id": event_id, "operation": operation,
                  "token": token, "created_at": time.time(), "kwargs": kwargs}
         try:
             # Includes admission to the bounded serializer, not just network I/O.
             async with timeout(1):
                 encrypted, blobs = await self.encoder.run(pack_event, event, self.cipher)
                 blob_args = [value for pair in blobs.items() for value in pair]
-                accepted = await self.redis.eval(ENQUEUE, 7, *self.keys(token), self.key("admission"), token,
+                accepted = await self.redis.eval(ENQUEUE, 8, *self.keys(token), self.key("admission"), token,
                                                  encrypted, event["created_at"], self.max_bytes,
-                                                 int(operation == "begin"), *blob_args)
-                if accepted != 1:
+                                                 int(operation == "begin"), event_id, *blob_args)
+                if accepted not in {1, 2}:
                     raise TrainingArchiveUnavailableError("archive queue is full or admission is blocked")
         except TrainingArchiveUnavailableError:
             raise
@@ -182,7 +187,7 @@ class ArchiveQueue:
         # The fifth ACK key is retries; quarantine is only changed by recovery.
         keys = self.keys(token)
         keys[4] = self.key("retries")
-        return await self.redis.eval(ACK, 7, *keys, self.key("errors"), token, encrypted, time.time())
+        return await self.redis.eval(ACK, 8, *keys, self.key("errors"), token, encrypted, time.time())
 
     async def decode(self, token, encrypted):
         event = await self.encoder.run(lambda: decode_event(self.cipher.decrypt(encrypted)))
@@ -271,6 +276,12 @@ class QueuedTrainingArchive(TrainingArchive):
     async def publish_history(self, trace):
         token = self._digest(f"request:{trace['request_id']}")
         await self.queue.enqueue("history", token, {"trace": trace})
+
+    async def enqueue_event(self, operation, token, kwargs, *, event_id):
+        """Idempotently enqueue a process-local handoff retry."""
+        if operation == "publish_history":
+            operation = "history"
+        await self.queue.enqueue(operation, token, kwargs, event_id=event_id)
 
     async def status(self):
         result = await super().status()

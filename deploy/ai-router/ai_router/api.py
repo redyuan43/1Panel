@@ -20,6 +20,7 @@ from .routing_modes import (
 from .usage_evidence import UsageOnlyFilter, token_count, usage_dict, usage_measurement
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -66,6 +67,7 @@ from .history import (
     response_output_observation,
     strip_identity_intercept_history,
 )
+from .fixed_route import resolve_fixed_route_intent
 from .identity import (
     IdentityProfile,
     IdentityStreamSanitizer,
@@ -765,7 +767,11 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         authenticated.policy.disclosure_mode,
     )
     request.state.identity_profile = identity
-    observation = ContentObservation()
+    observation = ContentObservation(
+        retain_canonical=callable(
+            getattr(current.training, "snapshot_body", None)
+        )
+    )
     await compute(current, observation.capture, "received", body, archive_body=False)
     request.state.content_observation = observation
     prompt_directive_settings = current.settings.section("routing").get(
@@ -1027,7 +1033,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 client_id=authenticated.policy.id,
                 key_id=authenticated.key_id,
                 protocol=api_kind,
-                received_body=received_body,
+                received_body=_archive_snapshot(
+                    current.training, observation, received_body
+                ),
                 instance_id=current.instance_id,
                 boot_id=current.boot_id,
                 history_source_local_only=resolve_objectives(
@@ -1068,6 +1076,66 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 conversation_id,
             )
         )
+        fixed_route_intent = resolve_fixed_route_intent(
+            current.registry,
+            requested_model=requested_model,
+            route_resolution=route_resolution,
+            directive=resolved_directive,
+            conversation_control=conversation_control,
+        )
+        directed_fast_path = bool(
+            fixed_route_intent is not None
+            and os.environ.get("AI_ROUTER_DIRECTED_FAST_PATH_ENABLED", "")
+            .strip().lower() in {"1", "true", "yes", "on"}
+        )
+        archive_selector = getattr(current.training, "select_mode", None)
+        directed_archive = bool(
+            fixed_route_intent is not None and callable(archive_selector)
+        )
+        directed_details = {
+            "enabled": directed_fast_path,
+            "source": fixed_route_intent.source if fixed_route_intent else None,
+            "endpoint_id": fixed_route_intent.endpoint_id if fixed_route_intent else None,
+            "classification_model_skipped": directed_fast_path,
+            "archive_background": directed_archive,
+            "archive_mode": (
+                "process_local"
+                if directed_archive
+                else "disabled"
+                if current.training is None
+                else "existing_sync"
+            ),
+        }
+        trace.payload["directed_fast_path"] = directed_details
+
+        async def observe_archive_mode(mode):
+            changed = directed_details["archive_mode"] != mode
+            directed_details["archive_mode"] = mode
+            directed_details["archive_background"] = mode.startswith("process_local")
+            if not mode.startswith("process_local"):
+                observation.set_retain_canonical(False)
+            if changed and mode != "process_local":
+                try:
+                    await _save_request_trace(current, trace)
+                except Exception as exc:
+                    current.audit.write(
+                        "directed_archive_trace_update_failed",
+                        request_id=request_id,
+                        error_type=type(exc).__name__,
+                    )
+
+        if callable(archive_selector):
+            archive_mode = await archive_selector(
+                training_token,
+                directed=directed_archive,
+                mode_observer=(observe_archive_mode if directed_archive else None),
+            )
+            if directed_details["archive_mode"] != archive_mode:
+                await observe_archive_mode(archive_mode)
+            if not directed_archive:
+                observation.set_retain_canonical(False)
+        else:
+            observation.set_retain_canonical(False)
         routing_conversation = (
             None
             if (
@@ -1124,13 +1192,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         effective_body = normalized_effective.body
         await compute(current, observation.capture, "effective", effective_body)
+        effective_revision = observation.stages[-1]["sha256"]
         trace.payload["observation"]["content"] = observation.metadata()
         tool_history_repairs += normalized_effective.repairs
         required_capabilities = normalized_effective.required
         if current.training is not None:
             await current.training.set_effective_context(
                 training_token,
-                effective_body=effective_body,
+                effective_body=_archive_snapshot(
+                    current.training, observation, effective_body
+                ),
             )
         prompt_tokens = await count_tokens(current,
             identity.inject(effective_body, api_kind),
@@ -1260,6 +1331,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 routing_conversation is None
                 and requested_model == "auto"
             ),
+            allow_model_call=not directed_fast_path,
             before_model_call=acquire_evaluator,
             after_model_call=lease.release_deployment,
         )
@@ -1552,6 +1624,9 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         last_error: RouterError | None = None
         total_capacity_attempts = 0
         total_queue_wait_ms = 0.0
+        projection_cache: dict[str, Any] | None = (
+            {} if directed_fast_path else None
+        )
 
         for attempt in range(1, max(1, attempts) + 1):
             budget_reservation = None
@@ -1609,6 +1684,13 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     history_precompacted=(
                         pre_route_capsule is not None
                     ),
+                    fixed_endpoint_id=(
+                        fixed_route_intent.endpoint_id
+                        if directed_fast_path and fixed_route_intent
+                        else None
+                    ),
+                    projection_cache=projection_cache,
+                    projection_revision=effective_revision,
                 )
                 capsule = capsule or pre_route_capsule
                 persistence_body = _history_body_for_persistence(
@@ -1696,8 +1778,12 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 if current.training is not None:
                     await current.training.mark_routed(
                         training_token,
-                        effective_body=persistence_body,
-                        routed_body=routed_body,
+                        effective_body=_archive_snapshot(
+                            current.training, observation, persistence_body
+                        ),
+                        routed_body=_archive_snapshot(
+                            current.training, observation, routed_body
+                        ),
                         route={
                             "attempt": attempt,
                             "requested_model": decision.requested_model,
@@ -2739,114 +2825,196 @@ async def _candidate_history_token_evidence(
     requested_model: str,
     conversation: ConversationState | None,
     identity: IdentityProfile,
+    fixed_endpoint_id: str | None = None,
+    projection_cache: dict[str, Any] | None = None,
+    projection_revision: str | None = None,
 ) -> dict[str, dict[str, Any]]:
     counter = getattr(current, "endpoint_token_counter", None)
     registry = getattr(current, "registry", None)
     responders = getattr(registry, "responders", None)
     if not callable(responders):
         return {}
-    token_counter = getattr(current, "token_counter", None)
     candidate_endpoints = tuple(
-        endpoint
-        for endpoint in responders()
-        if endpoint.enabled
-        and (
-            requested_model == "auto"
-            or endpoint in current.registry.by_public_model(requested_model)
+        endpoint for endpoint in responders()
+        if endpoint.enabled and (
+            endpoint.id == fixed_endpoint_id
+            if fixed_endpoint_id is not None
+            else (
+                requested_model == "auto"
+                or endpoint in current.registry.by_public_model(requested_model)
+            )
         )
     )
-    projection_cache: dict[str, tuple[dict[str, Any], int]] = {}
+    if fixed_endpoint_id is None:
+        # Preserve the existing ordinary-routing behavior: count every
+        # candidate, but only project history when its target contract needs
+        # migration. Do not retain per-endpoint request-body copies.
+        token_counter = getattr(current, "token_counter", None)
+        shared_projections: dict[str, tuple[dict[str, Any], int]] = {}
 
-    def projected_candidate(endpoint: Endpoint) -> tuple[dict[str, Any], int]:
-        if not _history_migration_required(current, conversation, endpoint):
-            if (
-                api_kind == "responses"
-                and endpoint.capabilities.responses == "adapter"
-            ):
-                count_payload, count_api_kind = _target_count_payload(
-                    identity,
-                    body,
-                    api_kind,
+        def projected_candidate(endpoint: Endpoint) -> tuple[dict[str, Any], int]:
+            if not _history_migration_required(current, conversation, endpoint):
+                if (
+                    api_kind == "responses"
+                    and endpoint.capabilities.responses == "adapter"
+                ):
+                    count_payload, count_api_kind = _target_count_payload(
+                        identity,
+                        body,
+                        api_kind,
+                        endpoint,
+                    )
+                    return body, (
+                        token_counter.count_request(count_payload, count_api_kind)
+                        if token_counter is not None
+                        else prompt_tokens
+                    )
+                return body, prompt_tokens
+            contract = endpoint.metadata.get("history_contract", {})
+            projection_key = json.dumps(
+                {
+                    "contract": contract if isinstance(contract, dict) else {},
+                    "provider_family": provider_family(endpoint),
+                    "responses_mode": endpoint.capabilities.responses,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            cached = shared_projections.get(projection_key)
+            if cached is not None:
+                return cached
+            projected = normalize_history_for_provider(body, api_kind, endpoint)
+            count_payload, count_api_kind = _target_count_payload(
+                identity,
+                projected,
+                api_kind,
+                endpoint,
+            )
+            shared_tokens = (
+                token_counter.count_request(count_payload, count_api_kind)
+                if token_counter is not None
+                else prompt_tokens
+            )
+            shared_projections[projection_key] = (projected, shared_tokens)
+            return projected, shared_tokens
+
+        import threading
+        projection_lock = threading.Lock()
+
+        def prepare_ordinary_candidate(endpoint):
+            with projection_lock:
+                projected, shared_tokens = projected_candidate(endpoint)
+            count_payload, count_api_kind = _target_count_payload(
+                identity,
+                projected,
+                api_kind,
+                endpoint,
+            )
+            return shared_tokens, count_payload, count_api_kind
+
+        async def count_ordinary_candidate(endpoint):
+            try:
+                shared_tokens, count_payload, count_api_kind = await compute(
+                    current,
+                    prepare_ordinary_candidate,
                     endpoint,
                 )
-                return body, (
-                    token_counter.count_request(
-                        count_payload,
-                        count_api_kind,
-                    )
-                    if token_counter is not None
-                    else prompt_tokens
+            except HistoryMigrationRequiredError:
+                return endpoint.id, {
+                    "tokens": prompt_tokens,
+                    "source": "shared_estimate",
+                    "exact": False,
+                    "reason": "history_incompatible",
+                }
+            result = (
+                await counter.count(
+                    endpoint,
+                    count_payload,
+                    count_api_kind,
+                    shared_tokens,
                 )
-            return body, prompt_tokens
-        contract = endpoint.metadata.get("history_contract", {})
-        projection_key = json.dumps(
-            {
-                "contract": contract if isinstance(contract, dict) else {},
-                "provider_family": provider_family(endpoint),
-                "responses_mode": endpoint.capabilities.responses,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        cached = projection_cache.get(projection_key)
-        if cached is not None:
-            return cached
-        projected = normalize_history_for_provider(
-            body,
-            api_kind,
-            endpoint,
-        )
-        count_payload, count_api_kind = _target_count_payload(
-            identity,
-            projected,
-            api_kind,
-            endpoint,
-        )
-        shared_tokens = (
-            token_counter.count_request(
-                count_payload,
-                count_api_kind,
+                if counter is not None
+                else {
+                    "tokens": shared_tokens,
+                    "source": "shared_estimate",
+                    "exact": False,
+                }
             )
-            if token_counter is not None
-            else prompt_tokens
-        )
-        projection_cache[projection_key] = (projected, shared_tokens)
-        return projected, shared_tokens
+            return endpoint.id, result
 
-    # Provider projection and tokenization are CPU work, not async I/O.
-    # Serialize access to the per-request projection cache while off-loop.
-    import threading
-    projection_lock = threading.Lock()
+        return dict(
+            await asyncio.gather(
+                *(count_ordinary_candidate(endpoint) for endpoint in candidate_endpoints)
+            )
+        )
+
+    source_fingerprint = projection_revision or hashlib.sha256(
+        json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
     def prepare_candidate(endpoint):
-        with projection_lock:
-            projected, shared_tokens = projected_candidate(endpoint)
-        count_payload, count_api_kind = _target_count_payload(identity, projected, api_kind, endpoint)
-        return shared_tokens, count_payload, count_api_kind
-
-    async def count_candidate(endpoint: Endpoint):
-        shared_tokens, count_payload, count_api_kind = await compute(current, prepare_candidate, endpoint)
-        result = (
-            await counter.count(
-                endpoint,
-                count_payload,
-                count_api_kind,
-                shared_tokens,
+        projected = _project_history_for_target(body, api_kind, endpoint)
+        can_reuse_shared_count = bool(
+            not identity.enabled
+            and projected == body
+            and not (
+                api_kind == "responses"
+                and endpoint.capabilities.responses == "adapter"
             )
-            if counter is not None
-            else {
-                "tokens": shared_tokens,
-                "source": "shared_estimate",
-                "exact": False,
-            }
+            and not (
+                api_kind == "chat"
+                and provider_family(endpoint) == "deepseek"
+                and projected.get("tools")
+            )
         )
+        if can_reuse_shared_count:
+            return projected, projected, api_kind, True
+        count_payload, count_api_kind = _target_count_payload(
+            identity, projected, api_kind, endpoint
+        )
+        return projected, count_payload, count_api_kind, False
+
+    async def count_candidate(endpoint):
+        try:
+            projected, count_payload, count_api_kind, reused_shared_count = await compute(
+                current, prepare_candidate, endpoint
+            )
+        except HistoryMigrationRequiredError:
+            return endpoint.id, {"tokens": prompt_tokens, "source": "shared_estimate",
+                                 "exact": False, "reason": "history_incompatible"}
+        shared_tokens = (
+            prompt_tokens
+            if reused_shared_count
+            else await count_tokens(current, count_payload, count_api_kind)
+            if getattr(current, "token_counter", None) is not None
+            else prompt_tokens
+        )
+        result = (
+            await counter.count(endpoint, count_payload, count_api_kind, shared_tokens)
+            if counter is not None else
+            {"tokens": shared_tokens, "source": "shared_estimate", "exact": False}
+        )
+        if projection_cache is not None:
+            projection_cache[endpoint.id] = {
+                "source_fingerprint": source_fingerprint,
+                "projected": projected,
+                "count_payload": count_payload,
+                "count_api_kind": count_api_kind,
+                "counted": result,
+            }
         return endpoint.id, result
 
-    return dict(
-        await asyncio.gather(
-            *(count_candidate(endpoint) for endpoint in candidate_endpoints)
-        )
-    )
+    # All candidates and the selected preflight share the request's token cache.
+    # Direct/offline callers get a bounded cache for this invocation too.
+    from .compute import token_cache
+    context = token_cache.set({}) if token_cache.get() is None else None
+    try:
+        with phase("candidate_token_count"):
+            return dict(await asyncio.gather(*(count_candidate(e) for e in candidate_endpoints)))
+    finally:
+        if context is not None:
+            token_cache.reset(context)
+
 
 
 async def _acquire_route_capacity(
@@ -2882,6 +3050,9 @@ async def _acquire_route_capacity(
     conversation_control: dict[str, Any] | None = None,
     routing_options: dict[str, Any] | None = None,
     summary_scope=None,
+    fixed_endpoint_id: str | None = None,
+    projection_cache: dict[str, Any] | None = None,
+    projection_revision: str | None = None,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -2908,9 +3079,13 @@ async def _acquire_route_capacity(
         requested_model=requested_model,
         conversation=history_conversation,
         identity=identity,
+        fixed_endpoint_id=fixed_endpoint_id,
+        projection_cache=projection_cache,
+        projection_revision=projection_revision,
     )
     if trace:
         trace.payload["token_counting"] = {"shared_estimate": prompt_tokens, "candidates": count_evidence}
+        trace.payload.setdefault("directed_fast_path", {})["candidate_count"] = len(count_evidence)
     pool_wait_deadlines = {}
     pool = getattr(getattr(current, "policy", None), "local_pool", None)
 
@@ -2937,6 +3112,8 @@ async def _acquire_route_capacity(
                 client_id=client_id,
                 routing_options=routing_options,
                 candidate_prompt_tokens={key: value["tokens"] for key, value in count_evidence.items()},
+                candidate_history_errors={key: value["reason"] for key, value in count_evidence.items()
+                                          if value.get("reason") == "history_incompatible"},
                 conversation_control=conversation_control,
                 trace=trace,
                 trace_attempt=route_attempt,
@@ -3258,6 +3435,8 @@ async def _acquire_route_capacity(
                 history_precompacted=history_precompacted,
                 routing_options=routing_options,
                 summary_scope=summary_scope,
+                projection_cache=projection_cache,
+                projection_revision=projection_revision,
             )
         except HistoryMigrationRequiredError as exc:
             if trace:
@@ -3321,6 +3500,24 @@ async def _acquire_route_capacity(
                     api_kind,
                 )
             body = routed_body
+            projection_revision = None
+            count_evidence = await _candidate_history_token_evidence(
+                current,
+                body=body,
+                api_kind=api_kind,
+                prompt_tokens=prompt_tokens,
+                requested_model=requested_model,
+                conversation=history_conversation,
+                identity=identity,
+                fixed_endpoint_id=fixed_endpoint_id,
+                projection_cache=projection_cache,
+            )
+            if trace:
+                trace.payload["token_counting"] = {
+                    "shared_estimate": prompt_tokens,
+                    "candidates": count_evidence,
+                    "recomputed_after_body_change": True,
+                }
             requested_context_tokens = prompt_tokens + output_reserve_tokens
             conversation = None
             history_conversation = None
@@ -3891,7 +4088,15 @@ async def _send_upstream(
             decision.trace.payload["observation"]["queue_wait_ms"] = decision.queue_wait_ms
             await _save_request_trace(current, decision.trace)
         if current.training:
-            await current.training.record_pipeline(getattr(request.state, "training_token", None), observation.archive())
+            archive_pipeline = (
+                observation.frozen_archive()
+                if callable(getattr(current.training, "snapshot_body", None))
+                else observation.archive()
+            )
+            await current.training.record_pipeline(
+                getattr(request.state, "training_token", None),
+                archive_pipeline,
+            )
     observe_dispatch(request, decision, payload, headers)
     upstream_request = current.internal_client.build_request(
         "POST",
@@ -4116,6 +4321,8 @@ async def _maybe_compact_for_route(
                 endpoint_id: value["tokens"]
                 for endpoint_id, value in count_evidence.items()
             },
+            candidate_history_errors={key: value["reason"] for key, value in count_evidence.items()
+                                      if value.get("reason") == "history_incompatible"},
         )
         return body, prompt_tokens, None
     except (NoCompatibleModelError, NoEligibleModelError, RouteDirectiveIncompatibleError) as original:
@@ -4199,15 +4406,46 @@ def _history_body_for_persistence(
     return replace_messages(body, api_kind, messages)
 
 
+def _archive_snapshot(training, observation, body):
+    snapshot = getattr(training, "snapshot_body", None)
+    return snapshot(observation, body) if callable(snapshot) else body
+
+
+def _target_tool_schema(body, api_kind, endpoint):
+    projected = copy.deepcopy(body)
+    if (not endpoint.cloud and endpoint.backend_type in {"llama_cpp", "ai_pool"}
+            and isinstance(projected.get("tools"), list)):
+        projected["tools"] = normalize_llama_tool_schemas(projected["tools"], api_kind)
+    return projected
+
+
+def _project_history_for_target(body, api_kind, endpoint):
+    projected = normalize_history_for_provider(body, api_kind, endpoint)
+    if (
+        not endpoint.cloud
+        and endpoint.backend_type in {"llama_cpp", "ai_pool"}
+        and isinstance(projected.get("tools"), list)
+    ):
+        projected["tools"] = normalize_llama_tool_schemas(
+            projected["tools"],
+            api_kind,
+        )
+    return projected
+
+
 def _target_count_payload(
     identity: IdentityProfile,
     body: dict[str, Any],
     api_kind: str,
     endpoint: Endpoint,
 ) -> tuple[dict[str, Any], str]:
-    payload = identity.inject(body, api_kind)
+    payload = identity.inject(body, api_kind) if identity.enabled else body
     if api_kind == "responses" and endpoint.capabilities.responses == "adapter":
-        return responses_request_to_chat(payload), "chat"
+        payload = normalize_request(responses_request_to_chat(payload), "chat").body
+        api_kind = "chat"
+    if api_kind == "chat" and provider_family(endpoint) == "deepseek":
+        from .reasoning_fields import deepseek_tool_history
+        payload, _ = deepseek_tool_history(payload)
     return payload, api_kind
 
 
@@ -4224,6 +4462,8 @@ async def _prepare_routed_body(
     history_precompacted: bool = False,
     routing_options: dict[str, Any] | None = None,
     summary_scope=None,
+    projection_cache: dict[str, Any] | None = None,
+    projection_revision: str | None = None,
 ) -> tuple[dict[str, Any], Any | None]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -4238,31 +4478,30 @@ async def _prepare_routed_body(
         decision.endpoint,
     )
     def apply_target_tool_schema(value: dict[str, Any]) -> dict[str, Any]:
-        projected = json.loads(json.dumps(value))
-        if (
-            not decision.endpoint.cloud
-            and decision.endpoint.backend_type in {"llama_cpp", "ai_pool"}
-            and isinstance(projected.get("tools"), list)
-        ):
-            projected["tools"] = normalize_llama_tool_schemas(
-                projected["tools"],
-                api_kind,
-            )
-        return projected
+        return _target_tool_schema(value, api_kind, decision.endpoint)
 
     def project_history(value: dict[str, Any]) -> dict[str, Any]:
-        projected = (
-            normalize_history_for_provider(
-                value,
-                api_kind,
-                decision.endpoint,
-            )
-            if history_migration
-            else json.loads(json.dumps(value))
-        )
-        return apply_target_tool_schema(projected)
+        return _project_history_for_target(value, api_kind, decision.endpoint)
 
-    routed = await compute(current, project_history, body)
+    source_fingerprint = projection_revision or hashlib.sha256(
+        json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    cached_projection = (
+        (projection_cache or {}).get(decision.endpoint.id)
+    )
+    projection_reused = bool(
+        cached_projection
+        and cached_projection.get("source_fingerprint") == source_fingerprint
+    )
+    routed = (
+        cached_projection["projected"]
+        if projection_reused
+        else await compute(current, project_history, body)
+    )
+    if decision.trace:
+        decision.trace.payload.setdefault("directed_fast_path", {})[
+            "projection_reused"
+        ] = projection_reused
     contract_body = (
         responses_request_to_chat(routed)
         if (
@@ -4284,11 +4523,7 @@ async def _prepare_routed_body(
         contract_body,
         contract_api_kind,
     )
-    decision.history_mode = (
-        "normalized"
-        if history_migration
-        else "native"
-    )
+    decision.history_mode = "normalized"
     if decision.trace and contract_violations:
         decision.trace.payload["history_contract_violations"] = list(
             contract_violations
@@ -4299,18 +4534,20 @@ async def _prepare_routed_body(
             "from a preceding tool transaction"
         )
 
-    count_payload, count_api_kind = _target_count_payload(
-        identity,
-        routed,
-        api_kind,
-        decision.endpoint,
-    )
-    routed_prompt_tokens = await count_tokens(current,
-        count_payload,
-        count_api_kind,
-    )
+    if projection_reused:
+        count_payload = cached_projection["count_payload"]
+        count_api_kind = cached_projection["count_api_kind"]
+        routed_prompt_tokens = cached_projection["counted"]["tokens"]
+    else:
+        count_payload, count_api_kind = _target_count_payload(
+            identity,
+            routed,
+            api_kind,
+            decision.endpoint,
+        )
+        routed_prompt_tokens = await count_tokens(current, count_payload, count_api_kind)
     counter = getattr(current, "endpoint_token_counter", None)
-    if counter:
+    if counter and not projection_reused:
         counted = await counter.count(
             decision.endpoint,
             count_payload,

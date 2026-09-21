@@ -20,16 +20,22 @@ def encoded(body):
 
 
 class ContentObservation:
-    def __init__(self):
+    def __init__(self, *, retain_canonical=False):
         self.started = time.monotonic()
         self.stages = []
         self.bodies = {}
+        self._canonical_bodies = {}
+        self._body_identities = {}
+        self._retain_canonical = retain_canonical
         self.checks = []
 
     @timed("content_snapshot")
     def capture(self, stage, body, *, archive_body=True):
         raw = encoded(body)
         digest = hashlib.sha256(raw).hexdigest()
+        if self._retain_canonical:
+            self._canonical_bodies[digest] = raw
+            self._body_identities[id(body)] = (body, digest)
         if archive_body and digest not in self.bodies:
             self.bodies[digest] = json.loads(raw)
         self.stages.append({"stage": stage, "sha256": digest, "bytes": len(raw),
@@ -40,8 +46,40 @@ class ContentObservation:
     def metadata(self):
         return {"stages": self.stages, "checks": self.checks}
 
+    def set_retain_canonical(self, enabled):
+        """Keep canonical bytes only while process-local archival needs them."""
+        self._retain_canonical = bool(enabled)
+        if not self._retain_canonical:
+            self._canonical_bodies.clear()
+            self._body_identities.clear()
+
     def archive(self):
         return {**self.metadata(), "bodies": self.bodies, "version": 1}
+
+    def frozen(self, body):
+        """Return an immutable canonical snapshot without reparsing it."""
+        from .directed_archive import FrozenBody
+        captured = self._body_identities.get(id(body))
+        if captured is not None and captured[0] is body:
+            captured_digest = captured[1]
+            return FrozenBody(
+                captured_digest,
+                self._canonical_bodies[captured_digest],
+            )
+        raw = encoded(body)
+        digest = hashlib.sha256(raw).hexdigest()
+        return FrozenBody(digest, self._canonical_bodies.get(digest, raw))
+
+    def frozen_archive(self):
+        from .directed_archive import FrozenBody
+        bodies = {
+            digest: FrozenBody(
+                digest,
+                self._canonical_bodies.get(digest) or encoded(body),
+            )
+            for digest, body in self.bodies.items()
+        }
+        return {**self.metadata(), "bodies": bodies, "version": 1}
 
     def check_workbuddy(self, before, after, move):
         if not move.moved:

@@ -525,6 +525,12 @@ class RouterRuntime:
                 "startup_cleanup": self.startup_cleanup,
                 "registry_fingerprint": registry_fingerprint(self.registry),
                 "endpoint_config_revision": self._endpoint_config_revision,
+                "directed_archive": (
+                    self.training.background_status()
+                    if self.training is not None
+                    and callable(getattr(self.training, "background_status", None))
+                    else None
+                ),
             },
             ttl_seconds=None,
         )
@@ -537,6 +543,7 @@ class RouterRuntime:
         return f"router:draining-deployment:{deployment_id}"
 
     async def close(self) -> None:
+        training_close_error = None
         compaction_task = getattr(self, "_background_compaction", None)
         if compaction_task is not None:
             compaction_task.cancel()
@@ -553,10 +560,15 @@ class RouterRuntime:
                 pass
         await self.endpoint_token_counter.close()
         self.compute_executor.close()
-        if getattr(self.training, "aclose", None) is not None:
-            await self.training.aclose()
-        elif self.training is not None:
-            self.training.close()
+        try:
+            if getattr(self.training, "aclose", None) is not None:
+                await self.training.aclose()
+            elif self.training is not None:
+                self.training.close()
+        except Exception as exc:
+            # Finish closing unrelated resources, then fail shutdown loudly so
+            # an archive flush timeout cannot look like a clean stop.
+            training_close_error = exc
         backfill = getattr(self, "_verified_history_backfill", None)
         if backfill is not None:
             backfill.cancel()
@@ -596,6 +608,8 @@ class RouterRuntime:
         close = getattr(self.store, "close", None)
         if close:
             await close()
+        if training_close_error is not None:
+            raise training_close_error
 
     def prepare_overflow_prefix(self, decision, body, *, client_id, request_id, api_kind):
         if self.prefix_prewarmer is None:
@@ -706,11 +720,20 @@ def build_runtime(
     if _enabled_env("AI_ROUTER_TRAINING_ENABLED"):
         archive_arguments = (_required_env("AI_ROUTER_TRAINING_DB_PATH"),
                              _required_env("AI_ROUTER_TRAINING_KEY_PATH"))
-        if _enabled_env("AI_ROUTER_ARCHIVE_QUEUE_ENABLED"):
+        queued_archive = _enabled_env("AI_ROUTER_ARCHIVE_QUEUE_ENABLED")
+        if queued_archive:
             from .archive_queue import QueuedTrainingArchive
             training = QueuedTrainingArchive(*archive_arguments, _required_env("AI_ROUTER_REDIS_URL"))
         else:
             training = TrainingArchive(*archive_arguments)
+        if queued_archive and _enabled_env("AI_ROUTER_DIRECTED_ASYNC_ARCHIVE_ENABLED"):
+            from .directed_archive import DirectedArchive
+            training = DirectedArchive(
+                training,
+                max_events=int(os.environ.get("AI_ROUTER_DIRECTED_ARCHIVE_MAX_EVENTS", "64")),
+                max_body_bytes=int(os.environ.get("AI_ROUTER_DIRECTED_ARCHIVE_MAX_BYTES", str(128 * 1024**2))),
+                flush_timeout_seconds=float(os.environ.get("AI_ROUTER_DIRECTED_ARCHIVE_FLUSH_SECONDS", "120")),
+            )
     prompt_directive_store = PromptDirectiveStore(
         os.environ.get(
             "AI_ROUTER_PROMPT_DIRECTIVE_DB_PATH",

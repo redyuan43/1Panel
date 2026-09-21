@@ -55,6 +55,7 @@ class TaskEvaluator:
         current_route_profile: str | None = None,
         current_complexity: str | None = None,
         is_new_conversation: bool,
+        allow_model_call: bool = True,
         before_model_call: (
             Callable[[], Awaitable[ModelCallTarget | None]] | None
         ) = None,
@@ -181,6 +182,17 @@ class TaskEvaluator:
                 "general",
                 "standard",
                 {"structured_output": True},
+            )
+
+        if not allow_model_call:
+            return _evaluation(
+                current_task or "general",
+                required_tier,
+                1.0,
+                "fixed_route_deterministic",
+                current_route_profile or _profile_for_task(current_task or "general", modalities),
+                current_complexity or "standard",
+                {"model_call_skipped": True, "modalities": sorted(modalities)},
             )
 
         enabled = bool(self.settings.get("enabled", False))

@@ -9,6 +9,8 @@ x-router-environment: &router-environment
   AI_ROUTER_REDIS_URL: redis://127.0.0.1:16379/0
   AI_ROUTER_LITELLM_URL: http://127.0.0.1:14000
   AI_ROUTER_STATE_BACKEND: redis
+  AI_ROUTER_DIRECTED_FAST_PATH_ENABLED: "false"
+  AI_ROUTER_DIRECTED_ASYNC_ARCHIVE_ENABLED: "false"
 
 x-host-service: &host-service
   build:

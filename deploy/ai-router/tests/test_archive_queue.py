@@ -45,6 +45,30 @@ async def finish(producer, worker):
 
 
 @pytest.mark.asyncio
+async def test_stable_event_id_makes_unknown_enqueue_result_idempotent(tmp_path):
+    producer, worker, reader, _ = setup(tmp_path)
+    request_id = "idempotent-request"
+    token = producer._digest("request:" + request_id)
+    kwargs = {
+        "request_id": request_id,
+        "conversation_id": "conversation",
+        "conversation_mode": "stateful",
+        "client_id": "test",
+        "key_id": "key",
+        "protocol": "chat",
+        "received_body": {"messages": [{"role": "user", "content": "SECRET"}]},
+        "instance_id": "local",
+        "boot_id": "boot",
+    }
+    await producer.enqueue_event("begin", token, kwargs, event_id="stable-event")
+    await producer.enqueue_event("begin", token, kwargs, event_id="stable-event")
+    assert await producer.queue.redis.llen(producer.queue.keys(token)[0]) == 1
+    assert await worker.step()
+    assert reader.read(request_id)["state"] == "received"
+    await finish(producer, worker)
+
+
+@pytest.mark.asyncio
 async def test_api_restart_keeps_accepted_events_encrypted_and_ordered(tmp_path):
     producer, worker, reader, server = setup(tmp_path)
     token = await begin(producer)

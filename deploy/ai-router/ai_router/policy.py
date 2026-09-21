@@ -43,6 +43,7 @@ from .types import (
 INCOMPATIBLE_REJECTION_REASONS = frozenset(
     {
         "capability",
+        "history_incompatible",
         "context",
         "deepseek_multimodal_unsupported",
         "deployment_profile",
@@ -352,6 +353,7 @@ class RoutingPolicy:
         trace_attempt: int = 1,
         routing_options: dict[str, Any] | None = None,
         candidate_prompt_tokens: dict[str, int] | None = None,
+        candidate_history_errors: dict[str, str] | None = None,
     ) -> RouteDecision:
         strategy = str(
             self.settings.section("routing").get(
@@ -514,6 +516,7 @@ class RoutingPolicy:
                 candidate_required = replace(required, output_token_limit=False)
                 advisory_ids.add(endpoint.id)
             reason = (
+                "history_incompatible" if endpoint.id in (candidate_history_errors or {}) else
                 "local_only" if options["local_only"] and endpoint.cloud else
                 "objective_pool" if objective_active and endpoint.cloud and endpoint.id not in objective_pool else
                 "excluded"
