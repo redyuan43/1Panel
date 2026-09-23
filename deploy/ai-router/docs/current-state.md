@@ -10,6 +10,12 @@
 
 # AI Router 当前状态
 
+## 2026-09-24 设置局部更新覆盖全量配置（已恢复并部署修复）
+
+- 2026-09-23 23:36 +08:00，管理接口收到只包含 `routing` 的 `PUT /api/settings`，却将它当作完整运行设置写入。`identity.enabled` 因覆盖退回默认 `false`，公开模型请求在选路前返回 `503 public model identity is unavailable`；同次覆盖还使 cloud、failover 等运行设置退回默认值。请求 `d8085405fe3549e6aff207fba7076ab2` 属于这一故障窗口，未产生路由轨迹。
+- 从策略修订 18 的更新前快照恢复其他设置，保留修订 19 中 `routing.client_route_bindings` 的变化；恢复后为修订 20。四个运行实例读取的配置哈希一致，`identity.enabled=true`。这证明配置已恢复，不等于已验证该 WorkBuddy 请求成功完成推理。
+- 管理接口改为将提交的可编辑字段合并进当前有效设置后验证、写入；审计中的 `sections` 仍只记录本次提交字段。新增局部路由更新保留身份和其他配置的回归测试。两台 Control 已逐台发布 `settings-partial-update-20260924-r1`（镜像 `sha256:4da0bfd290adacfd9777a6cf6f901853d1c680fa468adb2ec44be7f0c006d3ad`），源码哈希、配置哈希、健康和零重启次数已核验；详见 `outputs/settings-partial-update-20260924/verification.json`。未重放报错请求或调用真实模型。
+
 ## 2026-09-23 接单候选现场发布（中止，恢复基线）
 
 - 实现提交 `fa1b5a1fec`，未推送；精确生产基础镜像上仅叠加接单补丁，

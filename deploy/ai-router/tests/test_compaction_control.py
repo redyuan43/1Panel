@@ -12,13 +12,12 @@ from ai_router.store import InMemoryStateStore
 from ai_router.training_archive import TrainingArchive
 
 
-def test_settings_preflight_checks_replacement_not_stale_runtime(tmp_path, monkeypatch):
+def test_settings_preflight_checks_partial_update_against_current_runtime(tmp_path, monkeypatch):
     from pathlib import Path
     from ai_router.config import Settings
 
     settings = Settings(Path(__file__).resolve().parents[1] / "config/defaults.yaml",
                         tmp_path / "runtime.yaml")
-    default_model = settings.section("compaction")["model_id"]
     settings.write_runtime({"compaction": {"model_id": "stale-runtime-model"}})
     before = settings.runtime_path.read_bytes()
     runtime = SimpleNamespace(settings=settings, registry=Mock(), reload_settings=settings.reload)
@@ -35,7 +34,7 @@ def test_settings_preflight_checks_replacement_not_stale_runtime(tmp_path, monke
     try:
         result = client.put("/api/settings", json={"compaction": {"background_enabled": True}})
         assert result.status_code == 400
-        assert inspected[0]["compaction"]["model_id"] == default_model
+        assert inspected[0]["compaction"]["model_id"] == "stale-runtime-model"
         assert settings.runtime_path.read_bytes() == before
         candidate = {"compaction": {"background_enabled": False}}
         expected = settings.preview_runtime(candidate)

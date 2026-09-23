@@ -158,14 +158,15 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 status_code=400,
                 code="invalid_settings",
             )
-        override = _editable(value)
+        patch = _editable(value)
+        override = deep_merge(_editable(current.settings.value), patch)
         current_prompt = current.settings.section("routing").get(
             "prompt_directives",
             {},
         )
         proposed_prompt = (
-            override.get("routing", {}).get("prompt_directives")
-            if isinstance(override.get("routing"), dict)
+            patch.get("routing", {}).get("prompt_directives")
+            if isinstance(patch.get("routing"), dict)
             else None
         )
         prompt_changes: list[dict[str, str]] = []
@@ -209,7 +210,7 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
         )
         current.audit.write(
             "settings_updated",
-            sections=sorted(override),
+            sections=sorted(patch),
             prompt_directive_ids=[
                 item["directive_id"] for item in prompt_changes
             ],
