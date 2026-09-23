@@ -43,6 +43,7 @@ from .token_counter import HuggingFaceTokenCounter, TokenCounter
 from .endpoint_tokens import EndpointTokenCounter
 from .training_archive import TrainingArchive
 from .compute import BoundedExecutor
+from .prefill_admission import configured_policy
 
 
 @dataclass
@@ -146,6 +147,7 @@ class RouterRuntime:
                 return revision
             changed = revision != self._endpoint_config_revision
             registry = await self.endpoint_configs.effective_registry()
+            await self.scheduler.admission.verify_registry(registry, self.internal_client)
             self.registry = registry
             self.policy.registry = registry
             self._endpoint_config_revision = revision
@@ -762,6 +764,7 @@ def build_runtime(
         prefix_affinity=prefix_affinity,
         scheduler=Scheduler(
             store,
+            admission=configured_policy(settings.section("prefill_admission")),
             lock_ttl_seconds=int(
                 settings.section("queue").get("lock_ttl_seconds", 900)
             ),

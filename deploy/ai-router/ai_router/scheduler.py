@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .errors import ConversationBusyError, QueueTimeoutError
 from .store import StateStore
+from .prefill_admission import AdmissionPolicy
 
 
 @dataclass
@@ -50,12 +51,14 @@ class Scheduler:
         max_priority_burst: int = 8,
         instance_id: str = "standalone",
         boot_id: str | None = None,
+        admission: AdmissionPolicy | None = None,
     ) -> None:
         self.store = store
         self.lock_ttl_seconds = lock_ttl_seconds
         self.max_priority_burst = max_priority_burst
         self.instance_id = instance_id
         self.boot_id = boot_id or uuid4().hex
+        self.admission = admission or AdmissionPolicy({})
 
     @property
     def token_prefix(self) -> str:
@@ -114,11 +117,12 @@ class Scheduler:
                 stale_before=self._queue_stale_before(),
             ) is not None:
                 continue
-            deployment_key = f"router:deployment-capacity:{deployment_id}"
+            group_id, group_capacity = self.admission.lease_target(deployment_id, capacity)
+            deployment_key = f"router:deployment-capacity:{group_id}"
             acquired = await self.store.acquire_semaphore(
                 deployment_key,
                 token,
-                max(1, capacity),
+                max(1, group_capacity),
                 self.lock_ttl_seconds,
             )
             if not acquired:
@@ -177,13 +181,12 @@ class Scheduler:
                         != queue_member
                     ):
                         continue
-                    deployment_key = (
-                        f"router:deployment-capacity:{deployment_id}"
-                    )
+                    group_id, group_capacity = self.admission.lease_target(deployment_id, capacity)
+                    deployment_key = f"router:deployment-capacity:{group_id}"
                     acquired = await self.store.acquire_semaphore(
                         deployment_key,
                         token,
-                        max(1, capacity),
+                        max(1, group_capacity),
                         self.lock_ttl_seconds,
                     )
                     if not acquired:
@@ -204,7 +207,8 @@ class Scheduler:
             raise
 
     def _deployment_queue_key(self, deployment_id: str) -> str:
-        return f"router:queue:deployment:{deployment_id}"
+        group_id, _ = self.admission.lease_target(deployment_id, 1)
+        return f"router:queue:deployment:{group_id}"
 
     def _queue_stale_before(self) -> float:
         return time.time() - self.lock_ttl_seconds - 60.0

@@ -1,5 +1,11 @@
 version: 1
 
+# Disabled until the paired V100/Router candidate passes bounded acceptance.
+# Every local physical deployment must be assigned to a shared GPU group.
+prefill_admission:
+  enabled: false
+  groups: {}
+
 limits:
   max_request_bytes: 33554432
   image_token_estimate: 1024

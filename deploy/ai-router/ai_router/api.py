@@ -18,6 +18,7 @@ from .routing_modes import (
     task_group as objective_task_group,
 )
 from .usage_evidence import UsageOnlyFilter, token_count, usage_dict, usage_measurement
+from .prefill_admission import AdmissionPolicy, AttemptWindow, can_spill
 
 import asyncio
 import hashlib
@@ -1621,6 +1622,17 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
         if empty_output_recovery is not None:
             attempts = max(attempts, 3)
+        admission = getattr(current.scheduler, "admission", AdmissionPolicy({}))
+        admission_busy_seen = False
+        admission_window = AttemptWindow(admission, min(
+            current.internal_client.timeout.read or 900,
+            current.scheduler.lock_ttl_seconds))
+        if admission.enabled:
+            # Unintegrated services are not counted as available local capacity.
+            excluded.update(e.id for e in current.registry.responders()
+                            if not e.cloud and admission.group(e.id) is None)
+        if admission.enabled and requested_model == "auto" and resolved_directive is None:
+            attempts += len({group.id for group in admission.groups.values()})
         last_error: RouterError | None = None
         total_capacity_attempts = 0
         total_queue_wait_ms = 0.0
@@ -1629,6 +1641,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         )
 
         for attempt in range(1, max(1, attempts) + 1):
+            admission_window.remaining()
             budget_reservation = None
             decision = None
             cache_snapshot = None
@@ -1691,6 +1704,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     ),
                     projection_cache=projection_cache,
                     projection_revision=effective_revision,
+                    admission_fallback=admission_busy_seen,
+                    admission_deadline=admission_window.deadline,
                 )
                 capsule = capsule or pre_route_capsule
                 persistence_body = _history_body_for_persistence(
@@ -1885,20 +1900,67 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     current,
                     decision.endpoint.id,
                 )
+                if (admission_busy_seen and decision.endpoint.cloud
+                        and current.settings.section("routing").get("all_local_busy_policy") != "cloud_or_429"):
+                    raise AllLocalCapacityBusyError()
                 cache_snapshot = await _prefix_cache_snapshot(
                     current,
                     decision,
                 )
                 # mark_routed already persisted the reusable context before
                 # recall/identity injection; do not rewrite the entire archive.
-                upstream = await _send_upstream(
+                admission_window.dispatch(decision.deployment_id or decision.endpoint.id,
+                                          excluded_deployments)
+                if admission.enabled:
+                    # Static direct backends are filtered by endpoint ID in policy;
+                    # deployment exclusions alone only cover worker-pool profiles.
+                    excluded.update(e.id for e in current.registry.responders()
+                                    if e.id in excluded_deployments)
+                upstream = await admission_window.run(_send_upstream(
                     current,
                     request,
                     routed_body,
                     api_kind=api_kind,
                     decision=decision,
                     identity=identity,
-                )
+                ))
+                if upstream.status_code == 409 and admission.enabled:
+                    try:
+                        admission_payload = await admission_window.run(upstream.aread())
+                    except BaseException:
+                        await upstream.aclose()
+                        raise
+                    deployment_id = decision.deployment_id or decision.endpoint.id
+                    if admission.is_busy(deployment_id, upstream.status_code,
+                                         upstream.headers, admission_payload):
+                        await upstream.aclose()
+                        await current.budget.release(budget_reservation)
+                        budget_reservation = None
+                        await lease.release_deployment()
+                        pool = getattr(current.policy, "local_pool", None)
+                        if pool:
+                            await pool.release(request_id, trace)
+                        admission.exclude_group(deployment_id, excluded_deployments)
+                        admission_busy_seen = True
+                        if trace:
+                            trace.payload.setdefault("prefill_admission", []).append({
+                                "attempt": attempt, "service_group": admission.group(deployment_id).id,
+                                "deployment_id": deployment_id, "reason": "prefill_admission_busy",
+                                "elapsed_ms": round((time.monotonic() - request.state.started_at) * 1000, 2),
+                            })
+                        allowed = can_spill(
+                            requested_model=requested_model,
+                            required_endpoint_id=evaluation.required_endpoint_id,
+                            directive=resolved_directive is not None,
+                            pinned=decision.affinity == "admin-pin",
+                            output_started=False,
+                        ) and attempt < attempts
+                        _record_trace_retry(trace, attempt=attempt, status_code=409,
+                                            reason="prefill_admission_busy", allowed=allowed)
+                        await _save_request_trace(current, trace)
+                        if not allowed:
+                            raise CapacityBusyError()
+                        continue
                 if (
                     attempt < attempts
                     and decision.endpoint.backend_type == "ai_pool"
@@ -2345,6 +2407,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
             ) as exc:
                 await current.budget.release(budget_reservation)
                 budget_reservation = None
+                if admission_busy_seen and isinstance(exc, NoEligibleModelError):
+                    # Exhaustion after a normal admission refusal is capacity,
+                    # not model failure; do not cooldown the previous target.
+                    raise CapacityBusyError() from exc
                 last_error = (
                     exc
                     if isinstance(exc, RouterError)
@@ -2437,6 +2503,10 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     finally:
         if not stream_owned:
             await lease.release()
+            if getattr(current.scheduler, "admission", AdmissionPolicy({})).enabled:
+                pool = getattr(current.policy, "local_pool", None)
+                if pool:
+                    await pool.release(request_id, trace)
             if parallel_acquired:
                 await current.limiter.release_parallel(
                     authenticated.policy.id,
@@ -3053,6 +3123,8 @@ async def _acquire_route_capacity(
     fixed_endpoint_id: str | None = None,
     projection_cache: dict[str, Any] | None = None,
     projection_revision: str | None = None,
+    admission_fallback: bool = False,
+    admission_deadline: float | None = None,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -3087,9 +3159,12 @@ async def _acquire_route_capacity(
         trace.payload["token_counting"] = {"shared_estimate": prompt_tokens, "candidates": count_evidence}
         trace.payload.setdefault("directed_fast_path", {})["candidate_count"] = len(count_evidence)
     pool_wait_deadlines = {}
+    local_search = admission_fallback
     pool = getattr(getattr(current, "policy", None), "local_pool", None)
 
     while True:
+        if admission_deadline is not None and time.monotonic() >= admission_deadline:
+            raise CapacityBusyError()
         if pool:
             await pool.release(request_id, trace)
         try:
@@ -3104,7 +3179,9 @@ async def _acquire_route_capacity(
                 has_tools=has_tools,
                 required_capabilities=required_capabilities,
                 conversation=conversation,
-                excluded_endpoint_ids=excluded_endpoints,
+                excluded_endpoint_ids=(excluded_endpoints | {
+                    e.id for e in current.registry.responders() if e.cloud
+                }) if local_search else excluded_endpoints,
                 excluded_deployment_ids=excluded_deployments,
                 prefix_affinity=prefix_affinity,
                 prefix_affinity_key=prefix_affinity_key,
@@ -3119,6 +3196,9 @@ async def _acquire_route_capacity(
                 trace_attempt=route_attempt,
             )
         except (NoCompatibleModelError, NoEligibleModelError):
+            if local_search:
+                local_search = False
+                continue
             if trace:
                 await _save_request_trace(current, trace)
             if history_incompatible_seen:
@@ -3245,6 +3325,10 @@ async def _acquire_route_capacity(
             decision=decision,
         )
         pool = getattr(getattr(current, "policy", None), "local_pool", None)
+        if admission_fallback:
+            wait_seconds = 0.0
+        if admission_deadline is not None:
+            wait_seconds = min(wait_seconds, max(0.0, admission_deadline - time.monotonic()))
         adaptive_wait = bool(pool and pool.member(decision.endpoint) and requested_model == "auto"
                              and not evaluation.required_endpoint_id and decision.affinity != "admin-pin"
                              and conversation is not None and wait_seconds > 0)
@@ -4051,6 +4135,22 @@ async def _send_upstream(
     }
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    admission = getattr(current.scheduler, "admission", AdmissionPolicy({}))
+    if admission.enabled and not decision.endpoint.cloud:
+        deployment_id = decision.deployment_id or decision.endpoint.id
+        group = admission.group(deployment_id)
+        if group is None or not direct:
+            raise CapacityBusyError()
+        if group.mode == "cache":
+            # Probe the selected physical backend, not an alias or telemetry cache.
+            try:
+                capability_response = await current.internal_client.get(
+                    base_url + "/_prefill_admission", headers=headers, timeout=5.0)
+                capability_response.raise_for_status()
+                admission.verify(deployment_id, capability_response.json())
+            except (httpx.HTTPError, ValueError, TypeError):
+                # No model call and no health cooldown on a contract mismatch.
+                raise CapacityBusyError() from None
     conversation_id = (
         request.headers.get("x-1panel-conversation-id")
         or request.headers.get("x-litellm-session-id")
