@@ -100,6 +100,12 @@ routing:
 的历史约束；对客户端返回的协议字段 `model` 保留其原始请求值。该功能仅对
 `disclosure_mode=internal` 的账号生效。
 
+两个独立任务可以分别使用 `home-assistant` 和 `check-boards` 账号，并将两条绑定
+指向同一个 Ornith endpoint；权限仍按各自账号检查。通过 `PUT /api/settings`
+局部更新其他路由字段时，现有两条绑定会保留。若提交了
+`routing.client_route_bindings`，该列表按整体替换，必须同时带上需要保留的
+全部账号绑定；传入空列表表示清除绑定。
+
 重要审计事件包括：
 
 ```text

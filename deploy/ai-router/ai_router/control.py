@@ -26,7 +26,7 @@ from .cache_deployments import (
 from .errors import RouterError
 from .context_policy import validate_target as validate_context_target
 from .compaction_worker import validate_background_settings
-from .config import deep_merge
+from .config import deep_merge, load_yaml
 from .identity import IdentityProfile
 from .media_service.gateway import router as media_router
 from .h3_mcp import install_h3_mcp
@@ -159,7 +159,10 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 code="invalid_settings",
             )
         patch = _editable(value)
-        override = deep_merge(_editable(current.settings.value), patch)
+        runtime_override = _editable(
+            load_yaml(current.settings.runtime_path, required=False)
+        )
+        override = deep_merge(runtime_override, patch)
         current_prompt = current.settings.section("routing").get(
             "prompt_directives",
             {},
