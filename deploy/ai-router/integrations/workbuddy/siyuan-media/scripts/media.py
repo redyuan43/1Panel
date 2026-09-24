@@ -224,7 +224,7 @@ class Client:
                    "error", "actual_duration", "fallback_applied", "operation_id",
                    "progress", "output_id", "run_id", "content_type", "bytes", "sha256",
                    "width", "height", "text", "stage", "transparent", "next_cursor",
-                   "local_path", "request_id", "workflow_mode", "creative_profile",
+                   "local_path", "request_id", "execution", "policy_revision", "policy_fingerprint", "workflow_mode", "creative_profile",
                    "aspect_ratio", "label", "title", "review_id", "verdict", "decision",
                    "confidence", "severity", "start_sec", "end_sec", "timestamp_sec",
                    "start_seconds", "end_seconds", "time_range", "message", "issue",
@@ -380,6 +380,11 @@ class Client:
         if not re.fullmatch("[a-f0-9]{64}", expected) or not isinstance(expected_bytes, int) or not 0 < expected_bytes <= MAX_UPLOAD:
             raise ClientError("invalid_artifact", "Artifact metadata is invalid.")
         target = Path(target).expanduser().absolute()
+        if job_id.startswith("img_") and target.is_file() and not target.is_symlink():
+            if target.stat().st_size == expected_bytes and hashlib.sha256(target.read_bytes()).hexdigest() == expected:
+                return self.redact({"id": job_id, "artifact_id": artifact, "output_id": output["output_id"],
+                                    "local_path": str(target), "bytes": expected_bytes, "sha256": expected,
+                                    "content_type": output["content_type"], "reused": True})
         if target.is_symlink() or target.exists():
             raise ClientError("output_exists", "The output path already exists; choose a new file.")
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -585,6 +590,9 @@ def arguments(argv=None):
             selection.add_argument("--stage")
             selection.add_argument("--artifact-id")
             command.add_argument("--output", required=True)
+    delivery = sub.add_parser("deliver")
+    delivery.add_argument("--operation-id", required=True)
+    delivery.add_argument("--seconds", type=int, default=30, choices=range(0, 121))
     for name in ("image", "edit", "video"):
         command = sub.add_parser(name)
         command.add_argument("--operation-id", required=True)
@@ -592,6 +600,8 @@ def arguments(argv=None):
         text.add_argument("--prompt")
         text.add_argument("--prompt-file")
         if name in {"image", "edit"}:
+            command.add_argument("--execution", choices=("local", "cloud"))
+            command.add_argument("--output", help="Download the completed image here; resume using deliver.")
             command.add_argument("--use-case", choices=("photo", "product", "ui", "infographic", "illustration", "logo"), default="photo")
             command.add_argument("--aspect-ratio", choices=("auto", "square", "landscape", "portrait"), default="auto")
             command.add_argument("--background", choices=("auto", "transparent", "opaque"), default="auto")
@@ -630,8 +640,50 @@ def arguments(argv=None):
     return parser.parse_args(argv)
 
 
+def deliver_image(client, operation_id, *, output=None, seconds=30, initial=None):
+    validate_id(operation_id)
+    directory = secure_dir(client.root / operation_id)
+    delivery_path = directory / "delivery.json"
+    with operation_lock(directory / "delivery.lock"):
+        saved = json.loads(delivery_path.read_text("utf-8")) if delivery_path.exists() else None
+        if output is not None:
+            target = str(Path(output).expanduser().resolve())
+            if saved and saved["output"] != target:
+                raise ClientError("delivery_conflict", "Resume delivery to the original output path.")
+            if not saved:
+                saved = {"output": target, "status": "waiting"}
+                atomic_write(delivery_path, encode(saved))
+        if not saved:
+            raise ClientError("delivery_not_configured", "Use image/edit --output to save the delivery destination.")
+    value = initial if initial is not None else client.operate(operation_id)
+    deadline = time.monotonic() + seconds
+    while value.get("status") not in {"completed", "failed", "cancelled"}:
+        if (value.get("error") or {}).get("code") == "media_recovery_required" or time.monotonic() >= deadline:
+            return {**value, "delivery_status": "waiting", "next_action": "deliver", "operation_id": operation_id}
+        time.sleep(min(5, max(0, deadline - time.monotonic())))
+        value, request_id = client.get(value["id"])
+        value = {**client.summary(value), "request_id": request_id}
+    if value["status"] != "completed":
+        return {**value, "delivery_status": "not_generated", "operation_id": operation_id}
+    result = client.download(value["id"], saved["output"])
+    reported = False
+    try:
+        client.request("POST", f"/v1/images/{value['id']}/delivery", encode({
+            "artifact_id": result["artifact_id"], "sha256": result["sha256"]}), {"Content-Type": "application/json"})
+        reported = True
+    except ClientError:
+        # Delivery is already complete; an unavailable/older receipt endpoint
+        # must never trigger generation again or hide the local file.
+        pass
+    result["delivery_reported"] = reported
+    atomic_write(delivery_path, encode({**saved, "status": "downloaded", "result": result}))
+    return {**result, "status": "completed", "delivery_status": "downloaded", "operation_id": operation_id}
+
+
 def run(args, client):
     cmd = args.command
+    if cmd == "deliver":
+        return deliver_image(client, args.operation_id, seconds=args.seconds)
     if cmd == "upload":
         path = Path(args.image).expanduser().resolve()
         if not path.is_file() or path.stat().st_size > 10 * 1024 * 1024:
@@ -690,6 +742,8 @@ def run(args, client):
     if cmd in {"image", "edit"}:
         fields = {"model": "siyuan-image", "prompt": prompt(args), "n": 1, "response_format": "url",
                   "use_case": args.use_case, "aspect_ratio": args.aspect_ratio, "background": args.background}
+        if args.execution:
+            fields["execution"] = args.execution
         files = None
         if cmd == "edit":
             if not 1 <= len(args.image) <= 5:
@@ -698,7 +752,17 @@ def run(args, client):
                 if Path(name).expanduser().stat().st_size > 10 * 1024 * 1024:
                     raise ClientError("upload_too_large", "Each reference image must be at most 10 MiB.")
             files = [("image", path) for path in args.image]
-        return client.operate(args.operation_id, "/v1/images/" + ("edits" if cmd == "edit" else "generations"), fields, files)
+        if args.output:
+            directory = secure_dir(client.root / validate_id(args.operation_id))
+            target = str(Path(args.output).expanduser().resolve())
+            with operation_lock(directory / "delivery.lock"):
+                saved_path = directory / "delivery.json"
+                if saved_path.exists() and json.loads(saved_path.read_text("utf-8"))["output"] != target:
+                    raise ClientError("delivery_conflict", "Use the original output path.")
+                if not saved_path.exists():
+                    atomic_write(saved_path, encode({"output": target, "status": "waiting"}))
+        value = client.operate(args.operation_id, "/v1/images/" + ("edits" if cmd == "edit" else "generations"), fields, files)
+        return deliver_image(client, args.operation_id, seconds=0, initial=value) if args.output else value
     if cmd == "video":
         options, _, _ = client.request("GET", "/v1/media/options")
         negotiated = negotiated_video_fields(args, options)

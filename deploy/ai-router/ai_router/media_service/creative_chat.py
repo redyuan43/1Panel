@@ -144,6 +144,13 @@ async def maybe_creative_chat(request, body, authenticated, kind):
             raise MediaError("media_rate_limit", "提交过于频繁。", 429)
         mutation_admitted = True
     idem = request.headers.get("idempotency-key") or hashlib.sha256((principal["owner"] + json.dumps(body, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+    if intent == "image" and not workflow_id:
+        from ..image_generation import trusted_snapshot
+        from ..media_policy import effective_media_policy
+        generation = await trusted_snapshot(request.app.state.runtime)
+        if generation:
+            principal = {**principal, "image_generation": generation,
+                         "media_policy": effective_media_policy(authenticated.policy)}
     async with connection(request, principal) as client:
         client.headers["Idempotency-Key"] = idem
         async def resolve_assets():

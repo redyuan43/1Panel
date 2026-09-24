@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "executors": [
+    {
+      "id": "nx5-image",
+      "adapter": "comfy-image",
+      "url": "http://100.118.44.27:18190",
+      "key_env": "AI_ROUTER_NX5_IMAGE_KEY",
+      "resource_id": "nx5_gpu",
+      "model": "qwen-image-2.1",
+      "enabled": false,
+      "qualified": false,
+      "capabilities": [
+        {
+          "mode": "t2i",
+          "recipe": "qwen21-t2i-landscape-candidate-v1",
+          "aspect_ratios": [
+            "auto",
+            "square",
+            "landscape"
+          ],
+          "backgrounds": [
+            "auto",
+            "opaque"
+          ],
+          "max_images": 0
+        },
+        {
+          "mode": "i2i",
+          "recipe": "qwen21-edit-nx5-v1",
+          "aspect_ratios": [
+            "auto"
+          ],
+          "backgrounds": [
+            "auto",
+            "opaque"
+          ],
+          "max_images": 1
+        }
+      ]
+    },
+    {
+      "id": "nx6-image",
+      "adapter": "comfy-image",
+      "url": "http://100.67.179.113:18190",
+      "key_env": "AI_ROUTER_NX6_IMAGE_KEY",
+      "resource_id": "nx6_gpu",
+      "model": "qwen-image-2.1",
+      "enabled": false,
+      "qualified": false,
+      "capabilities": [
+        {
+          "mode": "t2i",
+          "recipe": "qwen21-t2i-landscape-candidate-v1",
+          "aspect_ratios": [
+            "auto",
+            "square",
+            "landscape"
+          ],
+          "backgrounds": [
+            "auto",
+            "opaque"
+          ],
+          "max_images": 0
+        },
+        {
+          "mode": "i2i",
+          "recipe": "qwen21-edit-nx5-v1",
+          "aspect_ratios": [
+            "auto"
+          ],
+          "backgrounds": [
+            "auto",
+            "opaque"
+          ],
+          "max_images": 1
+        }
+      ]
+    }
+  ]
+}

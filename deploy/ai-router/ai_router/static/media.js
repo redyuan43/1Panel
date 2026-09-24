@@ -111,7 +111,26 @@ async function select(kind,id,silent=false){
       workflowLabels[job.workflow_mode]||job.workflow_mode,job.creative_profile,aspectLabels[job.aspect_ratio]||job.aspect_ratio,
       job.fallback_applied?"已使用付费回退":"",job.error?.message,job.sync_error?.message].filter(Boolean).join(" · ");
     if(kind==="images"){
-      $("stages").replaceChildren();
+      $("detail-meta").textContent += ` · 策略 ${job.policy_revision ?? "旧版"} · ${job.routing_reason || "—"}`;
+      let events;
+      try { events = await api(`/api/media/images/${encodeURIComponent(id)}/events`); }
+      catch(error) { events = {data:[{created_at:Date.now()/1000,type:"事件接口暂不可用",error:{message:error.message}}]}; }
+      if(sequence!==state.sequence)return;
+      const timings = job.timing || {};
+      const wait = (timings.in_progress || job.updated_at) - job.created_at;
+      const elapsed = timings.in_progress ? (timings.completed || timings.failed || job.updated_at) - timings.in_progress : 0;
+      $("stages").innerHTML = `<h3>图片任务记录</h3><p>等待 ${Math.max(0, wait).toFixed(1)} 秒 · 执行及归档 ${Math.max(0, elapsed).toFixed(1)} 秒</p><ol>${events.data.map(row=>`<li>${escapeHtml(new Date(row.created_at*1000).toLocaleTimeString())} · ${escapeHtml(labels[row.status] || row.status || row.type)} · ${escapeHtml(row.routing_reason || row.executor || "")} ${escapeHtml(row.error?.message || (row.delivery?.status === "client_reported_download" ? "客户端已报告下载，哈希匹配" : ""))}</li>`).join("")}</ol>`;
+      if(events.next_cursor) {
+        const more = document.createElement("button"); more.type="button";more.textContent="加载更多记录";
+        more.onclick = async () => {
+          try {
+            const page=await api(`/api/media/images/${encodeURIComponent(id)}/events?after=${events.next_cursor}`);
+            if(sequence!==state.sequence)return;
+            for(const row of page.data){const li=document.createElement("li");li.textContent=`${new Date(row.created_at*1000).toLocaleTimeString()} · ${labels[row.status]||row.status||row.type} · ${row.error?.message||row.routing_reason||""}`;$("stages").querySelector("ol").append(li);}
+            events.next_cursor=page.next_cursor;if(!page.next_cursor)more.remove();
+          }catch(error){notice(error.message,true);}
+        }; $("stages").append(more);
+      }
       $("detail-output").innerHTML=job.output?`<img src="${escapeHtml(job.output.content_url)}" alt="生成结果"><br><a href="${escapeHtml(job.output.content_url)}" download>下载原图</a>`:"";
     }else{
       $("detail-output").replaceChildren();
@@ -244,23 +263,26 @@ async function submitVideo(event){
     delete form.dataset.key;await loadPage("videos");await select("videos",job.id);notice("首个阶段已受理，完成后等待客户批准");
   }catch(error){notice(error.message,true);}finally{button.disabled=false;}
 }
-const settingLabels={enabled:"媒体总开关",images_enabled:"图片生成",videos_enabled:"视频生成",paid_fallback:"额度不足时付费回退",
-  daily_paid_images:"每日付费图片上限",queue_limit:"图片队列上限",queue_timeout:"排队期限（秒）",image_timeout:"图片执行期限（秒）",
+const settingLabels={enabled:"媒体总开关",images_enabled:"旧版图片任务开关",videos_enabled:"视频生成",paid_fallback:"额度不足时付费回退",
+  daily_paid_images:"旧版付费图片上限（新版在策略页设置）",queue_limit:"旧版任务队列上限",queue_timeout:"旧版任务排队期限（秒）",image_timeout:"图片执行期限（秒）",
   poll_interval:"视频同步间隔（秒）",min_free_bytes:"最低剩余存储（字节）",codex_ready:"Codex 契约及隔离验收通过",h3_ready:"H3 契约验收通过"};
 async function loadSettings(){
   state.settings=await api("/api/media/settings");
   $("settings-fields").innerHTML=Object.entries(state.settings).map(([name,value])=>typeof value==="boolean"?
-    `<label class="check"><input name="${name}" type="checkbox" ${value?"checked":""}>${settingLabels[name]}</label>`:
+    `<label class="check"><input name="${name}" type="checkbox" ${value?"checked":""} ${name==="paid_fallback"?"disabled":""}>${settingLabels[name]}</label>`:
     `<label>${settingLabels[name]}<input name="${name}" type="number" min="0" value="${value}"></label>`).join("");
+  $("settings-fields").insertAdjacentHTML("beforeend", '<p>图片通道、排队与付费备用请在<a href="/">管理台</a>的“策略设置 → 生图策略”修改；视频设置保持原入口。</p>');
   const clients=await api("/api/clients");
   const items=clients.clients||clients.items||clients;
   $("client-grants").innerHTML=items.map(client=>`<form class="grant" data-client="${escapeHtml(client.id)}"><strong>${escapeHtml(client.name||client.id)}</strong>
-    ${["siyuan-image","siyuan-video",...(client.disclosure_mode==="internal"?["qwen-image-3.0-pro"]:[])].map(model=>
-      `<label class="check"><input type="checkbox" value="${model}" ${client.media_models?.includes(model)?"checked":""}>${model}</label>`).join("")}
+    ${["siyuan-image","siyuan-video",...(client.disclosure_mode==="internal"?["qwen-image-3.0-pro","qwen-image-2.1"]:[])].map(model=>
+      `<label class="check"><input class="grant-model" type="checkbox" value="${model}" ${client.media_models?.includes(model)?"checked":""}>${model}</label>`).join("")}
+    <label class="check"><input name="image_allow_cloud" type="checkbox" ${client.media_limits?.allow_cloud!==false?"checked":""}>账号允许云端图片（仍受全局策略限制）</label>
     <button>保存授权</button></form>`).join("");
   $("client-grants").querySelectorAll("form").forEach(form=>form.onsubmit=async event=>{
     event.preventDefault();try{await api("/api/clients/"+encodeURIComponent(form.dataset.client),{method:"PATCH",body:JSON.stringify({
-      media_models:[...form.querySelectorAll("input:checked")].map(input=>input.value)})});notice("媒体授权已保存");}catch(error){notice(error.message,true);}
+      media_models:[...form.querySelectorAll(".grant-model:checked")].map(input=>input.value),
+      media_limits:{...(items.find(item=>item.id===form.dataset.client)?.media_limits||{}),allow_cloud:form.elements.image_allow_cloud.checked}})});notice("媒体授权已保存");}catch(error){notice(error.message,true);}
   });
 }
 $("login").onsubmit=event=>{event.preventDefault();void connect();};
@@ -322,7 +344,7 @@ $("purge-form").onsubmit=async event=>{
 };
 $("settings-form").onsubmit=async event=>{
   event.preventDefault();const value={};
-  for(const [name,old] of Object.entries(state.settings))value[name]=typeof old==="boolean"?event.currentTarget.elements[name].checked:Number(event.currentTarget.elements[name].value);
+  for(const [name,old] of Object.entries(state.settings)){const input=event.currentTarget.elements[name];value[name]=input?(typeof old==="boolean"?input.checked:Number(input.value)):old;}
   try{state.settings=await api("/api/media/settings",{method:"PUT",body:JSON.stringify(value)});notice("媒体设置已保存");}catch(error){notice(error.message,true);}
 };
 ViewPreferences.fields(["#image-form select", "#video-form select"].flatMap(selector=>[...document.querySelectorAll(selector)].map(el=>`#${el.form.id} select[name="${el.name}"]`)));

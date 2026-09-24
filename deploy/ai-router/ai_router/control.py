@@ -50,6 +50,7 @@ from .lan_https import router as lan_https_router
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 EDITABLE_SECTIONS = {
+        "image_generation",
     "affinity",
     "cloud",
     "compaction",
@@ -158,6 +159,9 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
                 status_code=400,
                 code="invalid_settings",
             )
+        if "image_generation" in value:
+            raise RouterError("Use image policy draft validation and activation.",
+                              status_code=409, code="image_policy_activation_required")
         patch = _editable(value)
         runtime_override = _editable(
             load_yaml(current.settings.runtime_path, required=False)

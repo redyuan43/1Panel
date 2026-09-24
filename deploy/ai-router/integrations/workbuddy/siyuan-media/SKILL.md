@@ -11,7 +11,23 @@ video CLI or creative workflow as a fallback. If the connector is unavailable,
 report that boundary and retain the draft. Image and other media flows below
 remain unchanged.
 
-## Creative workflows (preferred)
+## Images: default entry
+
+For image generation and editing, use the single-generation commands below.
+Do not use creative workflow planning for an ordinary image request, even when
+options advertises creative_workflows. Preserve the original requested subjects,
+text and composition; do not silently rewrite them after a rejection.
+
+Always pass --output with a user-visible local file path. Retain the operation
+ID and run deliver --operation-id OP until the result is downloaded or terminal.
+A waiting receipt is not delivery. Report the actual local file link and job ID.
+For unknown outcomes retain the same operation; never create replacement jobs.
+After an explicit provider rejection, explain it and stop automatic retries.
+Do not infer copyright reasons from generic image_generation_failed errors.
+Use --execution local/cloud only when the user explicitly chooses that channel;
+otherwise omit it and let the server's image policy choose.
+
+## Creative workflows (explicitly requested staged work only)
 
 When `options` publishes `creative_workflows.version=1`, use the server-owned
 creative workflow. `siyuan/auto` itself handles natural-language planning,
@@ -60,10 +76,10 @@ Linux/macOS). Commands below use `python <skill>/scripts/media.py`.
 
 ## Images
 
-- Generate: `image --operation-id OP --prompt "..." --aspect-ratio square`.
-- Edit: `edit --operation-id OP --prompt "..." --image "original.png"`.
+- Generate: `image --operation-id OP --prompt "..." --aspect-ratio square --output "chosen/output.png"`.
+- Edit: `edit --operation-id OP --prompt "..." --image "original.png" --output "chosen/output.png"`.
   Repeat `--image` for 1-5 reference images, at most 10 MiB each.
-- Capture the returned `img_...` ID. Poll using `wait --job-id ID --seconds 30`.
+- Capture the returned `img_...` ID. Continue with `deliver --operation-id OP --seconds 30`; it polls and downloads the original result.
 - On completion, use `download --job-id ID --output "chosen/output.png"`.
   Return the actual local artifact link and the task ID, not Base64 or raw URLs.
 

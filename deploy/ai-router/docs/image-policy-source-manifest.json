@@ -1,0 +1,44 @@
+{
+  "base": "75e29fe1e57250793c4854e625eaf26078d13589",
+  "sources": [
+    {
+      "path": "deploy/ai-router/ai_router/media_service/storage.py",
+      "source_sha256": "320bc8f3deeeb65ff9d3012e731f13797976d7b176369088e934f7d9112cb67c"
+    },
+    {
+      "path": "deploy/ai-router/ai_router/media_service/comfy_adapter.py",
+      "source_sha256": "1e8529a8273108ecaad57fba724d0a76ca6002d3caa59f703d6091e5ac4463bd"
+    },
+    {
+      "path": "deploy/ai-router/ai_router/media_policy.py",
+      "source_sha256": "c724aae6c47968970e2a47e04d9f8dff9c221d81292720b8196deac514c060b7"
+    },
+    {
+      "path": "deploy/ai-router/ai_router/client_accounts.py",
+      "source_sha256": "302c98e983618858cb7b40c3a2e2c51049b67794c2c5c8cda88848fd8857a7e7"
+    },
+    {
+      "path": "deploy/ai-router/ai_router/types.py",
+      "source_sha256": "c67bb696b9881e325a0f1fea87befff440b12381abade525438e78d63682836b"
+    },
+    {
+      "path": "deploy/ai-router/ai_router/media_service/direct.py",
+      "source_sha256": "57d35d8851afed92a4e3e0dda461f771312b2d04a5e2891becc8675766926cc9",
+      "destination": "image_direct.py",
+      "note": "Image-only extraction; H3/video paths excluded."
+    }
+  ],
+  "scope": "Image-only extraction; removed concurrent reserve_executor/video queue and capacity changes. No H3 runtime changes.",
+  "recipe_sources": [
+    {
+      "path": "deploy/ai-router/examples/image-policy/qwen21-edit-nx5-v1.api.json",
+      "sha256": "187ef8908bb72a54ab411ec122106c4bed0b62ca3171be88b3d60482d42defd9",
+      "source": "Existing NX5 test recipe; qualification not inherited by NX6 or landscape."
+    },
+    {
+      "path": "deploy/ai-router/examples/image-policy/qwen21-t2i-nx5-v1.api.json",
+      "sha256": "6a12e84442dae816fdee85f436badf9dcd1edb5253cf2ac409abe42febb29646",
+      "source": "Existing NX5 test recipe; qualification not inherited by NX6 or landscape."
+    }
+  ]
+}
