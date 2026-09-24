@@ -455,6 +455,7 @@ HISTORY_CONTRACT_KEYS = {
     "preserve_thinking",
     "accepts_reasoning_content",
     "accepts_reasoning_items",
+    "accepts_text_reasoning_items",
     "requires_reasoning_content",
 }
 

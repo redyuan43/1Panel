@@ -9,9 +9,11 @@ import time
 from contextlib import closing
 
 from .content_audit import ArchiveReader
+from .reasoning_fields import canonical_reasoning_fields
 from .prefix_break import stage_bodies
 from .protocol import move_workbuddy_dynamic_context, _prepend_workbuddy_dynamic_context, stabilize_workbuddy_tools
 
+PREFIX_IDENTITY_VERSION = 2
 VERSION = 1
 STAGE = "workbuddy_history_preserved"
 
@@ -19,8 +21,10 @@ STAGE = "workbuddy_history_preserved"
 def rendered_messages(body):
     # Transport UI fields may vary, but function-call identity and message name
     # are semantic even on templates that do not print them.
-    keys = ("role", "content", "reasoning_content", "tool_calls", "tool_call_id", "name")
-    return [{k:m[k] for k in keys if k in m} for m in body.get("messages", []) if isinstance(m,dict)]
+    keys = ("role", "content", "reasoning_content", "reasoning", "tool_calls", "tool_call_id", "name", "refusal", "audio")
+    return [canonical_reasoning_fields({k: m[k] for k in keys if k in m})
+            for m in body.get("messages", []) if isinstance(m, dict)]
+
 
 
 def encode(value):
@@ -43,12 +47,13 @@ def prepare(raw, client_id):
 
 
 def chain(body):
-    digest = hashlib.sha256(b"workbuddy-history-v1").digest()
+    digest = hashlib.sha256(f"workbuddy-history-v{PREFIX_IDENTITY_VERSION}".encode()).digest()
     result = []
     for message in rendered_messages(body):
         digest = hashlib.sha256(digest + encode(message)).digest()
         result.append(digest.hex())
     return result
+
 
 
 def reconcile(raw, client_id, old_raw, old_body, old_positions=None):
@@ -93,13 +98,9 @@ def reconcile(raw, client_id, old_raw, old_body, old_positions=None):
                 return None
     value = copy.deepcopy(bare)
     value["messages"] = copy.deepcopy(history)
-    # Preserve the caller's current transport/UI metadata while retaining only
-    # normalized content. Model-visible non-content fields were verified above.
-    for src, dst in enumerate(positions):
-        content = value["messages"][dst].get("content")
-        value["messages"][dst] = copy.deepcopy(raw["messages"][src])
-        if "content" in history[dst]:
-            value["messages"][dst]["content"] = content
+    # Keep the verified archived prefix byte-for-byte. New messages below are
+    # copied from the caller, but historical unknown fields are not trusted as
+    # transport-only metadata.
     result_positions = list(positions)
     for message in bare["messages"][n:]:
         result_positions.append(len(value["messages"]))
@@ -124,6 +125,7 @@ def reconcile(raw, client_id, old_raw, old_body, old_positions=None):
         "tools_changed": stabilize_workbuddy_tools(old_body, "chat", client_id=client_id)[0].get("tools") != stabilize_workbuddy_tools(value, "chat", client_id=client_id)[0].get("tools")}
 
 
+
 class WorkBuddyHistory:
     def __init__(self, database_path, archive_path=None, key_path=None):
         self.database_path = str(database_path)
@@ -135,15 +137,15 @@ class WorkBuddyHistory:
 
     @staticmethod
     def scope(client_id, model):
-        return hashlib.sha256(encode([client_id, model, VERSION])).hexdigest()
+        return hashlib.sha256(encode([client_id, model, VERSION, PREFIX_IDENTITY_VERSION])).hexdigest()
 
-    def record(self, trace):
+    def record(self, trace, *, archive=None):
         if trace.get("status") != "succeeded" or trace.get("protocol") != "chat":
             return
         client = trace.get("client_id")
         if client not in {"workbuddy-public", "workbuddy-qwen36-shared"}:
             return
-        archived = self.reader().read(trace["request_id"])
+        archived = archive if archive is not None else self.reader().read(trace["request_id"])
         bodies = stage_bodies(archived)
         raw = bodies.get("after_directives")
         normalized = bodies.get(STAGE) or bodies.get("tools_stabilized")
