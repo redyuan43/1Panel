@@ -73,6 +73,28 @@ def safety_reason(item, baseline):
     return None
 
 
+def supervise_workers(processes, restart_at, failures, launch, now):
+    """Restart a failed GPU lane without stopping its healthy sibling."""
+    for name, process in list(processes.items()):
+        if process is not None and process.poll() is not None:
+            code = process.wait()
+            processes[name] = None
+            failures[name] = [stamp for stamp in failures[name] if now - stamp < 600] + [now]
+            restart_at[name] = now + 15 if len(failures[name]) < 3 else float("inf")
+            print(f"worker {name} exited ({code}); other lanes remain untouched", file=sys.stderr, flush=True)
+        if processes[name] is None and now >= restart_at[name]:
+            try:
+                processes[name] = launch(name)
+                restart_at.pop(name)
+            except Exception as error:
+                failures[name] = [stamp for stamp in failures[name] if now - stamp < 600] + [now]
+                restart_at[name] = now + 15 if len(failures[name]) < 3 else float("inf")
+                print(f"worker {name} restart failed: {type(error).__name__}", file=sys.stderr, flush=True)
+    if all(process is None for process in processes.values()):
+        if all(restart_at[name] == float("inf") for name in processes):
+            raise RuntimeError("all worker lanes failed repeatedly")
+
+
 def prepare(base, data, name, models, plugins):
     for path in (base, data / name / "input", data / name / "output", data / name / "temp",
                  base / "user", base / "custom_nodes"):
@@ -109,27 +131,34 @@ def main(role):
             or any(item["used_mib"] > 1500 for item in baseline["gpus"].values())):
         raise RuntimeError("worker preflight resources unavailable")
     (root / "baseline.json").write_text(json.dumps(baseline, indent=2))
-    processes = []
+    targets_by_name = {name: (gpu, port) for name, gpu, port in targets}
+
+    def launch(name):
+        gpu, port = targets_by_name[name]
+        base = root / ("worker-" + name)
+        files = prepare(base, data, name, models, plugins)
+        command = [python, str(core / "main.py"), "--base-directory", str(base),
+                   "--listen", "127.0.0.1", "--port", str(port),
+                   "--input-directory", str(files / "input"),
+                   "--output-directory", str(files / "output"),
+                   "--temp-directory", str(files / "temp"),
+                   "--user-directory", str(base / "user"),
+                   "--database-url", "sqlite:///" + str(base / "user/comfyui.db"),
+                   "--reserve-vram", reserve_vram, "--disable-pinned-memory",
+                   "--disable-auto-launch", "--cache-none", "--enable-dynamic-vram", *extra]
+        command.append("--use-sage-attention")
+        environment = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu,
+                       "TMPDIR": str(files / "temp"),
+                       "XDG_CACHE_HOME": str(files / "temp" / "cache")}
+        return subprocess.Popen(command, cwd=core, env=environment,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+
+    processes = {}
+    restart_at = {}
+    failures = {name: [] for name in targets_by_name}
     try:
-        for name, gpu, port in targets:
-            base = root / ("worker-" + name)
-            files = prepare(base, data, name, models, plugins)
-            command = [python, str(core / "main.py"), "--base-directory", str(base),
-                       "--listen", "127.0.0.1", "--port", str(port),
-                       "--input-directory", str(files / "input"),
-                       "--output-directory", str(files / "output"),
-                       "--temp-directory", str(files / "temp"),
-                       "--user-directory", str(base / "user"),
-                       "--database-url", "sqlite:///" + str(base / "user/comfyui.db"),
-                       "--reserve-vram", reserve_vram, "--disable-pinned-memory",
-                       "--disable-auto-launch", "--cache-none", "--enable-dynamic-vram", *extra]
-            command.append("--use-sage-attention")
-            environment = {**os.environ, "CUDA_VISIBLE_DEVICES": gpu,
-                           "TMPDIR": str(files / "temp"),
-                           "XDG_CACHE_HOME": str(files / "temp" / "cache")}
-            processes.append(subprocess.Popen(command, cwd=core, env=environment,
-                                              stderr=subprocess.STDOUT,
-                                              start_new_session=True))
+        for name in targets_by_name:
+            processes[name] = launch(name)
         with (root / "metrics.jsonl").open("a", buffering=1) as metrics:
             while not STOP:
                 item = sample(data, {gpu for _, gpu, _ in targets})
@@ -137,14 +166,15 @@ def main(role):
                 reason = safety_reason(item, baseline)
                 if reason:
                     raise RuntimeError("worker safety threshold crossed: " + reason)
-                if any(process.poll() is not None for process in processes):
-                    raise RuntimeError("worker exited")
+                supervise_workers(processes, restart_at, failures, launch, time.monotonic())
                 time.sleep(2)
     finally:
-        for process in processes:
-            if process.poll() is None:
+        for process in processes.values():
+            if process is not None and process.poll() is None:
                 os.killpg(process.pid, signal.SIGTERM)
-        for process in processes:
+        for process in processes.values():
+            if process is None:
+                continue
             try:
                 process.wait(timeout=20)
             except subprocess.TimeoutExpired:
