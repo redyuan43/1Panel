@@ -231,7 +231,7 @@ class DirectGeneration:
         reason = "local_busy" if busy else "local_unavailable"
         action = generation["policy"]["when_busy" if busy else "when_unavailable"] if generation else "queue"
         automatic = generation and route(job) == "local_first"
-        if (automatic and action == "cloud" and cloud_allowed(job) and self.store.settings()["codex_ready"]):
+        if (automatic and action == "cloud" and not job.get("cloud_unavailable") and cloud_allowed(job) and self.store.settings()["codex_ready"]):
             self.store.update(job["id"], execution_kind=None, routing_reason=reason + "_cloud", provider="codex")
         elif action == "error":
             self.fail(job["id"], "media_" + reason, "No local image resource is available under this policy.")

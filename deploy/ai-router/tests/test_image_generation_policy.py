@@ -362,3 +362,65 @@ def test_unqualified_nodes_cannot_execute_but_obey_unavailable_policy(tmp_path, 
     with pytest.raises(MediaError) as error:
         submit(service, idem="unsupported", aspect_ratio="portrait")
     assert error.value.code == "media_no_compatible_executor"
+
+
+def test_public_models_keep_video_and_hide_local_implementation():
+    from types import SimpleNamespace
+    from ai_router.media_service.contracts import MODELS
+    from ai_router.media_service.gateway import model_descriptors
+    policy = SimpleNamespace(media_models=MODELS, disclosure_mode="public")
+    assert [item["id"] for item in model_descriptors(policy)] == ["siyuan-image", "siyuan-video"]
+
+
+def test_cloud_wrong_orientation_fails_without_regeneration(tmp_path, monkeypatch):
+    service, _ = setup(tmp_path, monkeypatch)
+    class Provider:
+        calls = 0
+        async def generate(self, body, state, checkpoint, directory):
+            self.calls += 1
+            checkpoint({"submitted": True, "thread_id": "original"})
+            return {"data": png()}
+    provider = service.codex = Provider()
+    job = submit(service, execution="cloud", aspect_ratio="portrait")
+    asyncio.run(service._image(job))
+    result = service.store.get(job["id"])
+    assert result["status"] == "failed"
+    assert result["error"]["code"] == "image_requirements_unmet"
+    assert provider.calls == 1 and not result.get("output")
+
+
+def test_known_cloud_quota_rejection_waits_locally_without_cloud_loop(tmp_path, monkeypatch):
+    from ai_router.media_service.contracts import QuotaExceeded
+    service, peer = setup(tmp_path, monkeypatch)
+    class Provider:
+        calls = 0
+        async def generate(self, body, state, checkpoint, directory):
+            self.calls += 1
+            raise QuotaExceeded()
+    provider = service.codex = Provider()
+    peer.ready, peer.busy = False, True
+    job = submit(service)
+    asyncio.run(service.direct.step(job["id"]))
+    asyncio.run(service._image(service.store.get(job["id"])))
+    result = service.store.get(job["id"])
+    assert result["status"] == "queued" and result["cloud_unavailable"]
+    asyncio.run(service.direct.step(job["id"]))
+    assert service.store.get(job["id"])["execution_kind"] == "single_generation"
+    peer.ready, peer.busy = True, False
+    asyncio.run(service.direct.step(job["id"]))
+    assert service.store.get(job["id"])["status"] == "completed"
+    assert provider.calls == 1 and len(peer.posts) == 1
+
+
+def test_quota_on_original_cloud_query_does_not_authorize_resubmission(tmp_path, monkeypatch):
+    from ai_router.media_service import providers
+    from ai_router.media_service.contracts import QuotaExceeded
+    class RPC:
+        async def start(self): pass
+        async def close(self): pass
+        async def call(self, method, params):
+            if method == "account/read": return {"account": {"type": "chatgpt"}}
+            raise QuotaExceeded()
+    monkeypatch.setattr(providers, "CodexRPC", RPC)
+    with pytest.raises(UnknownOutcome):
+        asyncio.run(CodexProvider().generate({}, {"submitted": True, "thread_id": "original"}, lambda x: None, tmp_path))

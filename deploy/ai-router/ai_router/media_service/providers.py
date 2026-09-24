@@ -183,11 +183,19 @@ class CodexProvider:
         rpc = CodexRPC()
         try:
             await rpc.start()
-            account = await rpc.call("account/read", {"refreshToken": False})
+            try:
+                account = await rpc.call("account/read", {"refreshToken": False})
+            except QuotaExceeded as exc:
+                if state.get("submitted"):
+                    raise UnknownOutcome("Cannot verify the original task while account reads are limited.") from exc
+                raise
             if (account.get("account") or {}).get("type") not in {"chatgpt", "chatgptAuthTokens"}:
                 raise MediaError("codex_login_required", "ChatGPT login is required.", 503)
             if state.get("thread_id"):
-                result = await rpc.call("thread/read", {"threadId": state["thread_id"], "includeTurns": True})
+                try:
+                    result = await rpc.call("thread/read", {"threadId": state["thread_id"], "includeTurns": True})
+                except QuotaExceeded as exc:
+                    raise UnknownOutcome("Original task query is limited; its outcome is still unknown.") from exc
                 thread = self._owned_thread(result, state["thread_id"], cwd)
                 turns = thread.get("turns", [])
                 if not isinstance(turns, list) or any(not isinstance(turn, dict) for turn in turns):
