@@ -241,7 +241,7 @@ evaluator:
 compaction:
   summary_reasoning: provider_default
   summary_output_tokens: 8192
-  enabled: true
+  enabled: false
   background_enabled: false
   background_limits:
     max_seconds: 600

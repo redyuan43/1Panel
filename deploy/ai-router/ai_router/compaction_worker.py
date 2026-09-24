@@ -55,7 +55,7 @@ def _refresh_background_settings(current):
             current.reload_settings()
             current._background_settings_version = version
     section = current.settings.section("compaction")
-    return (section.get("background_enabled", False) and section.get("enabled", True)
+    return (section.get("background_enabled", False) and section.get("enabled", False)
             and section.get("mode") != "disabled")
 
 
@@ -66,7 +66,7 @@ def validate_background_settings(settings, registry):
     rewrite = compaction.get("history_query_rewrite_enabled", False)
     if not background and not rewrite:
         return
-    if background and (not compaction.get("enabled", True) or compaction.get("mode") == "disabled"):
+    if background and (not compaction.get("enabled", False) or compaction.get("mode") == "disabled"):
         raise ValueError("background compaction requires enabled compaction")
     endpoint = registry.by_id(str(compaction.get("model_id", "")))
     if not endpoint or not endpoint.enabled or endpoint.safe_context_tokens <= profile.output_tokens + 1024:

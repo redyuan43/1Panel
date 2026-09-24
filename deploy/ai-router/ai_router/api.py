@@ -41,7 +41,7 @@ from .client_route_binding import (
     resolve_client_route,
     rewrite_response_model,
 )
-from .context_policy import request_strategy, strategy_for
+from .context_policy import request_strategy
 from .errors import (
     AllLocalCapacityBusyError,
     AuthenticationError,
@@ -1404,6 +1404,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         target_allows_compaction = _target_allows_compaction(
             requested_model,
             evaluation,
+            conversation_control=conversation_control,
         )
         allow_compaction = (
             target_allows_compaction
@@ -4720,15 +4721,8 @@ async def _prepare_routed_body(
             "was not explicitly allowed"
         )
     if force_compaction or needs_context_compaction:
-        compaction = current.settings.section("compaction")
-        if (
-            strategy_for(current.settings, decision.endpoint) != "compact"
-            and (not bool(compaction.get("enabled", True))
-                 or compaction.get("mode", "explicit_only") == "disabled")
-        ):
-            raise CompactionUnavailableError(
-                "explicitly requested compaction is disabled"
-            )
+        from .compaction_policy import require_compaction_enabled
+        require_compaction_enabled(current.settings)
         capsule, compacted_history, compacted_prompt_tokens = (
             await _compact_body_for_target(
                 current,
@@ -4852,6 +4846,8 @@ async def _compact_body_for_target(
     routing_options: dict[str, Any] | None = None,
     summary_scope=None,
 ) -> tuple[Any, dict[str, Any], int]:
+    from .compaction_policy import require_compaction_enabled
+    require_compaction_enabled(current.settings)
     from .summary_provenance import recover_legacy
     from .summary_profile import summary_profile
     await recover_legacy(current, summary_scope)
@@ -4870,6 +4866,7 @@ async def _compact_body_for_target(
         # Bind this foreground operation to one profile; settings reloads must
         # not mutate the shared compactor midway through a multi-pass summary.
         compactor = copy.copy(current.compactor)
+        compactor.send_guard = lambda: require_compaction_enabled(current.settings, refresh=True)
         try:
             compactor.summary_profile = summary_profile(current.settings.section("compaction"), summary_endpoint)
             compactor.summary_output_tokens = compactor.summary_profile.output_tokens
@@ -4907,6 +4904,7 @@ async def _compact_body_for_target(
             raise CompactionUnavailableError(
                 "the selected compaction worker has insufficient context"
             )
+        require_compaction_enabled(current.settings, refresh=True)
         capsule = await asyncio.wait_for(
             compactor.compact(
                 body,
@@ -4948,13 +4946,16 @@ def _compaction_allowed(
     *,
     context_strategy: str = "legacy",
 ) -> bool:
+    from .compaction_policy import compaction_enabled
+    if not compaction_enabled(current.settings):
+        return False
     if context_strategy == "compact":
         return True
     if context_strategy == "extended":
         return False
     compaction = current.settings.section("compaction")
     if (
-        not bool(compaction.get("enabled", True))
+        not bool(compaction.get("enabled", False))
         or compaction.get("mode", "explicit_only") == "disabled"
     ):
         return False
@@ -4966,8 +4967,11 @@ def _compaction_allowed(
 def _target_allows_compaction(
     requested_model: str,
     evaluation: Evaluation,
+    *,
+    conversation_control: dict[str, Any] | None = None,
 ) -> bool:
-    return requested_model == "auto" and not evaluation.required_endpoint_id
+    return (requested_model == "auto" and not evaluation.required_endpoint_id
+            and not (conversation_control or {}).get("pin"))
 
 
 def _truthy_header(value: str) -> bool:

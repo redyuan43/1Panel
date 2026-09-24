@@ -920,6 +920,8 @@ def create_app(runtime: RouterRuntime | None = None) -> FastAPI:
     @app.post("/api/clients/{client_id}/compaction-jobs")
     async def compaction_job_create(client_id: str, request: Request) -> dict[str, Any]:
         current = _authorized_runtime(request)
+        from .compaction_policy import require_compaction_enabled
+        require_compaction_enabled(current.settings)
         policy = await current.clients.current_policy(client_id)
         if not policy or not policy.allow_compaction:
             raise RouterError("client compaction is not authorized", status_code=403, code="compaction_access_denied")

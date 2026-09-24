@@ -46,7 +46,7 @@ def test_settings_preflight_checks_partial_update_against_current_runtime(tmp_pa
 
 def test_task_management_uses_owned_archive_and_redacts_job_bodies(tmp_path, monkeypatch):
     key = Fernet.generate_key().decode()
-    settings = SimpleNamespace(runtime_path=tmp_path / "runtime.yaml", section=lambda name: {"background_enabled": True})
+    settings = SimpleNamespace(runtime_path=tmp_path / "runtime.yaml", section=lambda name: {"enabled": True, "background_enabled": True})
     accounts = ClientAccountManager(InMemoryStateStore(), settings, key)
     asyncio.run(accounts.create_account(dict(id="alice", name="Alice", models=["siyuan/auto"],
         rpm_limit=10, tpm_limit=10000, max_parallel_requests=1, allow_compaction=True), allowed_models={"siyuan/auto"}))

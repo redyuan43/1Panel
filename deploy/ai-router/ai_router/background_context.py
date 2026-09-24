@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .compute import count_tokens
+from .compaction_policy import compaction_enabled
 
 from .compaction import Capsule, extract_messages, message_hash
 from .memory_service import _thread
@@ -9,6 +10,8 @@ from .routing_modes import resolve
 
 
 async def _store(current, owner):
+    if not compaction_enabled(current.settings):
+        return None
     if not current.settings.section("compaction").get("background_enabled", False):
         return None
     policy = await current.clients.current_policy(owner)

@@ -13,7 +13,7 @@ from ai_router.compaction_worker import CompactionWorker, validate_background_se
 
 @pytest.fixture
 def runtime(tmp_path):
-    config = {"background_enabled": True}
+    config = {"enabled": True, "background_enabled": True}
     key = Fernet.generate_key().decode()
     cipher = CapsuleCipher(key)
     return SimpleNamespace(settings=SimpleNamespace(runtime_path=tmp_path / "runtime.yaml",
@@ -43,7 +43,7 @@ def test_worker_observes_admin_disable_without_foreground_request(runtime, tmp_p
     from ai_router.config import Settings
     from ai_router.runtime import RouterRuntime
     runtime.settings = Settings(runtime_path=tmp_path / "settings.yaml")
-    runtime.settings.write_runtime({"compaction": {"background_enabled": True, "model_id": "summary"}})
+    runtime.settings.write_runtime({"compaction": {"enabled": True, "background_enabled": True, "model_id": "summary"}})
     runtime.health = SimpleNamespace()
     runtime.evaluator = SimpleNamespace()
     runtime.scheduler = SimpleNamespace()
@@ -60,7 +60,7 @@ def test_running_worker_observes_admin_disable_without_foreground_request(runtim
     from ai_router.config import Settings
     from ai_router.runtime import RouterRuntime
     runtime.settings = Settings(runtime_path=tmp_path / "settings.yaml")
-    runtime.settings.write_runtime({"compaction": {"background_enabled": True, "model_id": "summary"}})
+    runtime.settings.write_runtime({"compaction": {"enabled": True, "background_enabled": True, "model_id": "summary"}})
     runtime.health = SimpleNamespace()
     runtime.evaluator = SimpleNamespace()
     runtime.scheduler = SimpleNamespace()
@@ -94,7 +94,7 @@ def test_running_worker_observes_admin_disable_without_foreground_request(runtim
 def test_activation_rejects_unusable_summary_dependency(problem):
     endpoint = SimpleNamespace(enabled=True, safe_context_tokens=32000, cloud=False,
         public_model="summary", metadata={"provider": "test"})
-    settings = {"compaction": {"background_enabled": True, "model_id": "summary"},
+    settings = {"compaction": {"enabled": True, "background_enabled": True, "model_id": "summary"},
         "cloud": {"enabled": True, "allowed_models": ["summary"], "allowed_providers": ["test"], "monthly_budget": 10}}
     if problem == "disabled":
         endpoint.enabled = False
@@ -222,7 +222,9 @@ def test_routed_call_releases_capacity_and_account_slot(runtime, monkeypatch, mo
             tpm_limit=10000, max_parallel_requests=1)), is_key_active=AsyncMock(return_value=True))
         runtime.policy = SimpleNamespace(choose=AsyncMock(return_value=SimpleNamespace(endpoint=endpoint)))
         lease = SimpleNamespace(release=AsyncMock())
-        runtime.scheduler = SimpleNamespace(begin_request=AsyncMock(return_value=lease))
+        runtime.scheduler = SimpleNamespace(begin_request=AsyncMock(return_value=lease),
+            admission=SimpleNamespace(verify_registry=AsyncMock()))
+        runtime.internal_client = object()
         runtime.limiter = SimpleNamespace(check_rate_limits=AsyncMock(return_value=(True, None)),
             acquire_parallel=AsyncMock(return_value=True), release_parallel=AsyncMock())
         runtime.budget = SimpleNamespace(reserve=AsyncMock(return_value=None), commit=AsyncMock(), release=AsyncMock())

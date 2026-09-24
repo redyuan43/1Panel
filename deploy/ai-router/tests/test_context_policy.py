@@ -47,6 +47,7 @@ def setup(tmp_path):
     settings = Settings(ROOT / "config/defaults.yaml", tmp_path / "settings.yaml")
     settings._value["cloud"].update(enabled=True, allowed_models=["codex-pro/gpt-6-astra"],
                                   allowed_providers=["openai-codex"])
+    settings.write_runtime({"compaction": {"enabled": True}, "cloud": settings.section("cloud")})
     registry = Registry(ROOT / "config/registry.yaml")
     worker = {"worker_id": "account", "account_alias": "test", "api_base": "http://offline.invalid/v1",
               "safe_context_tokens": 272000, "ready": True, "state": "available",
@@ -142,6 +143,30 @@ def test_selected_target_disables_automatic_compaction():
     assert _target_allows_compaction("auto", automatic)
     assert not _target_allows_compaction("auto", directed)
     assert not _target_allows_compaction("codex-pro/gpt-6-astra", automatic)
+    assert not _target_allows_compaction("auto", automatic,
+                                        conversation_control={"pin": {"endpoint_id": TARGET}})
+    assert _target_allows_compaction("auto", automatic, conversation_control={"pin": None})
+
+
+def test_pinned_target_rejects_full_context_before_compaction(setup):
+    setup.settings._value["context_policy"]["mode"] = "compact"
+    pinned = "ai-qwen38-27b"
+    setup.policy.health.statuses = AsyncMock(return_value={
+        endpoint.id: EndpointStatus(endpoint.id, endpoint.id == pinned, time.time(),
+                                    eligible_context_tokens=endpoint.safe_context_tokens)
+        for endpoint in setup.registry.responders()
+    })
+    evaluation = Evaluation("long-context", None, 1, "test")
+    control = {"pin": {"endpoint_id": pinned}}
+    assert not _target_allows_compaction("auto", evaluation, conversation_control=control)
+    from ai_router.errors import RouterError
+    with pytest.raises(RouterError) as error:
+        asyncio.run(setup.policy.choose(requested_model="auto", evaluation=evaluation,
+            prompt_tokens=322718, output_reserve_tokens=16384, modalities={"text"},
+            has_tools=False, required_capabilities=RequestCapabilities(protocol="chat"),
+            conversation=None, conversation_control=control))
+    assert error.value.code == "conversation_pin_incompatible"
+    assert error.value.details["rejection_reason"] == "context"
 
 
 def test_compaction_acquires_bounded_capacity_and_releases_on_error(setup, monkeypatch):
@@ -265,6 +290,8 @@ def test_directed_overflow_is_rejected_without_compaction(setup, monkeypatch, ap
     assert mock.await_count == 0
     assert choose.await_count == 1
     assert all(call.kwargs["routing_options"] is routing_options for call in choose.await_args_list)
+    setup.compute_executor.close()
+    del setup.compute_executor
     args["modalities"] = {"audio"}
     with pytest.raises(RouteDirectiveIncompatibleError):
         asyncio.run(_maybe_compact_for_route(setup, body, **args))

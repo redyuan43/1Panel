@@ -156,6 +156,7 @@ class ContextCompactor:
         self.summary_profile = summary_profile or SummaryProfile()
         self.summary_output_tokens = self.summary_profile.output_tokens
         self.work_limits = parse_limits({} if work_limits is None else work_limits)
+        self.send_guard = None
         self.client = client or httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=3.0))
 
     async def compact(
@@ -473,6 +474,8 @@ class ContextCompactor:
 
     def _before_summary_send(self):
         """Synchronous final guard; subclasses may reject before any HTTP I/O."""
+        if self.send_guard is not None:
+            self.send_guard()
 
     async def _summarize(
         self,
