@@ -90,5 +90,8 @@ __pycache__/
 # Local AI Router experiment workspaces and generated evidence
 /experiments/*
 
+# Local validation, deployment, and diagnostic artifacts
+/outputs/
+
 # Local H3 fleet run state and capacity evidence snapshots
 deploy/h3-fleet/.state/
