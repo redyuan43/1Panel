@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import os
+import re
 import time
 from collections import OrderedDict
 
@@ -75,6 +76,28 @@ class EndpointTokenCounter:
             while len(self.cache) > 128:
                 self.cache.popitem(last=False)
             return result
+        except httpx.HTTPStatusError as exc:
+            # A render endpoint may reject the prompt/output budget before
+            # returning all token IDs. This is overflow evidence, not an outage.
+            message = ""
+            try:
+                error = exc.response.json()
+                error = error.get("error", error)
+                message = error.get("message", "") if isinstance(error, dict) else ""
+                if not isinstance(message, str):
+                    message = ""
+            except (ValueError, TypeError, AttributeError):
+                pass
+            match = re.search(r"prompt contains (?:at least )?(\d+) input tokens", message)
+            if (render and exc.response.status_code == 400 and match
+                    and "maximum context length" in message):
+                lower_bound = int(match.group(1))
+                return {"tokens": max(fallback, lower_bound), "source": "shared_estimate", "exact": False,
+                        "reason": "backend_context_exceeded", "prompt_tokens_lower_bound": lower_bound,
+                        "version": version}
+            return {"tokens": fallback, "source": "shared_estimate", "exact": False,
+                    "reason": "backend_tokenization_unavailable", "http_status": exc.response.status_code,
+                    "version": version}
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             return {"tokens": fallback, "source": "shared_estimate", "exact": False,
                     "reason": "backend_tokenization_unavailable", "version": version}
