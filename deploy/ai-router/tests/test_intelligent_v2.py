@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import time
 from dataclasses import replace
@@ -350,7 +351,7 @@ def test_non_pool_image_limit_rejects_only_excess_images(
             prompt_tokens=100,
             output_reserve_tokens=100,
             modalities={"text", "image"},
-            image_count=8,
+            image_count=int(endpoint.metadata["max_images"]),
             has_tools=False,
             conversation=None,
         )
@@ -370,7 +371,7 @@ def test_non_pool_image_limit_rejects_only_excess_images(
                 prompt_tokens=100,
                 output_reserve_tokens=100,
                 modalities={"text", "image"},
-                image_count=9,
+                image_count=int(endpoint.metadata["max_images"]) + 1,
                 has_tools=False,
                 conversation=None,
             )
@@ -432,7 +433,7 @@ def test_affinity_cannot_bypass_non_pool_image_limit(
             prompt_tokens=100,
             output_reserve_tokens=100,
             modalities={"text", "image"},
-            image_count=8,
+            image_count=int(endpoint.metadata["max_images"]),
             has_tools=False,
             conversation=conversation,
         )
@@ -453,7 +454,7 @@ def test_affinity_cannot_bypass_non_pool_image_limit(
             prompt_tokens=100,
             output_reserve_tokens=100,
             modalities={"text", "image"},
-            image_count=9,
+            image_count=int(endpoint.metadata["max_images"]) + 1,
             has_tools=False,
             conversation=conversation,
         )
@@ -941,9 +942,8 @@ def test_required_tool_history_is_rejected_before_upstream(
     assert history_contract_violations(endpoint, body, "chat") == [
         "missing_reasoning_content"
     ]
-    normalized = normalize_history_for_provider(body, "chat", endpoint)
-    assert "codex_reasoning_items" not in normalized["messages"][0]
-    assert normalized["messages"][0]["tool_calls"][0]["id"] == "call_1"
+    with pytest.raises(HistoryMigrationRequiredError):
+        normalize_history_for_provider(body, "chat", endpoint)
     decision = RouteDecision(
         endpoint=endpoint,
         requested_model="auto",
@@ -1165,6 +1165,10 @@ def test_deepseek_tool_history_passes_without_reasoning_flag(
         route_profile="general",
         context_required=65636,
     )
+    with pytest.raises(HistoryMigrationRequiredError):
+        normalize_history_for_provider(body, "chat", endpoint)
+    # A plain tool transaction has no opaque provider-only history to discard.
+    body["messages"][0].pop("codex_reasoning_items")
     routed, capsule = run(
         _prepare_routed_body(
             runtime,
@@ -1242,20 +1246,9 @@ def test_same_provider_endpoint_migration_uses_target_history_contract(
             score=1,
         )
 
-    stripped_decision = route_decision(target)
-    stripped, _ = run(
-        _prepare_routed_body(
-            runtime,
-            body,
-            api_kind="chat",
-            decision=stripped_decision,
-            request_id="same-provider-strip",
-            conversation=conversation,
-        )
-    )
-    assert stripped_decision.history_mode == "normalized"
-    assert "reasoning_content" not in stripped["messages"][0]
-    assert "codex_reasoning_items" not in stripped["messages"][0]
+    with pytest.raises(HistoryMigrationRequiredError):
+        run(_prepare_routed_body(runtime, body, api_kind="chat", decision=route_decision(target),
+                                 request_id="reject-opaque-history", conversation=conversation))
     persistence_body = _history_body_for_persistence(
         runtime,
         body,
@@ -1312,10 +1305,12 @@ def test_same_provider_endpoint_migration_uses_target_history_contract(
         },
     )
     accepted_decision = route_decision(accepting_target)
+    plain_body = copy.deepcopy(body)
+    plain_body["messages"][0].pop("codex_reasoning_items")
     accepted, _ = run(
         _prepare_routed_body(
             runtime,
-            body,
+            plain_body,
             api_kind="chat",
             decision=accepted_decision,
             request_id="same-provider-accept",
@@ -1359,6 +1354,13 @@ def test_explicit_compaction_rechecks_candidates_without_lowering_output(
     monkeypatch,
 ) -> None:
     registry = v2_registry(tmp_path)
+    # Keep every cloud candidate too small for the original request. DeepSeek
+    # is now a valid multimodal fallback and otherwise needs no compaction.
+    registry = registry.with_endpoints([
+        replace(endpoint, safe_context_tokens=262144, configured_context_tokens=262144)
+        if endpoint.cloud else endpoint
+        for endpoint in registry.endpoints
+    ])
     settings_value = v2_settings(tmp_path)
     monkeypatch.setenv(
         "AI_ROUTER_STATE_KEY",
@@ -1382,6 +1384,9 @@ def test_explicit_compaction_rechecks_candidates_without_lowering_output(
         store=InMemoryStateStore(),
         token_counter=SimpleTokenCounter(),
     )
+    # Candidate counting now recomputes the actual target input instead of
+    # trusting the synthetic prompt_tokens argument used by this fixture.
+    runtime.token_counter.count_request = lambda body, kind: 1000 if body.get("messages", [{}])[0].get("role") == "system" else 250000
     runtime.health = FakeHealth(
         {
             endpoint.id: status_for(endpoint)

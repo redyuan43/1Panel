@@ -9,9 +9,9 @@ from typing import Any
 from uuid import uuid4
 
 from .config import Registry, Settings
-from .history_identity import HISTORY_IDENTITY_PREFIX, HISTORY_IDENTITY_VERSION, is_verified_history_identity
 from .context_policy import apply_context_policy
 from .health_evidence import health_snapshot
+from .history_identity import HISTORY_IDENTITY_PREFIX, HISTORY_IDENTITY_VERSION, is_verified_history_identity
 from .errors import (
     ContextTooLargeForSelectedModelError,
     NoCompatibleModelError,
@@ -22,7 +22,7 @@ from .errors import (
 )
 from .health import HealthMonitor
 from .local_pool import LocalPool, LocalPoolLockBusy
-from .routing_modes import PerformanceRouter, resolve as resolve_objectives, advisory as objective_advisory
+from .routing_modes import PerformanceRouter, resolve as resolve_objectives, advisory as objective_advisory, task_group as objective_task_group
 from .prefix_affinity import (
     PrefixAffinityLocation,
     PrefixAffinityRecord,
@@ -161,7 +161,6 @@ class ConversationRepository:
                 ttl_seconds=ttl,
             )
 
-
     async def branch_for_history(
         self,
         client_id: str,
@@ -212,7 +211,6 @@ class ConversationRepository:
                                 "matched_branch_id": parent.branch_id or parent.conversation_id,
                                 "inherited_endpoint_id": parent.endpoint_id}
         return None, {"status": "unconfirmed", "source": "history", "reason": "shared_opening_only" if weak_seen else "no_verified_history"}
-
 
     async def _matched_branch_can_continue(self, matched, latest):
         matched_id = matched.branch_id or matched.conversation_id
@@ -396,6 +394,17 @@ class RoutingPolicy:
         objective_active = objective_preview and not options.get("observe_only")
         objective_pool = {e for rows in (options["flash_order"], options["quality_order"] if options["mode"] == "quality" else {})
                           for values in rows.values() for e in values}
+        # Schedules and scoring choose new sessions; they do not evict a warm
+        # cloud conversation. Authorization and every hard constraint still apply.
+        previous_cloud = self.registry.by_id(conversation.endpoint_id) if conversation else None
+        if (requested_model == "auto" and conversation and not conversation.identity_only
+                and previous_cloud is None and not directed
+                and not (conversation_control or {}).get("pin")):
+            # A retired endpoint is not a new session. Only an explicit target
+            # may replace it, subject to the usual history and admission checks.
+            raise NoEligibleModelError("the previous conversation endpoint is no longer registered")
+        if objective_active and previous_cloud and previous_cloud.cloud:
+            objective_pool.add(previous_cloud.id)
         advisory_ids = set()
 
         if directed:
@@ -619,7 +628,7 @@ class RoutingPolicy:
                         ),
                     },
                 )
-        if requested_model == "auto" and conversation and not objective_active:
+        if requested_model == "auto" and conversation and not directed and not control_pin:
             previous_endpoint = self.registry.by_id(
                 conversation.endpoint_id
             )
@@ -875,6 +884,20 @@ class RoutingPolicy:
             )
             return decision
 
+        high_cloud_fallback = False
+        if (objective_active and conversation and previous_cloud and previous_cloud.cloud
+                and previous_cloud.id not in {endpoint.id for endpoint in candidates}):
+            before_fallback = [endpoint.id for endpoint in candidates]
+            candidates, fallback_reason, _ = self._conversation_fallback_candidates(
+                candidates, conversation, evaluation, options,
+            )
+            high_cloud_fallback = fallback_reason == "high_cloud_flash_fallback"
+            if trace:
+                trace.record(trace_attempt, "provider_priority", "passed",
+                             branch="conversation_fallback", reason=fallback_reason,
+                             evidence={"before_endpoint_ids": before_fallback,
+                                       "after_endpoint_ids": [endpoint.id for endpoint in candidates],
+                                       "previous_endpoint_id": conversation.endpoint_id}, path=False)
         if objective_preview:
             selected, reason, evidence = await self.performance.select(
                 candidates, statuses, evaluation, conversation, options,
@@ -895,7 +918,8 @@ class RoutingPolicy:
                 decision = RouteDecision(
                     endpoint=selected, requested_model=requested_model, task=evaluation.task,
                     prompt_tokens=selected_tokens, output_reserve_tokens=output_reserve_tokens,
-                    reason=reason, affinity="migrated" if migration else "hit" if conversation else "new",
+                    reason="high_cloud_flash_fallback" if high_cloud_fallback else reason,
+                    affinity="migrated" if migration else "hit" if conversation else "new",
                     score=1.0, migration=migration,
                     previous_endpoint_id=conversation.endpoint_id if migration else None,
                     protocol=required.protocol, native_or_adapter=selected.capabilities.protocol_mode(required.protocol),
@@ -924,6 +948,7 @@ class RoutingPolicy:
             )
             if (
                 recovery
+                and not any(item.cloud and item.id == conversation.endpoint_id for item in candidates)
                 and not self.local_pool.member(recovery)
                 and recovery_mode in {"next_turn", "when_idle"}
                 and (
@@ -1201,6 +1226,7 @@ class RoutingPolicy:
                 candidates,
                 conversation,
                 evaluation,
+                options,
             )
             if trace:
                 trace.record(
@@ -2018,7 +2044,19 @@ class RoutingPolicy:
         candidates: list[Endpoint],
         conversation: ConversationState,
         evaluation: Evaluation,
+        options: dict | None = None,
     ) -> tuple[list[Endpoint], str, int | None]:
+        previous = self.registry.by_id(conversation.endpoint_id)
+        if (previous and previous.cloud and previous.id not in {item.id for item in candidates}
+                and not conversation.directive_id and options and options.get("enabled")
+                and options.get("mode") == "efficiency"):
+            flash_ids = options["flash_order"][objective_task_group(evaluation)]
+            if previous.id not in flash_ids:
+                flash = [endpoint for endpoint_id in flash_ids for endpoint in candidates
+                         if endpoint.id == endpoint_id and endpoint.cloud]
+                if not flash:
+                    raise NoCompatibleModelError("no eligible Flash model can replace the cloud conversation")
+                return flash, "high_cloud_flash_fallback", None
         if not bool(
             self._conversation_stability().get(
                 "preserve_tier_after_migration",

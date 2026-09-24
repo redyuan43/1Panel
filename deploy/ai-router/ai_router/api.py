@@ -2948,30 +2948,12 @@ async def _candidate_history_token_evidence(
         )
     )
     if fixed_endpoint_id is None:
-        # Preserve the existing ordinary-routing behavior: count every
-        # candidate, but only project history when its target contract needs
-        # migration. Do not retain per-endpoint request-body copies.
+        # Count the actual projected input for each target history contract.
+        # Do not retain per-endpoint request-body copies.
         token_counter = getattr(current, "token_counter", None)
-        shared_projections: dict[str, tuple[dict[str, Any], int]] = {}
+        shared_projections: dict[str, dict[str, Any]] = {}
 
-        def projected_candidate(endpoint: Endpoint) -> tuple[dict[str, Any], int]:
-            if not _history_migration_required(current, conversation, endpoint):
-                if (
-                    api_kind == "responses"
-                    and endpoint.capabilities.responses == "adapter"
-                ):
-                    count_payload, count_api_kind = _target_count_payload(
-                        identity,
-                        body,
-                        api_kind,
-                        endpoint,
-                    )
-                    return body, (
-                        token_counter.count_request(count_payload, count_api_kind)
-                        if token_counter is not None
-                        else prompt_tokens
-                    )
-                return body, prompt_tokens
+        def projected_candidate(endpoint: Endpoint) -> dict[str, Any]:
             contract = endpoint.metadata.get("history_contract", {})
             projection_key = json.dumps(
                 {
@@ -2986,37 +2968,26 @@ async def _candidate_history_token_evidence(
             if cached is not None:
                 return cached
             projected = normalize_history_for_provider(body, api_kind, endpoint)
-            count_payload, count_api_kind = _target_count_payload(
-                identity,
-                projected,
-                api_kind,
-                endpoint,
-            )
-            shared_tokens = (
-                token_counter.count_request(count_payload, count_api_kind)
-                if token_counter is not None
-                else prompt_tokens
-            )
-            shared_projections[projection_key] = (projected, shared_tokens)
-            return projected, shared_tokens
+            shared_projections[projection_key] = projected
+            return projected
 
         import threading
         projection_lock = threading.Lock()
 
         def prepare_ordinary_candidate(endpoint):
             with projection_lock:
-                projected, shared_tokens = projected_candidate(endpoint)
+                projected = projected_candidate(endpoint)
             count_payload, count_api_kind = _target_count_payload(
                 identity,
                 projected,
                 api_kind,
                 endpoint,
             )
-            return shared_tokens, count_payload, count_api_kind
+            return count_payload, count_api_kind
 
         async def count_ordinary_candidate(endpoint):
             try:
-                shared_tokens, count_payload, count_api_kind = await compute(
+                count_payload, count_api_kind = await compute(
                     current,
                     prepare_ordinary_candidate,
                     endpoint,
@@ -3028,6 +2999,11 @@ async def _candidate_history_token_evidence(
                     "exact": False,
                     "reason": "history_incompatible",
                 }
+            shared_tokens = (
+                await count_tokens(current, count_payload, count_api_kind)
+                if token_counter is not None
+                else prompt_tokens
+            )
             result = (
                 await counter.count(
                     endpoint,

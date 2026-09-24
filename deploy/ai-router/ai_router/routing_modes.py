@@ -283,6 +283,9 @@ class PerformanceRouter:
         available = lambda e: statuses[e.id].load_headroom > 0
         ranked_local = sorted(local, key=lambda e: (-statuses[e.id].load_headroom, e.id))
         evidence = {"mode": options["mode"], "source": options["source"], "local_only": options["local_only"]}
+        if previous is not None and previous.cloud:
+            evidence["retained_reason"] = "eligible_cloud_conversation"
+            return previous, "cloud_conversation_affinity", evidence
         if options["mode"] == "quality":
             ready = [e for e in quality if available(e)]
             if ready:

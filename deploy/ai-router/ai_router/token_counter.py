@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import copy
 import json
 import threading
 from pathlib import Path
 from typing import Any, Protocol
 
 from .errors import TokenizationUnavailableError
+from .reasoning_fields import chat_reasoning
 
 
 DEFAULT_IMAGE_TOKEN_ESTIMATE = 1024
@@ -137,6 +139,10 @@ class HuggingFaceTokenCounter:
         )
         tools = body.get("tools")
         try:
+            if any(item.get("codex_reasoning_items") or item.get("codex_message_items")
+                   for item in messages if isinstance(item, dict)):
+                raise ValueError("opaque provider history requires a serialized estimate")
+            messages = _template_messages(messages)
             token_ids = tokenizer.apply_chat_template(
                 messages,
                 tools=tools,
@@ -170,6 +176,9 @@ class HuggingFaceTokenCounter:
             or str(messages[-1].get("role", "")).lower() != "user"
         ):
             return ()
+        if any(item.get("codex_reasoning_items") or item.get("codex_message_items")
+               for item in messages if isinstance(item, dict)):
+            return ()
         prefix_messages, media_tokens = _sanitize_media(
             messages[:-1],
             image_token_estimate=self.image_token_estimate,
@@ -180,6 +189,7 @@ class HuggingFaceTokenCounter:
         tools = body.get("tools")
         kwargs = _chat_template_kwargs(body)
         try:
+            prefix_messages = _template_messages(prefix_messages)
             rendered = [
                 tokenizer.apply_chat_template(
                     [
@@ -269,6 +279,12 @@ def _responses_to_messages(
                     "content": item.get("content", ""),
                 }
             )
+        elif item_type:
+            # Native provider items have no local chat template. Include their
+            # serialized size in this estimate instead of counting them as zero.
+            messages.append({"role": "assistant", "content": json.dumps(item, ensure_ascii=False)})
+        if messages and chat_reasoning(item):
+            messages[-1]["reasoning_content"] = chat_reasoning(item)
     if pending_calls:
         messages.append(
             {
@@ -339,6 +355,27 @@ class SimpleTokenCounter:
             separators=(",", ":"),
         ).encode("utf-8")
         return tuple(rendered)
+
+
+def _template_messages(messages):
+    """Match the backend's text/tool parsing without mutating the wire body."""
+    result = copy.deepcopy(messages)
+    for message in result:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, list) and all(isinstance(part, dict) and part.get("type") == "text" for part in content):
+            message["content"] = "\n".join(part.get("text", "") for part in content)
+        if message.get("role") == "assistant":
+            reasoning = chat_reasoning(message)
+            if reasoning is not None:
+                message["reasoning_content"] = reasoning
+            for call in message.get("tool_calls") or []:
+                function = call.get("function", {})
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    function["arguments"] = json.loads(arguments)
+    return result
 
 
 def _request_messages(

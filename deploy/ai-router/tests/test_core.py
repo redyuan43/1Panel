@@ -4205,6 +4205,7 @@ def test_declared_vision_endpoints_are_registered_for_images() -> None:
         "ai-qwen38-27b",
         "ivan-qwen38-flash-128k",
         "amd-qwen38-rocmfpx-128k",
+        "amd-halogen-qwen38-256k",
         "codex-pro-gpt-5.6-sol",
         "codex-pro-gpt-6-astra",
         "cloud-deepseek-v4-flash",

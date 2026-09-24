@@ -11,7 +11,7 @@ import pytest
 
 from ai_router.config import Registry
 from ai_router.endpoint_tokens import EndpointTokenCounter
-from ai_router.errors import NoEligibleModelError
+from ai_router.errors import NoCompatibleModelError, NoEligibleModelError, RouteDirectiveUnavailableError
 from ai_router.routing_modes import (DEFAULTS, FLASH, PerformanceRouter,
                                      flash_order_for_window, in_work_window,
                                      resolve, validate)
@@ -92,6 +92,48 @@ def test_quality_unavailable_falls_to_flash_and_strict_local(tmp_path):
     assert not d.endpoint.cloud
 
 
+def test_efficiency_high_cloud_failure_uses_flash_not_local(tmp_path):
+    policy, registry, options = setup(tmp_path)
+    astra = registry.by_id("codex-pro-gpt-6-astra")
+    conversation = ConversationState(
+        conversation_id="cloud-session", public_model="auto", endpoint_id=astra.id,
+        tier_rank=astra.tier_rank, task="general", last_seen=time.time(),
+    )
+    incompatible = {astra.id: "incompatible_history"}
+    decision = run(request(policy, options, conversation=conversation,
+                           candidate_history_errors=incompatible))
+    assert decision.endpoint.id == "cloud-deepseek-v4-flash", (decision.reason, decision.affinity)
+    assert decision.reason == "high_cloud_flash_fallback"
+    assert decision.endpoint.cloud
+    long_context = run(request(policy, options, conversation=conversation, prompt_tokens=300000))
+    assert long_context.endpoint.id == "cloud-deepseek-v4-flash"
+    options["flash_order"]["general"] = ["zhipu-glm-5.3-flash"]
+    work_window = run(request(policy, options, conversation=conversation,
+                              candidate_history_errors=incompatible))
+    assert work_window.endpoint.id == "zhipu-glm-5.3-flash"
+    options["flash_order"]["general"] = ["cloud-deepseek-v4-flash"]
+    flash = registry.by_id("cloud-deepseek-v4-flash")
+    policy.health.status_values[flash.id] = status_for(flash, healthy=False)
+    with pytest.raises(NoCompatibleModelError):
+        run(request(policy, options, conversation=conversation,
+                    candidate_history_errors=incompatible))
+
+
+def test_unavailable_high_cloud_and_directed_astra_stop(tmp_path):
+    policy, registry, options = setup(tmp_path)
+    astra = registry.by_id("codex-pro-gpt-6-astra")
+    policy.health.status_values[astra.id] = status_for(astra, healthy=False)
+    conversation = ConversationState(
+        conversation_id="cloud-session", public_model="auto", endpoint_id=astra.id,
+        tier_rank=astra.tier_rank, task="general", last_seen=time.time(),
+    )
+    with pytest.raises(NoEligibleModelError):
+        run(request(policy, options, conversation=conversation))
+    directive = Evaluation("general", None, 1, "test", required_endpoint_id=astra.id)
+    with pytest.raises(RouteDirectiveUnavailableError):
+        run(request(policy, options, conversation=conversation, evaluation=directive))
+
+
 def test_local_only_blocks_explicit_cloud(tmp_path):
     policy, registry, options = setup(tmp_path,"quality")
     options["local_only"]=True
@@ -140,7 +182,7 @@ def test_severe_wait_moves_next_turn_and_cooldown(tmp_path):
         conv=replace(conv,endpoint_id=d.endpoint.id,tier_rank=d.endpoint.tier_rank)
         await policy.performance.observe(trace("cloud","cloud-deepseek-v4-flash",first=190),perf)
         d=await request(policy,options,conversation=conv)
-        assert d.endpoint.id=="cloud-deepseek-v4-flash" and d.reason=="efficiency_cooldown"
+        assert d.endpoint.id=="cloud-deepseek-v4-flash" and d.reason=="cloud_conversation_affinity"
     run(scenario())
 
 

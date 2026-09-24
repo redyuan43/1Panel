@@ -47,19 +47,32 @@ async def compute(current, function, *args, **kwargs):
 
 
 async def count_tokens(current, body, api_kind):
-    def count():
-        cache = token_cache.get()
-        key = None
-        if cache is not None:
-            # Preserve message/tool ordering and every tokenizer input field.
-            key = (id(current.token_counter), api_kind, hashlib.sha256(
-                json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
-            ).digest())
-            if key in cache:
-                return cache[key]
-        result = current.token_counter.count_request(body, api_kind)
-        if cache is not None and key is not None and len(cache) < 32:
-            cache[key] = result
-        return result
-    with phase("token_count_offloop"):
-        return await compute(current, count)
+    async def calculate():
+        with phase("token_count_offloop"):
+            return await compute(current, current.token_counter.count_request, body, api_kind)
+
+    cache = token_cache.get()
+    if cache is None:
+        return await calculate()
+    # The key preserves all input fields and insertion order: template rendering
+    # can depend on tool order, and changed histories must never share a count.
+    key = (id(current.token_counter), api_kind, hashlib.sha256(
+        json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
+    ).digest())
+    task = cache.get(key)
+    if task is not None:
+        with phase("token_count_cache_hit"):
+            return await asyncio.shield(task)
+    if len(cache) >= 32:
+        return await calculate()
+    task = asyncio.create_task(calculate())
+    cache[key] = task
+
+    def completed(future):
+        # Observe failures even if all waiters were cancelled. Failed work is
+        # never reusable, and cancellation does not release a running CPU slot.
+        if future.cancelled() or future.exception() is not None:
+            if cache.get(key) is future:
+                cache.pop(key, None)
+    task.add_done_callback(completed)
+    return await asyncio.shield(task)
