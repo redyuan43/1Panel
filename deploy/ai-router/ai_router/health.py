@@ -315,6 +315,15 @@ class HealthMonitor:
                 status = await self._probe_vllm(endpoint, checked_at)
             elif endpoint.backend_type == "llama_cpp":
                 status = await self._probe_llama_cpp(endpoint, checked_at)
+            elif endpoint.backend_type == "halogen":
+                from .halogen import health_status
+                headers = {}
+                api_key = os.environ.get(endpoint.backend_api_key_env, "")
+                if api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                response = await self.client.get(endpoint.health_url, headers=headers)
+                response.raise_for_status()
+                status = health_status(endpoint, response.json(), checked_at)
             else:
                 headers = {}
                 api_key = os.environ.get(endpoint.backend_api_key_env, "")

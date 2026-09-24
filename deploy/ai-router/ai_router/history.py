@@ -76,7 +76,14 @@ def normalize_history_for_provider(
     )) and (
         endpoint is None or endpoint.capabilities.responses == "native"
     )
-    value = copy.deepcopy(body)
+    if endpoint is not None and endpoint.backend_type == "halogen":
+        from .halogen import prepare_history
+        value = prepare_history(
+            body, api_kind,
+            responses_adapter=endpoint.capabilities.responses == "adapter",
+        )
+    else:
+        value = copy.deepcopy(body)
     native_responses = endpoint is not None and endpoint.capabilities.responses == "native"
     codex_chat_history = native_responses and provider_family(endpoint) == "openai-codex"
     # Never make a candidate fit by dropping reasoning. An incompatible target

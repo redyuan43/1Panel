@@ -415,7 +415,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 16
+    assert len(registry.endpoints) == 18
     assert registry.by_id("ai-qwen38-27b").max_concurrency == 8
     assert all(
         item.max_concurrency == 1

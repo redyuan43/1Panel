@@ -3855,7 +3855,7 @@ async def _wait_for_selected_deployment(
     timeout_seconds: float,
 ) -> bool:
     pool = getattr(getattr(current, "policy", None), "local_pool", None)
-    direct_pool = bool(pool and pool.member(decision.endpoint))
+    direct_pool = bool(pool and pool.member(decision.endpoint)) or decision.endpoint.backend_type == "halogen"
     if decision.endpoint.backend_type != "ai_pool" and not direct_pool:
         return True
     deadline = time.monotonic() + timeout_seconds
@@ -4088,7 +4088,7 @@ async def _send_upstream(
         and decision.native_or_adapter == "adapter"
     )
     if responses_adapter:
-        payload = responses_request_to_chat(payload)
+        payload = _responses_chat_payload(payload, decision.endpoint)
         payload = normalize_request(payload, "chat").body
     upstream_api_kind = "chat" if responses_adapter else api_kind
     if upstream_api_kind == "chat" and provider_family(decision.endpoint) == "deepseek":
@@ -4577,6 +4577,13 @@ def _project_history_for_target(body, api_kind, endpoint):
     return projected
 
 
+def _responses_chat_payload(body, endpoint):
+    if endpoint.backend_type == "halogen":
+        from .halogen import responses_chat_payload
+        return responses_chat_payload(body)
+    return responses_request_to_chat(body)
+
+
 def _target_count_payload(
     identity: IdentityProfile,
     body: dict[str, Any],
@@ -4585,7 +4592,7 @@ def _target_count_payload(
 ) -> tuple[dict[str, Any], str]:
     payload = identity.inject(body, api_kind) if identity.enabled else body
     if api_kind == "responses" and endpoint.capabilities.responses == "adapter":
-        payload = normalize_request(responses_request_to_chat(payload), "chat").body
+        payload = normalize_request(_responses_chat_payload(payload, endpoint), "chat").body
         api_kind = "chat"
     if api_kind == "chat" and provider_family(endpoint) == "deepseek":
         from .reasoning_fields import deepseek_tool_history
@@ -4647,7 +4654,7 @@ async def _prepare_routed_body(
             "projection_reused"
         ] = projection_reused
     contract_body = (
-        responses_request_to_chat(routed)
+        _responses_chat_payload(routed, decision.endpoint)
         if (
             api_kind == "responses"
             and decision.endpoint.capabilities.responses == "adapter"
@@ -4778,7 +4785,7 @@ async def _prepare_routed_body(
                 "context"
             )
         contract_body = (
-            responses_request_to_chat(routed)
+            _responses_chat_payload(routed, decision.endpoint)
             if (
                 api_kind == "responses"
                 and decision.endpoint.capabilities.responses == "adapter"

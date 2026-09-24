@@ -1,0 +1,38 @@
+# New identity: never repurpose the retired AMD ROCmFP4 endpoint or its bindings.
+id: amd-halogen-qwen38-256k
+public_model: siyuan/qwen38-halogen-amd-256k
+provider_model: halogen-qwen3.8-flash-next
+api_base: http://127.0.0.1:18109/v1
+node: amd
+role: responder
+tier: local-large
+tier_rank: 30
+modalities: [text, image]
+tasks: [general, code, batch, long-context]
+safe_context_tokens: 262144
+configured_context_tokens: 262144
+max_concurrency: 1
+backend_type: halogen
+health_url: http://127.0.0.1:18109/health
+enabled: false
+auto_candidate: false
+capabilities:
+  chat: true
+  responses: adapter
+  tools: parallel
+  tool_choice: true
+  tool_choice_modes: [auto, none, required, function]
+  structured_output: [json_object, json_schema]
+  streaming: true
+  validation_status: live-chat-reasoning-tools-32-images-70k-responses-adapter-offline
+  validated_at: "2026-09-24"
+metadata:
+  device_label: AMD 395
+  transport: loopback-ssh-direct-no-rewriting-proxy
+  service_group: amd-halogen
+  history_contract:
+    accepts_reasoning_content: true
+  context_status: engine-declared-262144-user-confirmed-long-context-chat-70008-validated-20260924
+  quality_status: short-synthetic-only
+  vision_status: live-chat-32-images-responses-via-chat-adapter-20260924
+  max_images: 32
