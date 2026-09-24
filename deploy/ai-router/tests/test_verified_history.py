@@ -29,8 +29,9 @@ def repository():
     return ConversationRepository(InMemoryStateStore(), NS(section=lambda _: {}))
 
 
-async def save(repo, branch, endpoint="AI", conversation="task"):
-    await repo.save(ConversationState(conversation, "auto", endpoint, 1, "code", time.time(), branch_id=branch))
+async def save(repo, branch, endpoint="AI", conversation="task", directive=None):
+    await repo.save(ConversationState(conversation, "auto", endpoint, 1, "code", time.time(), branch_id=branch,
+                                      directive_id=directive))
 
 
 def test_prose_tool_grouping_identity_preserves_input():
@@ -88,11 +89,12 @@ def test_opening_legacy_cross_client_and_ambiguity_do_not_inherit_state():
 def test_old_ancestor_is_not_replaced_with_latest_device_without_proof():
     async def case():
         repo = repository(); a, b = histories()
-        await save(repo, "old", "AMD"); await save(repo, "latest", "AI")
+        await save(repo, "old", "AMD"); await save(repo, "latest", "AI", directive="beichen")
         await repo.map_history("wb", history_identities(a), "old")
         await repo.map_lineage("wb", "task", "latest")
         parent, report = await repo.verified_history_match("wb", history_lookup_identities([*b, {"role": "user", "content": "changed history"}]))
         assert parent is None and report["reason"] == "historical_prefix_only"
+        assert report["directed_history"] is True
     run(case())
 
 

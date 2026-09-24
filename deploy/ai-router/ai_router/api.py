@@ -47,6 +47,7 @@ from .errors import (
     AuthenticationError,
     CapacityBusyError,
     CompactionUnavailableError,
+    ConversationStateConflictError,
     HistoryMigrationRequiredError,
     NoCompatibleModelError,
     NoEligibleModelError,
@@ -997,6 +998,20 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         ),
     )
     trace.payload["history_match"] = lineage.history_match
+    if (authenticated.policy.id in {"workbuddy-public", "workbuddy-qwen36-shared"}
+            and lineage.mode == "inferred"
+            and lineage.history_match.get("directed_history")
+            and (
+                lineage.history_match.get("reason") == "historical_prefix_only"
+                or (
+                    lineage.history_match.get("reason") == "ambiguous_history"
+                    and (
+                        lineage.history_match.get("candidate_conversation_count") == 1
+                        or lineage.history_match.get("candidate_overflow")
+                    )
+                )
+            )):
+        raise ConversationStateConflictError()
     identity_input_body = (
         lineage_body
         if api_kind == "chat"

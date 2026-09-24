@@ -223,6 +223,6 @@ function localPoolHtml(pool) {
 function historyMatchHtml(match) {
   if (!match) return "";
   const reasons={historical_prefix_only:"仅匹配旧分支，最近历史未验证",unique_history_match:"历史内容唯一匹配（含正文与工具事务校验）",shared_opening_only:"只有共同开场，关联未确认",no_verified_history:"缺少可靠历史证据",ambiguous_history:"存在多个分支候选，关联未确认"};
-  const sources={previous_response_id:"明确的上一条响应 ID",explicit_conversation_id:"明确的会话 ID",verified_history_v5:"第 5 版历史校验",history:"历史匹配"};
+  const sources={previous_response_id:"明确的上一条响应 ID",explicit_conversation_id:"明确的会话 ID",verified_history_v5:"第 5 版历史校验",verified_history_v6:"第 6 版历史校验",history:"历史匹配"};
   return `<section class="cache-prefix-break"><strong>会话关联 · ${match.status==="verified"?"已验证":"未确认，按新任务分配"}</strong><p>${escapeHtml(reasons[match.reason]||sources[match.source]||"证据未采集")}</p>${match.semantic_items!=null?`<p>校验边界 ${Number(match.semantic_items)} 个语义项（不是 tokens）；候选 ${Number(match.candidate_count)}</p>`:""}${match.inherited_endpoint_id?`<p>继承设备 ${escapeHtml(match.inherited_endpoint_id)}</p>`:""}<p class="section-meta">历史识别仅决定路由关联，不改写模型输入，不代表缓存命中。</p></section>`;
 }
