@@ -45,7 +45,8 @@ def test_registry_declares_dedicated_ornith_endpoint() -> None:
     assert endpoint.modalities == ("text", "image")
     assert endpoint.supports_image_count(1)
     assert endpoint.supports_image_count(2)
-    assert not endpoint.supports_image_count(3)
+    assert endpoint.supports_image_count(5)
+    assert not endpoint.supports_image_count(6)
     assert endpoint.capabilities.structured_output == ("json_object",)
     assert endpoint.allowed_client_ids == ALLOWED_CLIENTS
     assert endpoint.enabled is False
@@ -369,7 +370,7 @@ def test_image_json_request_routes_to_ornith(
                 "response_format": {"type": "json_object"},
             },
         )
-        three_images = client.post(
+        five_images = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer " + secrets["home-assistant"]},
             json={
@@ -378,7 +379,22 @@ def test_image_json_request_routes_to_ornith(
                     {"type": "text", "text": "Compare all images"},
                     *[
                         {"type": "image_url", "image_url": {"url": image}}
-                        for _ in range(3)
+                        for _ in range(5)
+                    ],
+                ]}],
+                "response_format": {"type": "json_object"},
+            },
+        )
+        six_images = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer " + secrets["home-assistant"]},
+            json={
+                **body,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Compare all images"},
+                    *[
+                        {"type": "image_url", "image_url": {"url": image}}
+                        for _ in range(6)
                     ],
                 ]}],
                 "response_format": {"type": "json_object"},
@@ -391,11 +407,13 @@ def test_image_json_request_routes_to_ornith(
     assert captured[1]["body"]["response_format"] == {"type": "json_object"}
     assert two_images.status_code == 200, two_images.text
     assert captured[2]["body"]["model"] == PROVIDER_MODEL
-    assert three_images.status_code == 422, three_images.text
-    assert three_images.json()["error"]["code"] == "no_compatible_model"
-    assert len(captured) == 3
+    assert five_images.status_code == 200, five_images.text
+    assert captured[3]["body"]["model"] == PROVIDER_MODEL
+    assert six_images.status_code == 422, six_images.text
+    assert six_images.json()["error"]["code"] == "no_compatible_model"
+    assert len(captured) == 4
     trace = asyncio.run(
-        runtime.route_traces.get(three_images.headers["x-request-id"])
+        runtime.route_traces.get(six_images.headers["x-request-id"])
     )
     assert trace["status"] == "failed"
     assert trace["error"]["code"] == "no_compatible_model"
@@ -404,7 +422,48 @@ def test_image_json_request_routes_to_ornith(
 
 @pytest.mark.parametrize("api_kind", ["chat", "responses"])
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("image_count", [0, 1, 2])
+def test_six_images_fail_before_upstream(
+    tmp_path: Path,
+    monkeypatch,
+    api_kind: str,
+    stream: bool,
+) -> None:
+    runtime, secrets, captured = _runtime(tmp_path, monkeypatch)
+    image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lJkAAAAASUVORK5CYII="
+    images = [image] * 6
+    if api_kind == "chat":
+        path = "/v1/chat/completions"
+        content = [{"type": "text", "text": "Compare"}] + [
+            {"type": "image_url", "image_url": {"url": value}}
+            for value in images
+        ]
+        body = {"model": "auto", "messages": [{"role": "user", "content": content}], "stream": stream}
+    else:
+        path = "/v1/responses"
+        content = [{"type": "input_text", "text": "Compare"}] + [
+            {"type": "input_image", "image_url": value}
+            for value in images
+        ]
+        body = {"model": "auto", "input": [{"role": "user", "content": content}], "stream": stream}
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            path,
+            headers={"Authorization": "Bearer " + secrets["home-assistant"]},
+            json=body,
+        )
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "no_compatible_model"
+    assert captured == []
+    trace = asyncio.run(runtime.route_traces.get(response.headers["x-request-id"]))
+    assert trace["status"] == "failed"
+    assert trace["endpoint_id"] is None
+    assert trace["error"]["code"] == "no_compatible_model"
+    asyncio.run(runtime.close())
+
+
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("image_count", [0, 1, 2, 5])
 def test_protocols_preserve_response_model_for_ornith(
     tmp_path: Path,
     monkeypatch,
