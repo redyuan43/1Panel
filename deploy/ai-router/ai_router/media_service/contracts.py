@@ -13,7 +13,7 @@ from PIL import Image
 
 
 MODELS = ("qwen-image-2.1", "siyuan-image", "siyuan-video", "qwen-image-3.0-pro")
-PUBLIC_MODELS = MODELS[:2]
+PUBLIC_MODELS = ("siyuan-image", "siyuan-video")
 TERMINAL = {"completed", "failed", "cancelled"}
 USE_CASES = ("photo", "product", "ui", "infographic", "illustration", "logo")
 RATIOS = ("auto", "square", "landscape", "portrait")

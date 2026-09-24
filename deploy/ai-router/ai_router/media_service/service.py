@@ -335,6 +335,11 @@ class MediaService:
                 if data is None:
                     data = await self._image_url(result["url"])
                 info = image_info(data)
+                ratio = body["aspect_ratio"]
+                width, height = info["width"], info["height"]
+                if ((ratio == "square" and width != height) or (ratio == "portrait" and width >= height)
+                        or (ratio == "landscape" and width <= height)):
+                    raise MediaError("image_requirements_unmet", "Generated image aspect ratio does not match the request.", 422)
                 if body["background"] == "transparent" and not info["transparent"]:
                     raise MediaError("image_requirements_unmet", "Generated image is not transparent.", 422)
                 output = await self.archive(job_id, "out_" + job_id, data=data, **info)
@@ -349,6 +354,18 @@ class MediaService:
             current = self.store.get(job_id)
             self.store.update(job_id, status="cancelling" if current.get("cancel_requested") else "reconciling",
                               error={"code": "media_outcome_unknown", "message": "Checking the original task; it will not be resubmitted."})
+        except QuotaExceeded as exc:
+            current = self.store.get(job_id)
+            if (original.get("image_generation") and route(original) == "local_first"
+                    and not current.get("cancel_requested") and provider == "codex"):
+                # The provider reported a definite allowance rejection, not an
+                # unknown outcome. Keep the receipt for audit and wait locally.
+                self.store.update(job_id, status="queued", execution_kind=SINGLE,
+                                  cloud_unavailable=True, cloud_receipt=state, provider_state={},
+                                  provider=None, routing_reason="cloud_quota_local_queued", error=None)
+            else:
+                self.store.update(job_id, status="cancelled" if current.get("cancel_requested") else "failed",
+                                  error={"code": exc.code, "message": str(exc)})
         except MediaError as exc:
             if (
                 provider == "qwen"
