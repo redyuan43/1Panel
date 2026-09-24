@@ -93,17 +93,17 @@ routing:
     - client_id: home-assistant
       requested_models:
         - auto
-        - siyuan/ornith-nx1-96k
         - huihui/Qwen3.8-27B-Q4-DFlash2
         - huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
+        - siyuan/ornith-nx1-96k
       target_endpoint_id: nx1-ornith-35b-a3b-96k
       ignored_route_tiers: [local-large]
     - client_id: check-boards
       requested_models:
         - auto
-        - siyuan/ornith-nx1-96k
         - huihui/Qwen3.8-27B-Q4-DFlash2
         - huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
+        - siyuan/ornith-nx1-96k
       target_endpoint_id: nx1-ornith-35b-a3b-96k
       ignored_route_tiers: [local-large]
   new_request_capacity_wait_seconds: 0
@@ -132,10 +132,12 @@ routing:
       - cloud-deepseek-v4-flash
     multimodal:
       - zhipu-glm-5.3-flash
+      - cloud-deepseek-v4-flash
       - codex-pro-gpt-5.6-sol
     multimodal_complex_code:
       - codex-pro-gpt-5.6-sol
       - zhipu-glm-5.3-flash
+      - cloud-deepseek-v4-flash
   weights:
     quality: 0.50
     load: 0.20

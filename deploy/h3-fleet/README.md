@@ -60,9 +60,13 @@ After both slots have been filled, another job waits until both leave, so a
 completed peer's residual memory cannot be mistaken for the active peer's use.
 The ordinary long-job rule remains one job. A later isolated acceptance sent
 three requests through one media API to the u24 RTX 4060 Ti and both Ivan RTX
-3060s concurrently; all three media files completed and decoded. This is not
-a production release: the formal worker units and offload disk gate still
-require a separately reviewed release. See `outputs/media-validation-20260924/video-three-card/REPORT.md`.
+3060s concurrently; all three media files completed and decoded. That three-card
+run was isolated, not a production release. Subsequently Ivan video task I/O
+moved to NVMe and its two RTX 3060 worker lanes were released for the qualified
+single-generation path. One production API video completed; production dual-lane
+and three-card concurrency remain unverified. See
+`outputs/media-validation-20260924/video-three-card/REPORT.md` and
+`outputs/video-release-20260924/REPORT.md`.
 
 The reviewed Studio Turbo4 full-duration preview now supports up to three lanes.
 Two triple batches produced six complete 15-second portrait videos without

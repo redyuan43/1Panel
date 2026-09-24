@@ -386,18 +386,15 @@ def test_workbuddy_api_normalizes_continuations_and_audits_only_metadata(environ
     assert response.status_code == 200, response.text
     assert len(forwarded) == 1
     output = forwarded[0]
-    assert output["messages"][2:] == tail
+    assert output["messages"][2:-1] == tail
+    assert output["messages"][-1]["role"] == "user"
+    assert output["messages"][-1]["content"].startswith("<workbuddy_tool_catalog>\n")
     assert output["messages"][1]["content"].endswith("PRIVATE_USER_SENTINEL")
-    if tail:
-        # No verified prior snapshot: preserve the caller's complete history
-        # instead of relocating dynamic content across an existing turn.
-        assert output["messages"] == before["messages"]
-        assert output["tools"] == sorted(before["tools"], key=lambda tool: tool["function"]["name"])
-    else:
-        assert "PRIVATE_MEMORY_SENTINEL" in output["messages"][1]["content"]
-        assert "PRIVATE_CATALOG_SENTINEL" in output["messages"][1]["content"]
-        assert "PRIVATE_MEMORY_SENTINEL" not in output["messages"][0]["content"]
-        assert "PRIVATE_CATALOG_SENTINEL" not in json.dumps(output["tools"])
+    # Without a verified prior snapshot, preserve the caller's messages and
+    # append the changing tool catalog as a separate user update.
+    assert output["messages"][:-1] == before["messages"]
+    assert "PRIVATE_CATALOG_SENTINEL" in output["messages"][-1]["content"]
+    assert "PRIVATE_CATALOG_SENTINEL" not in json.dumps(output["tools"])
     # Tool serialization sorts names, but schemas are bound to their name,
     # not to the previous array position.
     assert {t["function"]["name"]: t["function"]["parameters"] for t in output["tools"]} == {
@@ -410,6 +407,7 @@ def test_workbuddy_api_normalizes_continuations_and_audits_only_metadata(environ
     assert len(moves[0]["stable_prefix_sha256"]) == 64
     assert moves[0]["skip_reason"] is None
     history = [json.loads(line) for line in audit_text.splitlines() if json.loads(line).get("event") == "workbuddy_history"]
-    assert len(history) == 1 and history[0]["association"] == "unconfirmed"
-    assert bool(history[0].get("reorder_bypassed")) == bool(tail)
+    assert len(history) == 1 and history[0]["association"] == "new_baseline"
+    assert history[0]["history_preserved"] is True
+    assert history[0]["dynamic_update_appended"] is True
     assert "PRIVATE_" not in audit_text

@@ -72,7 +72,7 @@ def test_randomize_seven_directives(tmp_path):
 def test_reasoning_effort_reaches_litellm_without_being_dropped(endpoint_id, protocol):
     endpoint = Registry(ROOT / "config/registry.yaml").by_id(endpoint_id)
     # GLM uses Responses-to-Chat; also exercise that conversion for this transport test.
-    decision = SimpleNamespace(endpoint=endpoint, upstream_api_base=None, native_or_adapter="adapter")
+    decision = SimpleNamespace(endpoint=endpoint, upstream_api_base=None, native_or_adapter="adapter", trace=None)
     identity = SimpleNamespace(inject=lambda body, kind: copy.deepcopy(body))
     body = {"model": "auto", "messages": [{"role": "user", "content": "hello"}], "reasoning_effort": "low"}
     if protocol == "responses":
@@ -87,7 +87,8 @@ def test_reasoning_effort_reaches_litellm_without_being_dropped(endpoint_id, pro
             return httpx.Response(200, json={"ok": True})
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(capture)) as client:
-            runtime = SimpleNamespace(internal_client=client, internal_base_url="http://litellm", internal_api_key="test")
+            runtime = SimpleNamespace(internal_client=client, internal_base_url="http://litellm", internal_api_key="test",
+                                      scheduler=SimpleNamespace(admission=SimpleNamespace(enabled=False)))
             request = Request({"type": "http", "headers": []})
             response = await _send_upstream(runtime, request, body, api_kind=protocol, decision=decision, identity=identity)
             await response.aclose()

@@ -47,7 +47,8 @@ class StreamContract(unittest.IsolatedAsyncioTestCase):
         profile=IdentityProfile.from_settings({'enabled':False})
         original=copy.deepcopy(body)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            current=SimpleNamespace(internal_client=client,internal_api_key='synthetic',training=None)
+            current=SimpleNamespace(internal_client=client,internal_api_key='synthetic',training=None,
+                                    scheduler=SimpleNamespace(admission=SimpleNamespace(enabled=False)))
             response=await api._send_upstream(current,request,body,api_kind=api_kind,
                 decision=decision,identity=profile)
             await response.aclose()
@@ -87,7 +88,8 @@ class StreamContract(unittest.IsolatedAsyncioTestCase):
         budget = SimpleNamespace(settle=mock.AsyncMock())
         if settlement_failure:
             budget.settle.side_effect = [api.RouterError('busy', status_code=503, code='cloud_budget_busy'), None]
-        current=SimpleNamespace(compactor=None,conversations=None,training=training,internal_client=client,internal_api_key='synthetic',budget=budget)
+        current=SimpleNamespace(compactor=None,conversations=None,training=training,internal_client=client,internal_api_key='synthetic',budget=budget,
+                                scheduler=SimpleNamespace(admission=SimpleNamespace(enabled=False)))
         current.limiter = SimpleNamespace(release_parallel=mock.AsyncMock())
         current.track_request_finished = mock.AsyncMock()
         finalizer = api._StreamResourceFinalizer(current,

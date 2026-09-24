@@ -198,12 +198,16 @@ endpoints:
       responses: native
       tools: parallel
       tool_choice: true
+      tool_choice_modes:
+        - auto
+        - none
+        - required
       structured_output:
         - json_object
         - json_schema
       streaming: true
-      validation_status: live-validated-tp4-mtp2-tools-vision-256k-text-8seq
-      validated_at: "2026-09-10"
+      validation_status: live-revalidated-named-tool-finish-reason-excluded
+      validated_at: "2026-09-23"
     deployment_profiles:
       - id: v100-tp2-qwen38-196k
         tiers:
@@ -230,7 +234,7 @@ endpoints:
       token_counting:
         enabled: true
         method: render
-        version: "0997f410c57a1f4e-b11349aafa7cdc6a-c3cf9e34abf4f9e3-history-v1"
+        version: "0997f410c57a1f4e-b11349aafa7cdc6a-c3cf9e34abf4f9e3-history-v2"
       context_status: live-validated-256k-text-8seq-native-gpu-cache
       context_validation_report: /home/ai/.local/state/ai-router-acceptance/20260910-routing-modes/acceptance-summary.json
       prefix_cache_status: native-gpu-prefix-validated-2026-09-10
@@ -298,7 +302,9 @@ endpoints:
       token_counting:
         enabled: true
         method: render
-        version: "0997f410c57a1f4e-b11349aafa7cdc6a-c3cf9e34abf4f9e3-history-v1"
+        version: "0997f410c57a1f4e-b11349aafa7cdc6a-c3cf9e34abf4f9e3-history-v2"
+      history_contract:
+        accepts_reasoning_content: true
       context_status: runtime-reported-500k
       quality_status: benchmarked-2026-09-01
       quality_report: /opt/1panel/ai-router/benchmarks/report-edge-20260901.json
@@ -332,10 +338,13 @@ endpoints:
       responses: adapter
       tools: parallel
       tool_choice: true
+      tool_choice_modes:
+        - auto
+        - none
       structured_output: []
       streaming: true
-      validation_status: live-validated-chat-tools-streaming
-      validated_at: "2026-09-17"
+      validation_status: live-ninfer-auto-none-tools-stream-no-vision-no-json
+      validated_at: "2026-09-23"
     quality:
       general: 100
       code: 0
@@ -760,6 +769,7 @@ endpoints:
       vision_status: coding-endpoint-rejected-image-2026-09-10
       documentation_url: https://docs.bigmodel.cn/cn/guide/models/text/glm-5.3
 
+
   # Halogen has its own identity; the old AMD endpoint and its bindings remain unchanged.
   - id: amd-halogen-qwen38-256k
     public_model: siyuan/qwen38-halogen-amd-256k
@@ -842,6 +852,8 @@ endpoints:
       batch: 100
       long-context: 100
     metadata:
+      history_contract:
+        accepts_reasoning_content: true
       provider: zhipu-coding
       billing_mode: subscription
       context_status: user-approved-1m-admission-live-probe-358432
@@ -894,6 +906,9 @@ endpoints:
       code: 100
       batch: 100
     metadata:
+      history_contract:
+        accepts_reasoning_content: true
+        accepts_reasoning_items: true
       provider: deepseek
       context_status: official-1m-live-validated-990038-input
       quality_status: benchmarked-2026-09-01
@@ -956,6 +971,7 @@ endpoints:
       max_output_tokens: 384000
       thinking_via_extra_body: true
 
+
   # nx1 (Orin NX 16G) 专用诊断端点：仅供 home-assistant / check-boards 通过
   # client_route_binding 调用，用于 Home Assistant 与 check_boards 服务的故障
   # 诊断。端点级 client_allowlist 把其他账号（含 models=["*"]）挡在显式请求
@@ -1013,7 +1029,6 @@ endpoints:
       history_contract:
         accepts_reasoning_content: true
       purpose: homeassistant-checkboards-diagnostics-dedicated
-
 
   - id: ivan-v10016-bonsai2-196k
     public_model: siyuan/bonsai2-v10016-196k

@@ -250,12 +250,21 @@ def test_full_api_history_output_and_terminal_audit(tmp_path, monkeypatch, proto
         assert connection.execute("select status,status_code,endpoint_id from route_traces").fetchall() == [("succeeded", 200, EID)]
 
 
+@pytest.mark.parametrize("protocol", ["chat", "responses"])
 @pytest.mark.parametrize("stream", [False, True])
-def test_full_api_opaque_history_rejected_before_upstream(tmp_path, monkeypatch, stream):
+@pytest.mark.parametrize("explicit", [False, True])
+def test_full_api_opaque_history_rejected_before_upstream(tmp_path, monkeypatch, protocol, stream, explicit):
     runtime, captured = runtime_for(tmp_path, monkeypatch)
-    body = {"model": endpoint().public_model, "stream": stream, "input": [{"type": "reasoning", "encrypted_content": "opaque-secret", "summary": []}, {"role": "user", "content": "continue"}]}
+    if protocol == "responses":
+        history = {"input": [{"type": "reasoning", "encrypted_content": "opaque-secret", "summary": []},
+                             {"role": "user", "content": "continue"}]}
+    else:
+        history = {"messages": [{"role": "assistant", "content": "", "reasoning_content": "one",
+                                 "reasoning": "opaque-secret"}, {"role": "user", "content": "continue"}]}
+    body = {"model": endpoint().public_model if explicit else "auto", "stream": stream, **history}
     with TestClient(create_app(runtime)) as client:
-        response = client.post("/v1/responses", json=body, headers={"Authorization": "Bearer test-key"})
+        response = client.post("/v1/" + ("responses" if protocol == "responses" else "chat/completions"),
+                               json=body, headers={"Authorization": "Bearer test-key"})
     assert response.status_code == 409, response.text
     assert response.json()["error"]["code"] == "history_migration_required"
     assert not captured

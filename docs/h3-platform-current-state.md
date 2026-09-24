@@ -16,6 +16,15 @@
 - Fleet 准入只对 `main`、`preview` 两条已验收 GPU UUID 的 RTX 3060 lane 开放此配方的双路；`preview_only` 对这个固定配方有窄例外。一轮两个名额用完后等两条都退出，避免沿用含残留内存的基线。原 `long.max_parallel=1` 和其他质量/预览规则保持。
 - 普通 preview I2V 的首帧改为 Lanczos 等比居中裁剪。u24 4060 Ti 与 Ivan 双 3060 经同一独立 API 的三卡真实并发已通过，三份 15 秒视频完整解码，证据见 `outputs/media-validation-20260924/video-three-card/REPORT.md`。方形首帧的上下边缘被截断，画质仍需人工验收。验收时 Ivan 正式 worker 未启用，正式 offload 仅余约 6 GiB；没有生产切换。
 
+## 2026-09-24 Ivan 视频生产发布（后续状态）
+
+- 上节记录的是三卡隔离验收当时的状态。随后 Ivan 的视频任务 I/O 迁到 NVMe，
+  两张 3060 的独立 Fleet/worker 与 Router 视频 API 已发布；正式 API 一条
+  `i2v / 15 秒 / 16:9` 任务完成、归档并完整解码。证据见
+  `outputs/video-release-20260924/REPORT.md`。
+- 正式双路并发、三卡联合调度、客户 ComfyUI 图形工作流及画质仍未通过生产验收。
+  u24 的 4060 Ti 继续承载文本服务，V100 原用途不变。
+
 ## 2026-09-24 媒体独立验收中的容量接口修复
 
 - 独立 u24 Fleet 在 ComfyUI worker 停止时，容量查询曾因连接异常返回 500。

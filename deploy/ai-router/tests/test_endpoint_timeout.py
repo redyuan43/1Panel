@@ -52,7 +52,8 @@ def test_read_timeout_is_per_endpoint_without_mutating_shared_client(override, e
             timeout=httpx.Timeout(connect=5, read=900, write=6, pool=7),
             transport=httpx.MockTransport(upstream),
         ) as client:
-            runtime = SimpleNamespace(internal_client=client, internal_api_key="")
+            runtime = SimpleNamespace(internal_client=client, internal_api_key="",
+                                      scheduler=SimpleNamespace(admission=SimpleNamespace(enabled=False)))
             decision = SimpleNamespace(
                 endpoint=value, native_or_adapter="native", upstream_api_base=value.api_base,
             )

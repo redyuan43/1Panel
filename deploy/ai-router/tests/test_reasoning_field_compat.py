@@ -9,6 +9,7 @@ import pytest
 from fastapi import Request
 
 from ai_router.api import _send_upstream
+from ai_router.errors import HistoryMigrationRequiredError
 from ai_router.config import Registry
 from ai_router.identity import IdentityProfile
 from ai_router.history import SSEAccumulator, assistant_items_from_response, normalize_history_for_provider
@@ -53,7 +54,8 @@ def test_deepseek_migration_keeps_existing_reasoning_without_inventing_it():
 
 
 def test_alias_precedence_does_not_duplicate_or_stringify_metadata():
-    assert chat_reasoning({'reasoning_content': 'one', 'reasoning': 'two'}) == 'one'
+    with pytest.raises(HistoryMigrationRequiredError):
+        chat_reasoning({'reasoning_content': 'one', 'reasoning': 'two'})
     assert chat_reasoning({'reasoning_content': '', 'reasoning': 'two'}) == 'two'
     assert chat_reasoning({'reasoning': {'effort': 'high'}}) is None
 
@@ -122,7 +124,8 @@ def test_final_wire_deepseek_tool_continuation(api_kind, adapter):
             captured.append(json.loads(request.content))
             return httpx.Response(200, json={})
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            runtime = SimpleNamespace(internal_base_url='http://test.invalid', internal_api_key='test', internal_client=client)
+            runtime = SimpleNamespace(internal_base_url='http://test.invalid', internal_api_key='test',
+                                      internal_client=client, scheduler=SimpleNamespace(admission=SimpleNamespace(enabled=False)))
             decision = RouteDecision(endpoint=endpoint, requested_model='auto', task='general', prompt_tokens=10,
                                      output_reserve_tokens=16, reason='test', affinity='new', score=1,
                                      native_or_adapter='adapter' if adapter else 'native')

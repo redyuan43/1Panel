@@ -3225,7 +3225,11 @@ async def _acquire_route_capacity(
                 continue
             if trace:
                 await _save_request_trace(current, trace)
-            if history_incompatible_seen:
+            if history_incompatible_seen or (
+                count_evidence
+                and all(value.get("reason") == "history_incompatible"
+                        for value in count_evidence.values())
+            ):
                 raise HistoryMigrationRequiredError()
             if capacity_busy_seen:
                 if requested_model == "auto":
