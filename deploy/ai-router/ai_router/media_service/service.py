@@ -28,7 +28,7 @@ from .contracts import (
 from .providers import CodexProvider, H3Provider, QwenProvider
 from .storage import MediaStore
 from .image_direct import DirectGeneration, SINGLE, compatible
-from .video_direct import VideoGeneration, single_video_request
+from .video_direct import VideoGeneration, single_video_request, compatible as video_compatible
 from ..media_policy import validate_media_limits
 from ..image_generation import validate_snapshot, cloud_allowed, route
 from .video_review import VideoReviewer, technical_review
@@ -211,7 +211,7 @@ class MediaService:
         video_specs = sorted({(capability["mode"], duration, aspect)
                               for endpoint in self.video_direct.executors
                               if (settings["enabled"] and settings["videos_enabled"]
-                                  and "siyuan-video" in models
+                                  and any(model in models for model in ("siyuan-video", "minimax-h3"))
                                   and endpoint["enabled"] and endpoint["qualified"])
                               for capability in endpoint["capabilities"]
                               for duration in capability["durations"]
@@ -276,6 +276,10 @@ class MediaService:
             if body["duration"] > policy.get("video_max_seconds", 3600):
                 raise MediaError("media_duration_limit", "Video exceeds the account duration limit.", 403)
             if direct and not self.video_direct.candidates(body):
+                configured = any(video_compatible({**endpoint, "enabled": True, "qualified": True}, body)
+                                 for endpoint in self.video_direct.executors)
+                if not configured:
+                    raise MediaError("media_no_compatible_executor", "No configured video recipe supports this request.", 422)
                 raise MediaError("media_no_compatible_executor", "No qualified executor supports this video request.", 503)
             if not direct and not settings["h3_ready"]:
                 raise MediaError("h3_not_verified", "H3 media contract has not been verified.", 503)

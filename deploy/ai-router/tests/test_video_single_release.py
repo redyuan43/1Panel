@@ -50,11 +50,19 @@ def test_exact_video_options_and_account_admission(tmp_path):
         options = await svc.options(["siyuan-video"])
         assert options["single_generation"]["video_capabilities"] == [
             {"mode": "i2v", "duration": 15, "aspect_ratio": "16:9"}]
+        assert (await svc.options(["minimax-h3"]))["single_generation"]["video_capabilities"] == options["single_generation"]["video_capabilities"]
         assert (await svc.options(["siyuan-image"]))["single_generation"]["video_capabilities"] == []
         for change in ({"duration": 14}, {"aspect_ratio": "9:16"}, {"mode": "t2v", "assets": {}}):
             with pytest.raises(MediaError) as error:
                 svc.submit("alice", "video", body(**change), json.dumps(change), "req")
             assert error.value.code == "media_no_compatible_executor"
+            assert error.value.status == 422
+        svc.video_direct.executors = [{**endpoint(), "qualified": False}]
+        with pytest.raises(MediaError) as unavailable:
+            svc.submit("alice", "video", body(), "unqualified", "req")
+        assert unavailable.value.code == "media_no_compatible_executor"
+        assert unavailable.value.status == 503
+        svc.video_direct.executors = [endpoint()]
         with pytest.raises(MediaError) as error:
             svc.submit("alice", "video", body(), "quota", "req", policy={"video_max_seconds": 10})
         assert error.value.code == "media_duration_limit"
