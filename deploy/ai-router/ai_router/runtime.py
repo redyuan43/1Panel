@@ -79,6 +79,7 @@ class RouterRuntime:
     state_encryption_key: str = field(repr=False)
     endpoint_token_counter: EndpointTokenCounter = field(default_factory=EndpointTokenCounter, init=False)
     compute_executor: BoundedExecutor = field(default_factory=BoundedExecutor, init=False, repr=False)
+    recall_executor: BoundedExecutor = field(default_factory=lambda: BoundedExecutor(2, "history-recall"), init=False, repr=False)
     privacy_reviewer: PrivacyReviewer | None = field(default=None, init=False)
     prefix_prewarmer: PrefixPrewarmer | None = field(default=None, init=False, repr=False)
     track_instance: bool = False
@@ -562,6 +563,7 @@ class RouterRuntime:
                 pass
         await self.endpoint_token_counter.close()
         self.compute_executor.close()
+        self.recall_executor.close()
         try:
             if getattr(self.training, "aclose", None) is not None:
                 await self.training.aclose()

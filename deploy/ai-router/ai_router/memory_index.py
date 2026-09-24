@@ -23,11 +23,16 @@ from pathlib import Path
 from typing import Iterable
 
 from cryptography.fernet import Fernet
+from .phase_timing import phase
 
 
 INDEX_VERSION = 1
 MAX_QUERY_TERMS = 64
 MAX_CANDIDATES = 64
+SEARCH_INDEXES = (
+    "CREATE INDEX IF NOT EXISTS memory_documents_corpus ON memory_documents(owner,length)",
+    "CREATE INDEX IF NOT EXISTS memory_documents_search ON memory_documents(id,owner,cloud_allowed,conversation,created_at)",
+)
 STOP_WORDS = frozenset("the and for with from this that have what when where please about error history conversation remember 之前 以前 历史 记录 这个 那个 什么 如何 我们 可以 是否 错误 问题 帮我 一下".split())
 LATIN_TERM = re.compile(r"[a-z0-9_][a-z0-9_./:\\-]{1,127}", re.I)
 HAN_RUN = re.compile(r"[\u3400-\u9fff]+")
@@ -249,7 +254,9 @@ class MemoryIndex:
                legacy_cloud_approved: bool = False,
                conversation_id: str | None = None, limit: int = 6,
                exclude_message_ids: frozenset[str] = frozenset(),
-               required_identifiers: frozenset[str] | None = None) -> list[MemoryHit]:
+               required_identifiers: frozenset[str] | None = None,
+               cancel_event=None, deadline: float | None = None,
+               diagnostics: dict | None = None) -> list[MemoryHit]:
         owner = self._owner(client_id)
         terms = list(search_terms(query[:8192]))[:MAX_QUERY_TERMS]
         identifiers = explicit_identifiers(query) if required_identifiers is None else required_identifiers
@@ -257,24 +264,61 @@ class MemoryIndex:
             return []
         hashed = {self._digest("term", client_id, term): term for term in terms}
         placeholders = ",".join("?" for _ in hashed)
+        started = time.monotonic()
+        deadline = min(deadline, started + 2) if deadline is not None else started + 2
+        diagnostics = diagnostics if diagnostics is not None else {}
+        def interrupted():
+            return time.monotonic() >= deadline or (cancel_event is not None and cancel_event.is_set())
         with closing(self._connect()) as db:
-            deadline = time.monotonic() + 2
-            db.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-            corpus = db.execute("SELECT COUNT(*), COALESCE(AVG(length),1) FROM memory_documents WHERE owner=?", (owner,)).fetchone()
-            # Aggregate and cap candidates in SQL, before decrypting any content.
-            rows = db.execute(f"""SELECT d.*, COUNT(*) AS matches,
-                GROUP_CONCAT(t.term) AS matched, SUM(t.frequency) AS frequency
-                FROM memory_terms t JOIN memory_documents d ON d.id=t.document AND d.owner=t.owner
-                WHERE t.owner=? AND t.term IN ({placeholders})
-                AND (?=0 OR d.cloud_allowed=1 OR (?=1 AND d.cloud_allowed=2))
+            # A cancelled optional lookup must not occupy a worker in a long busy wait.
+            db.execute("PRAGMA busy_timeout=100")
+            db.set_progress_handler(lambda: int(interrupted()), 1000)
+            def fetch(stage, sql, args):
+                diagnostics["stage"] = stage
+                start = time.monotonic()
+                try:
+                    if interrupted():
+                        raise sqlite3.OperationalError("interrupted")
+                    with phase("history_search_" + stage):
+                        return db.execute(sql, args).fetchall()
+                except sqlite3.Error as error:
+                    diagnostics["sqlite_errorcode"] = getattr(error, "sqlite_errorcode", None)
+                    diagnostics["sqlite_errorname"] = getattr(error, "sqlite_errorname", None) or (
+                        "SQLITE_INTERRUPT" if str(error) == "interrupted" else "SQLITE_ERROR")
+                    raise
+                finally:
+                    diagnostics.setdefault("stages_ms", {})[stage] = round((time.monotonic()-start)*1000, 3)
+            db.execute("BEGIN")
+            corpus = fetch("corpus", "SELECT COUNT(*), COALESCE(AVG(length),1) FROM memory_documents WHERE owner=?", (owner,))[0]
+            # Group the narrow posting rows first. Joining documents per term and
+            # carrying ciphertext through GROUP BY sorted gigabytes before LIMIT.
+            candidates = fetch("candidates", f"""WITH matches AS MATERIALIZED (
+                SELECT document, COUNT(*) AS matches
+                FROM memory_terms WHERE owner=? AND term IN ({placeholders}) GROUP BY document
+                ) SELECT d.id, m.matches FROM matches m
+                CROSS JOIN memory_documents d ON d.id=m.document AND d.owner=?
+                WHERE (?=0 OR d.cloud_allowed=1 OR (?=1 AND d.cloud_allowed=2))
                 AND NOT EXISTS (SELECT 1 FROM memory_exclusions e WHERE e.owner=d.owner AND e.conversation=d.conversation)
-                GROUP BY d.id ORDER BY matches DESC, d.created_at DESC LIMIT ?""",
-                (owner, *hashed, int(cloud), int(legacy_cloud_approved is True), MAX_CANDIDATES)).fetchall()
-            frequencies = dict(db.execute(f"SELECT term,COUNT(*) FROM memory_terms WHERE owner=? AND term IN ({placeholders}) GROUP BY term",
-                                         (owner, *hashed)).fetchall())
+                ORDER BY m.matches DESC, d.created_at DESC, d.id DESC LIMIT ?""",
+                (owner, *hashed, owner, int(cloud), int(legacy_cloud_approved is True), MAX_CANDIDATES))
+            if not candidates:
+                return []
+            selected = {row["id"]: row for row in candidates}
+            marks = ",".join("?" for _ in selected)
+            documents = fetch("documents", f"SELECT * FROM memory_documents WHERE owner=? AND id IN ({marks})", (owner, *selected))
+            matched = {identifier: [] for identifier in selected}
+            for row in fetch("matches", f"SELECT document,term FROM memory_terms WHERE owner=? AND term IN ({placeholders}) AND document IN ({marks})", (owner, *hashed, *selected)):
+                matched[row["document"]].append(row["term"])
+            by_id = {row["id"]: dict(row) for row in documents}
+            rows = [{**by_id[row["id"]], "matched": matched[row["id"]]} for row in candidates]
+            frequencies = dict(fetch("frequencies", f"SELECT term,COUNT(*) FROM memory_terms WHERE owner=? AND term IN ({placeholders}) GROUP BY term", (owner, *hashed)))
         hits = []
         for row in rows:
-            matched = [hashed[value] for value in row["matched"].split(",")]
+            if interrupted():
+                diagnostics["stage"] = "decode"
+                diagnostics["sqlite_errorname"] = "SQLITE_INTERRUPT"
+                raise sqlite3.OperationalError("interrupted")
+            matched = [hashed[value] for value in row["matched"]]
             exact = any(re.search(r"[./:_\\-]|\d", term) and len(term) >= 5 for term in matched)
             # One generic word is not sufficient evidence for injecting history.
             if len(matched) < 2 and not exact:

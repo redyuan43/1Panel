@@ -30,6 +30,38 @@ def test_cross_conversation_finds_exact_original_with_source(index):
     assert index.read("alice", hits[0].source_id) == source()
 
 
+def test_search_filters_permissions_before_candidate_limit(index, monkeypatch):
+    index.add([source(message_id=f"blocked-{i}", conversation_id=f"blocked-{i}",
+                      cloud_allowed=False, created_at=100+i) for i in range(80)])
+    index.add([source()])
+    decoded = []
+    original = index._decode
+    def decode(row, client_id):
+        decoded.append(row["id"])
+        return original(row, client_id)
+    monkeypatch.setattr(index, "_decode", decode)
+    hits = index.search("alice", "E_MEMORY_782", cloud=True)
+    assert len(hits) == 1 and hits[0].source.message_id == "message-1"
+    assert len(decoded) == 1
+    index.search("alice", "E_MEMORY_782", cloud=False)
+    assert len(decoded) <= 65
+
+
+def test_cancelled_search_stops_before_sql_and_reports_phase(index):
+    from threading import Event
+    stopped = Event(); stopped.set()
+    diagnostics = {}
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        index.search("alice", "E_MEMORY_782", cancel_event=stopped, diagnostics=diagnostics)
+    assert diagnostics["stage"] == "corpus"
+    assert diagnostics["sqlite_errorname"] == "SQLITE_INTERRUPT"
+
+
+def test_expired_search_deadline_is_not_extended(index):
+    with pytest.raises(sqlite3.OperationalError, match="interrupted"):
+        index.search("alice", "E_MEMORY_782", deadline=0)
+
+
 def test_legacy_cloud_grant_does_not_rewrite_source_or_allow_known_local_history(index):
     unknown = source(cloud_allowed=False, cloud_unknown=True)
     blocked = source(message_id="blocked", cloud_allowed=False, cloud_unknown=False)

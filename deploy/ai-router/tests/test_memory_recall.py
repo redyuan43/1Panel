@@ -29,7 +29,8 @@ def setup(tmp_path):
         endpoint_token_counter=SimpleNamespace(count=endpoint_count),
         limiter=ClientLimiter(InMemoryStateStore()))
     identity = SimpleNamespace(inject=lambda body, kind: copy.deepcopy(body))
-    decision = SimpleNamespace(endpoint=SimpleNamespace(cloud=True, safe_context_tokens=16000),
+    decision = SimpleNamespace(endpoint=SimpleNamespace(cloud=True, safe_context_tokens=16000,
+        backend_type="openai", node="test"),
         deployment_safe_context_tokens=None, prompt_tokens=100, output_reserve_tokens=100,
         recall_projection=None)
     return current, identity, decision
@@ -117,6 +118,47 @@ def test_recall_does_not_consume_an_extra_rpm_request():
         allowed, _ = await limiter.check_rate_limits("alice", prompt_tokens=5, rpm_limit=1, tpm_limit=10)
         assert allowed
         assert not await limiter.check_additional_tokens("alice", 1, 10)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("error,reason", [("interrupted", "query_timeout"), ("database is locked", "database_busy")])
+def test_recall_reports_specific_sql_failure(setup, monkeypatch, error, reason):
+    import sqlite3
+    current, _, decision = setup
+    decision.trace = SimpleNamespace(payload={})
+    def fail(*args, **kwargs):
+        kwargs["diagnostics"]["stage"] = "candidates"
+        raise sqlite3.OperationalError(error)
+    monkeypatch.setattr(current.history_memory.index, "search", fail)
+    projection, state = asyncio.run(prepare(setup, {"messages": [{"role": "user", "content": "E_MEMORY_782"}]}))
+    assert projection is None and state == reason
+    assert decision.trace.payload["observation"]["history_search"][0]["stage"] == "candidates"
+    current.recall_executor.close()
+
+
+def test_cancelled_recall_stops_sql_worker_and_frees_slot(setup):
+    import threading
+    import time
+    from ai_router.memory_recall import search_history
+    from ai_router.compute import BoundedExecutor
+    async def scenario():
+        current, _, decision = setup
+        current.recall_executor = BoundedExecutor(1, "test-recall")
+        entered, exited = threading.Event(), threading.Event()
+        def blocked(*args, cancel_event, **kwargs):
+            entered.set()
+            assert cancel_event.wait(2)
+            exited.set()
+            return []
+        task = asyncio.create_task(search_history(current, SimpleNamespace(search=blocked), "alice", "query",
+                                                 decision=decision, deadline=time.monotonic()+5))
+        assert await asyncio.to_thread(entered.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert await asyncio.to_thread(exited.wait, 1)
+        assert await asyncio.wait_for(current.recall_executor.run(lambda: "next"), timeout=1) == "next"
+        current.recall_executor.close()
     asyncio.run(scenario())
 
 
@@ -238,6 +280,7 @@ def test_actual_send_uses_projection_without_mutating_history_body(setup, kind, 
         current.internal_api_key = ""
         current.internal_base_url = "http://isolated-test.invalid"
         current.training = None
+        current.scheduler = SimpleNamespace(admission=SimpleNamespace(enabled=False))
         captured = []
         def upstream(request):
             captured.append(json.loads(request.content))
