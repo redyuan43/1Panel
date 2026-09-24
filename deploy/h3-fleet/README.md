@@ -10,12 +10,14 @@ while work is active. This is candidate source, not evidence that Ivan is runnin
 Reference/hybrid/audio-lock workloads use conservative long-job admission;
 no new concurrency or actual inference result is implied by the migration tests.
 
-Private ComfyUI-compatible scheduler for MiniMax H3 workers. The current video
-candidate has two RTX 3060 workers on Ivan; the RTX 4060 Ti is on ivan-u24.
+Private ComfyUI-compatible scheduler for MiniMax H3 GPU workers. The current
+three-card media candidate combines two RTX 3060 workers on Ivan with one RTX
+4060 Ti worker on ivan-u24; each host runs an independent Fleet.
 
 The service exposes the ComfyUI endpoints used by H3 Video Studio and assigns
-each prompt to one single-GPU ComfyUI lane. The historical three-lane Ivan
-configuration below does not describe the current two-host topology.
+each prompt to one single-GPU ComfyUI lane. The legacy three-lane Ivan
+configuration and its earlier validation are recorded below; they do not
+describe the current two-host media candidate.
 
 AI Router calls this service directly
 through its authenticated execution contract. Edge H3 Video Studio is not part
@@ -27,6 +29,11 @@ each lane's own limit. This preserves host headroom even if multiple workers
 simultaneously enter a bad offload path.
 
 ## Historical Ivan topology (revalidate before use)
+
+The table below is the older three-card configuration. On 2026-09-24 Ivan
+exposed two RTX 3060 UUIDs, while the RTX 4060 Ti UUID was on ivan-u24.
+The default `fast` worker in this table cannot be assumed available on Ivan;
+the new candidate uses `main` and `preview` only.
 
 | Lane | GPU | UUID | Port | Default |
 | --- | --- | --- | --- | --- |
@@ -44,6 +51,18 @@ Three simultaneous quality jobs remain prohibited. Other production long-duratio
 jobs remain serial; reviewed Studio Turbo4 previews have a separate bounded rule.
 
 ## Measured concurrency
+
+The 2026-09-24 isolated Ivan run completed two independent RTX 3060 12 GB
+864x480, 362-frame, 14-step I2VA jobs in parallel with native audio.
+`h3-i2va-480p15-3060-v1` is a candidate managed recipe pinned to that graph;
+only the `main` and `preview` RTX 3060 lanes with the reviewed GPU UUIDs may use its two-job rule.
+After both slots have been filled, another job waits until both leave, so a
+completed peer's residual memory cannot be mistaken for the active peer's use.
+The ordinary long-job rule remains one job. A later isolated acceptance sent
+three requests through one media API to the u24 RTX 4060 Ti and both Ivan RTX
+3060s concurrently; all three media files completed and decoded. This is not
+a production release: the formal worker units and offload disk gate still
+require a separately reviewed release. See `outputs/media-validation-20260924/video-three-card/REPORT.md`.
 
 The reviewed Studio Turbo4 full-duration preview now supports up to three lanes.
 Two triple batches produced six complete 15-second portrait videos without

@@ -10,11 +10,23 @@
 
 # H3 平台当前状态
 
-## 2026-09-24 双 RTX 3060 视频候选
+## 2026-09-24 双 3060 配方接入候选（Git 已提交，正式未发布）
 
-- 固定配方 `h3-i2va-480p15-3060-v1` 只接收 15 秒、16:9、首帧图生视频，图哈希固定；只对 Ivan 两张已核对 UUID 的 3060 开放一轮两路。
-- 第二路准入使用首路入场前冻结的 cgroup 基线；一轮两路退出前不补入第三路。其他 H3 长任务仍按原串行规则准入。
-- 候选服务使用独立的 `siyuan-video-ivan-workers.service` 与 `siyuan-video-ivan-fleet.service`，不替换历史 Studio 服务。测试时相同配方已完成双路 15 秒真实生成；正式上线版本与运行结果以发布报告为准。
+- 新增固定 `h3-i2va-480p15-3060-v1` 工作流，来源于已完成的双 RTX 3060 隔离测试；模板哈希固定，图形或参数变化须使用新版本。只有 15 秒、16:9、图生视频及原生音频能进入双路规则。
+- Fleet 准入只对 `main`、`preview` 两条已验收 GPU UUID 的 RTX 3060 lane 开放此配方的双路；`preview_only` 对这个固定配方有窄例外。一轮两个名额用完后等两条都退出，避免沿用含残留内存的基线。原 `long.max_parallel=1` 和其他质量/预览规则保持。
+- 普通 preview I2V 的首帧改为 Lanczos 等比居中裁剪。u24 4060 Ti 与 Ivan 双 3060 经同一独立 API 的三卡真实并发已通过，三份 15 秒视频完整解码，证据见 `outputs/media-validation-20260924/video-three-card/REPORT.md`。方形首帧的上下边缘被截断，画质仍需人工验收。验收时 Ivan 正式 worker 未启用，正式 offload 仅余约 6 GiB；没有生产切换。
+
+## 2026-09-24 媒体独立验收中的容量接口修复
+
+- 独立 u24 Fleet 在 ComfyUI worker 停止时，容量查询曾因连接异常返回 500。
+  `GET /api/router/capacity` 现在对上游 HTTP/连接及 JSON 解码错误返回
+  `503 capacity_unavailable`；不会把未知队列当成空闲，也不公开上游错误文本。
+- 三项隔离故障测试通过，并已在 u24 独立测试实例验证离线 worker 返回 503。
+  修复已包含在 `5fd4f0e1b`，此次未发布到正式 Fleet，也未推送远端。
+- 清理获批的旧 Ollama 模型后，独立 4060 Ti worker 完成 15 秒 i2v：362 帧、864×480、
+  含音轨，客户 ComfyUI 保存/拆帧通过。调整了设备端 LoRA 模板，API 契约未改；
+  方形首帧被拉宽，画质/比例策略未验收。测试后 ninfer 恢复、V100 原进程保留。
+  证据见 `outputs/media-validation-20260924/REPORT.md`，不代表正式部署或其他组合验收。
 
 ## 组件边界
 
