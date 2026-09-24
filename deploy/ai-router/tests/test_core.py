@@ -8127,6 +8127,46 @@ def _public_test_runtime(
     return runtime, secret
 
 
+@pytest.mark.parametrize("api_kind,stream", [
+    ("chat", False), ("chat", True), ("responses", False), ("responses", True),
+])
+def test_workbuddy_directed_history_gap_stops_before_routing(
+    tmp_path: Path, monkeypatch, api_kind: str, stream: bool,
+) -> None:
+    from ai_router.types import LineageContext
+
+    runtime, secret = _public_test_runtime(tmp_path, monkeypatch, client_id="workbuddy-public")
+
+    async def broken_lineage(*args, **kwargs):
+        return LineageContext(
+            lineage_id="new-lineage", branch_id="new-branch", parent_branch_id=None,
+            mode="inferred", relation="new", parent=None,
+            history_match={"status": "unconfirmed", "reason": "historical_prefix_only",
+                           "directed_history": True},
+        )
+
+    async def unexpected_upstream(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a broken directed conversation must stop before inference")
+
+    monkeypatch.setattr("ai_router.api._lineage_context", broken_lineage)
+    run(runtime.internal_client.aclose())
+    runtime.internal_client = httpx.AsyncClient(transport=httpx.MockTransport(unexpected_upstream))
+    body = (
+        {"model": "siyuan/auto", "messages": [{"role": "user", "content": "Continue."}], "stream": stream}
+        if api_kind == "chat" else
+        {"model": "siyuan/auto", "input": [{"role": "user", "content": "Continue."}], "stream": stream}
+    )
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/v1/chat/completions" if api_kind == "chat" else "/v1/responses",
+            headers={"Authorization": f"Bearer {secret}"}, json=body,
+        )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "conversation_state_conflict"
+    run(runtime.internal_client.aclose())
+    run(runtime.close())
+
+
 def test_identity_intercept_obeys_rate_limit_and_records_usage(
     tmp_path: Path,
     monkeypatch,
