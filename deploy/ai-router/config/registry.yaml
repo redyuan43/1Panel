@@ -218,7 +218,7 @@ endpoints:
         cache_type_v: fp8_e5m2
         short_request_rank: 0
         vision_status: validated-2026-09-06
-        max_images: 8
+        max_images: 32
     quality:
       general: 50
       code: 0
@@ -253,7 +253,7 @@ endpoints:
       lmcache_storage: cpu-dram-only
       lmcache_expected_registrations: 4
       vision_status: live-validated-2026-09-06
-      max_images: 8
+      max_images: 32
 
   - id: edge-qwen38-flash
     public_model: RadixArk/Qwen3.8-Flash-Next-NVFP4
