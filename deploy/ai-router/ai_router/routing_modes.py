@@ -272,7 +272,7 @@ class PerformanceRouter:
             await self.store.release_lock(lock, owner)
 
     async def select(self, candidates, statuses, evaluation, conversation, options, tokens, output,
-                     client_id, reasoning="unknown"):
+                     client_id, reasoning="unknown", *, preserve_current=False):
         """Select at the next request boundary; this never cancels or retries inference."""
         group = task_group(evaluation)
         by_id = {e.id: e for e in candidates}
@@ -298,6 +298,10 @@ class PerformanceRouter:
             if ranked_local:
                 return ranked_local[0], "cost_local", evidence
             return (flash[0] if flash else None), "cost_flash_fallback", evidence
+
+        if previous is not None and preserve_current:
+            evidence["retained_reason"] = "manual_recovery_policy"
+            return previous, "efficiency_affinity", evidence
 
         perf = options["performance"]
         scope = hashlib.sha256((client_id + ":" + conversation.conversation_id).encode()).hexdigest() if conversation else None

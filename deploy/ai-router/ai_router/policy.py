@@ -492,6 +492,8 @@ class RoutingPolicy:
         if (
             requested_model == "auto"
             and conversation
+            and not directed
+            and conversation.endpoint_id not in (candidate_history_errors or {})
             and not (conversation_control or {}).get("pin")
         ):
             await self._stabilize_affinity_health(
@@ -499,7 +501,7 @@ class RoutingPolicy:
                 statuses=statuses,
                 conversation=conversation,
                 evaluation=evaluation,
-                prompt_tokens=prompt_tokens,
+                prompt_tokens=counts.get(conversation.endpoint_id, prompt_tokens),
                 output_reserve_tokens=output_reserve_tokens,
                 modalities=modalities,
                 required_capabilities=required,
@@ -864,7 +866,9 @@ class RoutingPolicy:
             selected, reason, evidence = await self.performance.select(
                 candidates, statuses, evaluation, conversation, options,
                 {e.id: counts.get(e.id, prompt_tokens) for e in candidates}, output_reserve_tokens,
-                client_id, (trace.payload.get("routing_objective", {}).get("reasoning", "unknown") if trace else "unknown"))
+                client_id, (trace.payload.get("routing_objective", {}).get("reasoning", "unknown") if trace else "unknown"),
+                preserve_current=bool(self._conversation_stability().get("enabled")
+                                      and self._conversation_stability().get("recovery_mode", "manual") == "manual"))
             if trace:
                 trace.payload.setdefault("routing_objective", {}).update(evidence, reason=reason,
                     observed_endpoint_id=selected.id if selected else None, observe_only=options.get("observe_only", False))
@@ -1576,6 +1580,48 @@ class RoutingPolicy:
         )
         if reason != "unhealthy_or_stale":
             return
+        if "health_wait_seconds" in stability:
+            # Bound the complete recovery wait, including slow health probes.
+            deadline = time.monotonic() + float(stability["health_wait_seconds"])
+            attempt = 0
+            recovered = False
+            while time.monotonic() < deadline:
+                attempt += 1
+                try:
+                    status = await asyncio.wait_for(
+                        self.health.status(endpoint, force_refresh=True),
+                        timeout=max(0.001, deadline - time.monotonic()),
+                    )
+                except asyncio.TimeoutError:
+                    break
+                statuses[endpoint.id] = status
+                recovered = status.is_fresh(
+                    time.time(),
+                    float(self.settings.section("health").get("stale_after_seconds", 15)),
+                )
+                if recovered:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining > 0:
+                    await asyncio.sleep(min(2.0, remaining))
+            # Other candidates may have aged out while the current model recovered.
+            now = time.time()
+            stale_after = float(self.settings.section("health").get("stale_after_seconds", 15))
+            expired = [item for item in endpoints if item.id != endpoint.id
+                       and now - statuses[item.id].checked_at > stale_after]
+            if expired:
+                statuses.update(await self.health.statuses(expired))
+            if trace:
+                trace.record(
+                    trace_attempt, "conversation_affinity",
+                    "passed" if recovered else "blocked", branch="health_recheck",
+                    reason="affinity_health_recovered" if recovered else "affinity_health_wait_expired",
+                    evidence={"endpoint_id": endpoint.id, "attempts": attempt,
+                              "wait_seconds": stability["health_wait_seconds"],
+                              "healthy": statuses[endpoint.id].healthy}, path=False,
+                )
+            return
+        # Older settings without a time budget retain their count-based behavior.
         threshold = int(
             stability.get("health_failure_threshold", 2)
         )

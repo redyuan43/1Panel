@@ -452,6 +452,7 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
 
 
 HISTORY_CONTRACT_KEYS = {
+    "preserve_thinking",
     "accepts_reasoning_content",
     "accepts_reasoning_items",
     "requires_reasoning_content",
@@ -741,6 +742,10 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError(
             "routing.conversation_stability.enabled must be a boolean"
         )
+    if "health_wait_seconds" in stability:
+        wait = stability["health_wait_seconds"]
+        if isinstance(wait, bool) or not isinstance(wait, (int, float)) or not 0 <= wait <= 120:
+            raise ValueError("routing.conversation_stability.health_wait_seconds must be between 0 and 120")
     failure_threshold = int(
         stability.get("health_failure_threshold", 0)
     )
