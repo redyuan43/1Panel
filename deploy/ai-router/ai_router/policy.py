@@ -9,6 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 from .config import Registry, Settings
+from .history_identity import HISTORY_IDENTITY_PREFIX, HISTORY_IDENTITY_VERSION, is_verified_history_identity
 from .context_policy import apply_context_policy
 from .health_evidence import health_snapshot
 from .errors import (
@@ -147,7 +148,9 @@ class ConversationRepository:
     ) -> None:
         ttl = int(self.settings.section("affinity").get("ttl_seconds", 86400))
         for identity in identities:
-            if "v5-history-" in identity:
+            if is_verified_history_identity(identity):
+                if not identity.removeprefix("wb-raw-v1:").startswith(HISTORY_IDENTITY_PREFIX):
+                    continue  # Retired evidence cannot be promoted into the current index.
                 # Independent version; bounded multi-candidate value prevents last-writer wins.
                 key = f"router:verified-history:{client_id}:{identity}"
                 await self.store.add_history_candidate(key, branch_id, ttl)
@@ -157,6 +160,7 @@ class ConversationRepository:
                 {"branch_id": branch_id},
                 ttl_seconds=ttl,
             )
+
 
     async def branch_for_history(
         self,
@@ -175,19 +179,26 @@ class ConversationRepository:
         weak_seen = False
         for identity in identities:
             version = identity.removeprefix("wb-raw-v1:")
-            if not version.startswith("v5-history-"):
-                continue  # Legacy hashes cannot prove the v5 conservation contract.
-            if not version.startswith("v5-history-strong-"):
+            if not version.startswith(HISTORY_IDENTITY_PREFIX):
+                continue  # Legacy hashes cannot prove the current conservation contract.
+            if not version.startswith(HISTORY_IDENTITY_PREFIX + "strong-"):
                 weak_seen = weak_seen or bool(await self.store.get_json(f"router:verified-history:{client_id}:{identity}"))
                 continue
             value = await self.store.get_json(f"router:verified-history:{client_id}:{identity}")
             if not value:
                 continue
             states = [state for branch in value.get("branches", []) if (state := await self.get(branch)) is not None]
-            evidence = {"source": "verified_history_v5", "semantic_items": int(version.split("-")[3]),
+            evidence = {"source": f"verified_history_v{HISTORY_IDENTITY_VERSION}", "semantic_items": int(version.split("-")[3]),
                         "candidate_count": len(states), "matched_branch_id": None}
             if value.get("overflow") or len(states) > 1:
-                return None, {**evidence, "status": "unconfirmed", "reason": "ambiguous_history"}
+                # Ambiguous branch identity must not erase known routing intent.
+                # Keep evidence only: never choose a branch or restore its history.
+                return None, {
+                    **evidence, "status": "unconfirmed", "reason": "ambiguous_history",
+                    "directed_history": any(state.directive_id for state in states),
+                    "candidate_conversation_count": len({state.conversation_id for state in states}),
+                    "candidate_overflow": bool(value.get("overflow")),
+                }
             if states:
                 parent = states[0]
                 latest_id = await self.branch_for_lineage(client_id, parent.conversation_id)
@@ -195,11 +206,13 @@ class ConversationRepository:
                 # Reject a proven ancestor, but preserve independently matched siblings.
                 # Completion order is not branch ancestry; never substitute devices.
                 if latest and not await self._matched_branch_can_continue(parent, latest):
-                    return None, {**evidence, "status": "unconfirmed", "reason": "historical_prefix_only"}
+                    return None, {**evidence, "status": "unconfirmed", "reason": "historical_prefix_only",
+                                  "directed_history": bool(latest.directive_id)}
                 return parent, {**evidence, "status": "verified", "reason": "unique_history_match",
                                 "matched_branch_id": parent.branch_id or parent.conversation_id,
                                 "inherited_endpoint_id": parent.endpoint_id}
         return None, {"status": "unconfirmed", "source": "history", "reason": "shared_opening_only" if weak_seen else "no_verified_history"}
+
 
     async def _matched_branch_can_continue(self, matched, latest):
         matched_id = matched.branch_id or matched.conversation_id

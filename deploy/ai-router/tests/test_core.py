@@ -415,7 +415,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 14
+    assert len(registry.endpoints) == 16
     assert registry.by_id("ai-qwen38-27b").max_concurrency == 8
     assert all(
         item.max_concurrency == 1
@@ -489,6 +489,7 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     }
     assert policies["check-boards"].models == (
         "siyuan/qwen38-v100-196k",
+        "siyuan/ornith-nx1-96k",
     )
     assert policies["check-boards"].local_only is True
     assert policies["check-boards"].max_parallel_requests == 4
@@ -4207,6 +4208,7 @@ def test_declared_vision_endpoints_are_registered_for_images() -> None:
         "codex-pro-gpt-5.6-sol",
         "codex-pro-gpt-6-astra",
         "cloud-deepseek-v4-flash",
+        "nx1-ornith-35b-a3b-96k",
         "qwen36-shared-fleet",
         "zhipu-glm-5.3-flash",
     }

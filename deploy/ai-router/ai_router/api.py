@@ -86,6 +86,7 @@ from .prompt_directives import (
     resolve_conversation_directive,
     sanitize_prompt_directives,
 )
+from .prompt_enhancement import CLIENT_IDS as PROMPT_ENHANCEMENT_CLIENT_IDS, EnhancementSession
 from .protocol import (
     move_workbuddy_dynamic_context,
     normalize_llama_tool_schemas,
@@ -803,6 +804,17 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         disclosure_mode=authenticated.policy.disclosure_mode,
     )
     request.state.route_trace = trace
+    enhancement_session = (
+        EnhancementSession(
+            received_body, api_kind,
+            client_id=authenticated.policy.id,
+            policy=authenticated.policy,
+            request_id=request_id,
+        )
+        if authenticated.policy.id in PROMPT_ENHANCEMENT_CLIENT_IDS
+        and current.settings.section("routing").get("prompt_enhancement", {}).get("enabled") is True
+        else None
+    )
     if current_timings() is not None:
         trace.payload.setdefault("observation", {})["router_phase_timings"] = current_timings()
     await _save_request_trace(current, trace)
@@ -943,10 +955,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
     client_compacted = _truthy_header(
         request.headers.get("x-1panel-context-compacted", "")
     )
+    history_identity_body = (
+        lineage_body if api_kind == "chat" and authenticated.policy.id in {
+            "workbuddy-public", "workbuddy-qwen36-shared"
+        } else body
+    )
+    await compute(current, observation.capture, "history_identity_input", history_identity_body)
     lineage = await _lineage_context(
         current,
         request,
-        lineage_body if api_kind == "chat" and authenticated.policy.id in {"workbuddy-public", "workbuddy-qwen36-shared"} else body,
+        history_identity_body,
         api_kind,
         authenticated.policy.id,
         force_new_inferred=client_compacted,
@@ -1707,6 +1725,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     projection_revision=effective_revision,
                     admission_fallback=admission_busy_seen,
                     admission_deadline=admission_window.deadline,
+                    enhancement_session=enhancement_session,
                 )
                 capsule = capsule or pre_route_capsule
                 persistence_body = _history_body_for_persistence(
@@ -2176,6 +2195,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         decision=decision,
                         state=state,
                         body=persistence_body,
+                        public_body=history_identity_body,
                         api_kind=api_kind,
                         training_token=training_token,
                         started_at=request.state.started_at,
@@ -2367,6 +2387,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     client_id=authenticated.policy.id,
                     body=persistence_body,
                     api_kind=api_kind,
+                    public_body=history_identity_body,
+                    public_assistant_items=assistant_items_from_response(public_payload, api_kind),
                     assistant_items=private_history_items(
                         assistant_items_from_response(public_payload, api_kind),
                         assistant_items_from_response(
@@ -2380,6 +2402,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         training_token,
                         status_code=upstream.status_code,
                         response_payload=payload,
+                        public_assistant_items=assistant_items_from_response(public_payload, api_kind),
                     )
                 await _audit(
                     current,
@@ -3126,6 +3149,7 @@ async def _acquire_route_capacity(
     projection_revision: str | None = None,
     admission_fallback: bool = False,
     admission_deadline: float | None = None,
+    enhancement_session: EnhancementSession | None = None,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -3614,6 +3638,15 @@ async def _acquire_route_capacity(
                 await pool.release(request_id, trace)
             continue
         capsule = capsule or carried_capsule
+        if enhancement_session is not None:
+            routed_body = await enhancement_session.apply(
+                current, decision, routed_body,
+                count_chat=lambda value: count_tokens(current, value, "chat"),
+                count_routed=lambda value: count_tokens(
+                    current, identity.inject(value, api_kind), api_kind,
+                ),
+                trace=trace,
+            )
         if getattr(current, "history_memory", None) is not None:
             from .memory_recall import prepare_recall
             projection, recall_reason = await prepare_recall(
@@ -5387,6 +5420,7 @@ async def _stream_response(
     budget_reservation: Any = None,
     retryable_empty_output: bool = False,
     outcome: dict[str, Any] | None = None,
+    public_body: dict[str, Any] | None = None,
 ) -> AsyncIterator[bytes]:
     await resource_finalizer.begin_stream()
     accumulator = SSEAccumulator(api_kind)
@@ -5611,6 +5645,8 @@ async def _stream_response(
                         client_id=client_id,
                         body=body,
                         api_kind=api_kind,
+                        public_body=public_body,
+                        public_assistant_items=accumulator.assistant_items(),
                         assistant_items=private_history_items(
                             accumulator.assistant_items(),
                             (
@@ -5634,6 +5670,7 @@ async def _stream_response(
                             current.training.complete(
                                 training_token,
                                 status_code=status_code,
+                                public_assistant_items=accumulator.assistant_items(),
                                 assistant_items=(
                                     adapter_private_items
                                     if (
@@ -5954,11 +5991,11 @@ async def _audit(
                     await current.training.publish_history(decision.trace.payload)
                 else:
                     from .history_index import index_completed
+                    from .history_identity import is_verified_history_identity
                     await index_completed(current, decision.trace.payload)
-                    await asyncio.to_thread(WorkBuddyHistory(current.route_traces.database_path).record, decision.trace.payload)
                     history = next((c for c in decision.trace.payload.get("observation", {}).get("content", {}).get("checks", []) if c.get("check") == "workbuddy_history"), {})
                     # Only metadata aliases are stored in Redis; raw content remains encrypted.
-                    aliases = [value for value in history.get("raw_identities", []) if "v5-history-" not in value]
+                    aliases = [value for value in history.get("raw_identities", []) if not is_verified_history_identity(value)]
                     if aliases and decision.trace.payload.get("branch_id"):
                         await current.conversations.map_history(client_id, tuple(aliases), decision.trace.payload["branch_id"])
             except Exception as error:

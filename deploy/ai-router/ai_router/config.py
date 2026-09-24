@@ -455,6 +455,7 @@ HISTORY_CONTRACT_KEYS = {
     "preserve_thinking",
     "accepts_reasoning_content",
     "accepts_reasoning_items",
+    "accepts_text_reasoning_items",
     "requires_reasoning_content",
 }
 
@@ -728,6 +729,13 @@ def validate_settings(value: dict[str, Any]) -> None:
         raise ValueError("evaluator.confidence_threshold must be between 0 and 1")
 
     routing = value.get("routing", {})
+    prompt_enhancement = routing.get("prompt_enhancement", {"enabled": False})
+    if (
+        not isinstance(prompt_enhancement, dict)
+        or not isinstance(prompt_enhancement.get("enabled"), bool)
+        or set(prompt_enhancement) != {"enabled"}
+    ):
+        raise ValueError("routing.prompt_enhancement must contain a boolean enabled")
     validate_prompt_directives(routing.get("prompt_directives", {}))
     stability = routing.get("conversation_stability", {})
     if not isinstance(stability, dict):

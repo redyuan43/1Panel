@@ -33,6 +33,8 @@ identity:
 
 routing:
   strategy: intelligent_v2
+  prompt_enhancement:
+    enabled: false
   default_output_reserve_tokens: 4096
   provider_priority: local_first
   conversation_stability:

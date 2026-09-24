@@ -4007,6 +4007,9 @@ function renderSettings() {
   byId("directive-enabled").checked = Boolean(
     value("routing.prompt_directives.enabled", false),
   );
+  byId("prompt-enhancement-enabled").checked = Boolean(
+    value("routing.prompt_enhancement.enabled", false),
+  );
   renderPromptDirectives();
   byId("evaluator-enabled").checked = Boolean(value("evaluator.enabled", false));
   byId("evaluator-model").value = value("evaluator.model_id");
@@ -4801,6 +4804,9 @@ function collectSettings() {
     routing: {
       objectives: RoutingModeUI.collect(),
       ...state.settings.routing,
+      prompt_enhancement: {
+        enabled: byId("prompt-enhancement-enabled").checked,
+      },
       prompt_directives: promptDirectives,
       local_pool: {
         ...(state.settings.routing.local_pool || {}),

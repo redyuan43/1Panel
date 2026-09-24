@@ -224,6 +224,9 @@ endpoints:
       code: 0
       batch: 0
     metadata:
+      history_contract:
+        accepts_reasoning_content: true
+        accepts_text_reasoning_items: true
       token_counting:
         enabled: true
         method: render
