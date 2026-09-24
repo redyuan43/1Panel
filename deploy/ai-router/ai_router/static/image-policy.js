@@ -54,6 +54,7 @@ const ImagePolicyUI = (() => {
   }
   document.querySelectorAll("[data-policy-kind]").forEach(button => button.addEventListener("click", () => {
     const image = button.dataset.policyKind === "image";
+    document.getElementById("settings-view").dataset.imagePolicyActive = String(image);
     document.getElementById("image-policy-panel").hidden = !image;
     document.getElementById("text-policy-panel").hidden = image;
     document.querySelector(".policy-workflow-bar .policy-node-nav").hidden = image;

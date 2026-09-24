@@ -1,2 +1,5 @@
 #image-policy-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; }
 #image-policy-panel .control-grid > .wide { grid-column: 1 / -1; }
+#settings-view[data-policy-view="simple"] .policy-kind-nav { display: flex; }
+#settings-view[data-policy-view="simple"] #image-policy-panel .policy-flow { display: flex; }
+#settings-view[data-policy-view="simple"][data-image-policy-active="true"] .settings-actions { display: flex; }
