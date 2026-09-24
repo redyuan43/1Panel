@@ -75,6 +75,19 @@ def normalize_history_for_provider(
         endpoint is None or endpoint.capabilities.responses == "native"
     )
     value = copy.deepcopy(body)
+    if contract.get("preserve_thinking"):
+        history_items = value.get("messages" if api_kind == "chat" else "input", [])
+        if isinstance(history_items, dict):
+            history_items = [history_items]
+        if isinstance(history_items, list) and any(
+            isinstance(item, dict) and chat_reasoning(item) for item in history_items
+        ):
+            from .errors import HistoryMigrationRequiredError as HistoryPreservationError
+            kwargs = value.get("chat_template_kwargs", {})
+            if (not isinstance(kwargs, dict) or kwargs.get("preserve_thinking") is False
+                    or value.get("preserve_thinking") is False):
+                raise HistoryPreservationError("historical reasoning must be preserved")
+            value["chat_template_kwargs"] = {**kwargs, "preserve_thinking": True}
     if api_kind == "chat":
         messages = value.get("messages")
         if isinstance(messages, list):

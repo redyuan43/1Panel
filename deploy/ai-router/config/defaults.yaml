@@ -39,6 +39,7 @@ routing:
   provider_priority: local_first
   conversation_stability:
     enabled: false
+    health_wait_seconds: 20
     health_failure_threshold: 2
     health_recheck_interval_seconds: 10
     recovery_mode: manual
