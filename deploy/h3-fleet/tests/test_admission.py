@@ -12,6 +12,8 @@ import pytest
 
 from test_main import FakeComfyClient, load_module, payload
 from app.admission import CapacityPolicy, InstanceLock, SwapRecovery, GIB
+from app.managed_video import QUALITY480_RECIPE
+from app.workflow_builder import build_workflow
 
 
 def recovery_sample(timestamp=100, **updates):
@@ -91,6 +93,38 @@ def test_reviewed_studio_preview_capacity_does_not_open_other_long_work(tmp_path
     assert policy.rule(unverified)["lanes"] == ["fast"]
     assert not policy.parallel_studio_preview(studio_parallel_demand(policy, audio_mode="reference"))
     assert policy.blocked(demand, [demand], {**sample, "memory_available_bytes": 20 * GIB}) == "ram_headroom"
+
+
+def test_quality480_dual_lane_requires_exact_reviewed_graph(tmp_path):
+    policy = load_module(tmp_path).fleet.policy
+    graph, contract = build_workflow(execution_id="vid_test", profile="quality", mode="i2v",
+                                     prompt="scene", duration=15, seed=9, aspect_ratio="16:9",
+                                     assets={"first_frame": "source.png"}, recipe_id=QUALITY480_RECIPE)
+    contract["input_files"] = ["source.png"]
+    payload_value = {"prompt": graph, "extra_data": {"h3": {
+        "execution_id": "vid_test", "profile": "quality", "recipe_id": QUALITY480_RECIPE,
+        "contract": contract,
+    }}}
+    demand = policy.demand(payload_value, "quality")
+    sample = recovery_sample(time.time(), swap_used_bytes=0, cgroup_swap_bytes=0)
+    demand["cgroup_baseline_bytes"] = sample["cgroup_current_bytes"]
+    assert policy.rule(demand)["lanes"] == ["main", "preview"]
+    assert policy.blocked(demand, [demand], sample) is None
+    assert policy.blocked(demand, [demand, demand], sample) == "capacity_full"
+    generic = {**demand, "recipe_id": None}
+    assert policy.blocked(generic, [demand], sample) == "exclusive_workload_active"
+    assert policy.blocked(demand, [generic], sample) == "exclusive_workload_active"
+    tampered = json.loads(json.dumps(payload_value))
+    tampered["prompt"]["22"]["inputs"]["chunks"] = 1
+    with pytest.raises(ValueError, match="differs from the qualified recipe"):
+        policy.demand(tampered, "quality")
+    with pytest.raises(ValueError, match="not qualified"):
+        policy.demand(payload_value, "preview")
+    delayed = {**sample, "memory_available_bytes": 42 * GIB,
+               "cgroup_current_bytes": sample["cgroup_current_bytes"] + 14 * GIB}
+    assert policy.blocked(demand, [demand], delayed) is None
+    assert policy.blocked({key: value for key, value in demand.items() if key != "cgroup_baseline_bytes"},
+                          [demand], delayed) == "quality480_baseline_unavailable"
 
 
 def test_available_capacity_uses_resource_reservations_and_not_idle_card_count(tmp_path):

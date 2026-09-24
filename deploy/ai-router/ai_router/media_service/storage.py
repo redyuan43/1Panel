@@ -156,6 +156,37 @@ class MediaStore:
             self._event(db, job_id, event)
         return job
 
+    def reserve_video_executor(self, job_id: str, endpoint: dict, capability: dict) -> dict | None:
+        """Persist a physical video slot with the job in one SQLite transaction."""
+        resource = endpoint["resource_id"]
+        maximum = endpoint.get("max_parallel", 1)
+        with self.connect() as db:
+            row = db.execute("SELECT value FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                raise MediaError("media_not_found", "Media task was not found.", 404)
+            job = json.loads(row[0])
+            if (job["kind"] != "video" or job["status"] != "queued" or job.get("cancel_requested")
+                    or job["provider_state"].get("endpoint")):
+                return None
+            rows = db.execute(
+                "SELECT value FROM jobs WHERE id!=? AND json_extract(value,'$.status') "
+                "NOT IN ('completed','failed','cancelled') AND json_extract(value,'$.deleted')=0 "
+                "AND json_extract(value,'$.provider_state.endpoint.resource_id')=?",
+                (job_id, resource),
+            ).fetchall()
+            reservations = [json.loads(item[0])["provider_state"]["endpoint"] for item in rows]
+            if (len(reservations) >= maximum or any(
+                    item["id"] != endpoint["id"] or item.get("max_parallel", 1) != maximum
+                    for item in reservations)):
+                return None
+            state = {"endpoint": endpoint, "capability": capability,
+                     "operation_id": job_id, "submitted": False}
+            job = {**job, "provider_state": state, "provider": "local", "updated_at": time.time()}
+            db.execute("UPDATE jobs SET value=? WHERE id=?", (json.dumps(job), job_id))
+            self._event(db, job_id, {"type": "updated", "fields": ["provider_state", "provider"],
+                                     "status": job["status"]})
+        return state
+
     def image_events(self, job_id, *, after=0, limit=100):
         with self.connect() as db:
             rows = db.execute("SELECT sequence,created,value FROM events WHERE job_id=? AND sequence>? ORDER BY sequence LIMIT ?",

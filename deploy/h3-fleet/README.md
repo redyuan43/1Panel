@@ -10,14 +10,14 @@ while work is active. This is candidate source, not evidence that Ivan is runnin
 Reference/hybrid/audio-lock workloads use conservative long-job admission;
 no new concurrency or actual inference result is implied by the migration tests.
 
-Private ComfyUI-compatible scheduler for the Ivan three-GPU MiniMax H3 host.
+Private ComfyUI-compatible scheduler for MiniMax H3 workers. The current video
+candidate has two RTX 3060 workers on Ivan; the RTX 4060 Ti is on ivan-u24.
 
 The service exposes the ComfyUI endpoints used by H3 Video Studio and assigns
-each prompt to one single-GPU ComfyUI lane. The third lane is preview-only;
-full-duration eligibility follows the reviewed profiles below. It was initially enabled after the measured memory gate
-and a real three-job validation passed.
+each prompt to one single-GPU ComfyUI lane. The historical three-lane Ivan
+configuration below does not describe the current two-host topology.
 
-Public Router APIs remain unchanged. AI Router calls this service directly
+AI Router calls this service directly
 through its authenticated execution contract. Edge H3 Video Studio is not part
 of the normal managed-workflow path and remains only for legacy compatibility.
 
@@ -26,7 +26,7 @@ uses `MemoryHigh=72G`, `MemoryMax=80G`, and `MemorySwapMax=8G`, in addition to
 each lane's own limit. This preserves host headroom even if multiple workers
 simultaneously enter a bad offload path.
 
-## Ivan topology
+## Historical Ivan topology (revalidate before use)
 
 | Lane | GPU | UUID | Port | Default |
 | --- | --- | --- | --- | --- |

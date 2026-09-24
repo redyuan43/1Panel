@@ -509,13 +509,14 @@ class QwenProvider:
 
 
 class H3Provider:
-    def __init__(self, client: httpx.AsyncClient):
+    def __init__(self, client: httpx.AsyncClient, *, executor_url: str | None = None, key_env="AI_ROUTER_H3_KEY"):
         self.client = client
-        self.base = os.environ.get("AI_ROUTER_H3_URL", "http://edge.taild500c8.ts.net:8789").rstrip("/")
-        self.executor_base = os.environ.get(
+        self.key_env = key_env
+        self.base = (executor_url or os.environ.get("AI_ROUTER_H3_URL", "http://edge.taild500c8.ts.net:8789")).rstrip("/")
+        self.executor_base = (executor_url or os.environ.get(
             "AI_ROUTER_H3_EXECUTOR_URL",
             "http://100.96.79.21:8789",
-        ).rstrip("/")
+        )).rstrip("/")
         for value in (self.base, self.executor_base):
             parsed = urlparse(value)
             try:
@@ -534,7 +535,7 @@ class H3Provider:
                 raise ValueError("H3 must be a private direct endpoint")
 
     async def call(self, method: str, path: str, *, executor=False, **kwargs) -> dict:
-        key = os.environ.get("AI_ROUTER_H3_KEY", "")
+        key = os.environ.get(self.key_env, "")
         if not key:
             raise MediaError("h3_not_configured", "H3 contract credential is required.", 503)
         base = self.executor_base if executor else self.base
@@ -623,10 +624,11 @@ class H3Provider:
             headers={"Authorization": f"Bearer {key}"}, timeout=120,
         )
 
-    async def create_execution(self, body: dict, assets: dict[str, dict]) -> dict:
-        capabilities = await self.options()
-        if int(capabilities.get("workflow_contract_version", 0)) < 2:
-            raise MediaError("h3_contract_mismatch", "H3 managed execution contract v2 is required.", 503)
+    async def create_execution(self, body: dict, assets: dict[str, dict], *, check_options=True) -> dict:
+        if check_options:
+            capabilities = await self.options()
+            if int(capabilities.get("workflow_contract_version", 0)) < 2:
+                raise MediaError("h3_contract_mismatch", "H3 managed execution contract v2 is required.", 503)
         data = {
             key: json.dumps(value, ensure_ascii=False) if key == "metadata" else (
                 str(value).lower() if type(value) is bool else str(value)
@@ -667,7 +669,7 @@ class H3Provider:
         )
 
     async def download_execution(self, execution_id: str):
-        key = os.environ.get("AI_ROUTER_H3_KEY", "")
+        key = os.environ.get(self.key_env, "")
         return self.client.stream(
             "GET",
             self.executor_base + f"/api/router/executions/{execution_id}/output",

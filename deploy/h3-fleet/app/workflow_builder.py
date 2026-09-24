@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+from .managed_video import QUALITY480_RECIPE, build_quality480
+
 
 SUPPORTED_MODES = {"t2v", "i2v", "l2v", "fl2v"}
 IMAGE_ASSETS = {"first_frame", "last_frame"}
@@ -72,6 +74,7 @@ def build_workflow(
     seed: int,
     aspect_ratio: str,
     assets: dict[str, str],
+    recipe_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if profile not in {"preview", "quality"}:
         raise ValueError("profile must be preview or quality")
@@ -91,6 +94,13 @@ def build_workflow(
     frame_count = frames_for_duration(duration)
     if seed < 0:
         seed = int.from_bytes(hashlib.sha256(execution_id.encode()).digest()[:8], "big") % (2**63)
+    if recipe_id == QUALITY480_RECIPE:
+        if (profile, mode, duration, aspect_ratio, set(assets)) != (
+                "quality", "i2v", 15, "16:9", {"first_frame"}):
+            raise ValueError("quality480 recipe requires 15s landscape I2V with one first frame")
+        return build_quality480(execution_id, prompt, seed, assets["first_frame"])
+    if recipe_id is not None:
+        raise ValueError("unsupported managed recipe")
     path = _template(profile)
     workflow = copy.deepcopy(json.loads(path.read_text(encoding="utf-8")))
     portrait = aspect_ratio == "9:16"
@@ -132,6 +142,13 @@ def build_workflow(
             filename=assets[name],
             next_id=next_id,
         )
+        if profile == "preview" and mode == "i2v" and name == "first_frame":
+            scale_id = str(next_id)
+            workflow[scale_id] = {"class_type": "ImageScale", "inputs": {
+                "image": link, "upscale_method": "lanczos", "width": width,
+                "height": height, "crop": "center",
+            }}
+            link, next_id = [scale_id, 0], next_id + 1
         conditioning_inputs[name] = link
     _, noise = _node(workflow, "RandomNoise")
     noise.setdefault("inputs", {})["noise_seed"] = seed

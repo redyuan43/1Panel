@@ -21,13 +21,13 @@ LANES = """[
   {
     "id": "main",
     "url": "http://127.0.0.1:8189",
-    "gpu_uuid": "GPU-main",
+    "gpu_uuid": "GPU-08c21842-c266-7f7d-6e5d-d494d4c20c4f",
     "device": "RTX 3060"
   },
   {
     "id": "preview",
     "url": "http://127.0.0.1:8190",
-    "gpu_uuid": "GPU-preview",
+    "gpu_uuid": "GPU-b9ca94d5-6180-2d81-bb33-5ad04722f492",
     "device": "RTX 3060",
     "preview_only": true,
     "enabled": true
@@ -478,6 +478,77 @@ def test_router_execution_contract_submits_directly_to_three_lanes(
                 assert workflow["2"]["inputs"]["width"] == 480
                 assert workflow["2"]["inputs"]["height"] == 864
                 assert workflow["4"]["inputs"]["steps"] == 6
+
+    asyncio.run(scenario())
+
+
+def test_managed_quality480_uses_only_two_3060_lanes_and_peer_survives_failure(tmp_path: Path, monkeypatch) -> None:
+    from app.managed_video import QUALITY480_RECIPE
+
+    async def scenario():
+        module = load_module(tmp_path)
+        fake = FakeComfyClient()
+        module.fleet.client = fake
+        disk = type("DiskUsage", (), {"free": 60 * 1024**3})()
+        monkeypatch.setattr(module.shutil, "disk_usage", lambda _path: disk)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=module.app), base_url="http://test",
+            headers={"Authorization": "Bearer test-router-key"},
+        ) as client:
+            options = (await client.get("/api/router/options")).json()
+            assert QUALITY480_RECIPE in options["managed_recipes"]
+            async def create(index, duration=15):
+                return await client.post("/api/router/executions", data={
+                    "operation_id": f"quality480-{index}", "profile": "quality", "mode": "i2v",
+                    "prompt": "product scene", "duration": str(duration), "seed": str(index),
+                    "aspect_ratio": "16:9", "audio_policy": "native", "recipe_id": QUALITY480_RECIPE,
+                }, files={"first_frame": ("source.png", b"synthetic-image", "image/png")})
+            rejected = await create(99, 5)
+            assert rejected.status_code == 400
+            first, second, waiting = [await create(index) for index in range(3)]
+            assert [item.status_code for item in (first, second, waiting)] == [200, 200, 200]
+            assert [first.json()["lane_id"], second.json()["lane_id"]] == ["main", "preview"]
+            assert waiting.json()["status"] == "queued"
+            assert len(fake.submissions) == 2
+            assert all(item["prompt"]["21"]["inputs"]["crop"] == "center" for item in fake.payloads)
+            first_job = module.fleet.store.get_by_execution("quality480-0")
+            second_job = module.fleet.store.get_by_execution("quality480-1")
+            assert json.loads(module.fleet.store.get(first_job["prompt_id"])["demand_json"])["quality480_pair_closed"]
+            assert json.loads(module.fleet.store.get(second_job["prompt_id"])["demand_json"])["quality480_pair_closed"]
+            fake.pending.discard(first_job["upstream_prompt_id"])
+            module.fleet.store.update(first_job["prompt_id"], status="error")
+            assert module.fleet.store.get(second_job["prompt_id"])["status"] in {"submitted", "running"}
+            await module.fleet.dispatch_queued(module.fleet.store.get_by_execution("quality480-2"))
+            assert len(fake.submissions) == 2
+            assert module.fleet.store.get_by_execution("quality480-2")["status"] == "queued"
+            fake.pending.discard(second_job["upstream_prompt_id"])
+            module.fleet.store.update(second_job["prompt_id"], status="completed")
+            await module.fleet.dispatch_queued(module.fleet.store.get_by_execution("quality480-2"))
+            assert len(fake.submissions) == 3
+            assert module.fleet.store.get_by_execution("quality480-2")["lane_id"] == "main"
+
+    asyncio.run(scenario())
+
+
+def test_quality480_is_not_advertised_or_queued_on_single_fast_lane(tmp_path: Path) -> None:
+    async def scenario():
+        module = load_module(tmp_path)
+        fast = module.fleet.lanes_by_id["fast"]
+        module.fleet.lanes = [fast]
+        module.fleet.lanes_by_id = {"fast": fast}
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=module.app), base_url="http://test",
+            headers={"Authorization": "Bearer test-router-key"},
+        ) as client:
+            options = (await client.get("/api/router/options")).json()
+            assert "h3-i2va-480p15-3060-v1" not in options["managed_recipes"]
+            response = await client.post("/api/router/executions", data={
+                "operation_id": "wrong-host", "profile": "quality", "mode": "i2v",
+                "prompt": "product scene", "duration": "15", "seed": "1",
+                "aspect_ratio": "16:9", "recipe_id": "h3-i2va-480p15-3060-v1",
+            }, files={"first_frame": ("source.png", b"synthetic-image", "image/png")})
+            assert response.status_code == 400
+            assert module.fleet.store.active() == []
 
     asyncio.run(scenario())
 

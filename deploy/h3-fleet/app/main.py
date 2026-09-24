@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response, StreamingRes
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .workflow_builder import SUPPORTED_MODES, build_workflow
+from .managed_video import QUALITY480_RECIPE
 from .admission import BUSY, CapacityPolicy, InstanceLock, SwapRecovery, resource_snapshot
 from .recipes import RecipeCatalog
 from .recipe_dispatch import RecipeDispatcher, backend_identity
@@ -252,6 +253,13 @@ class JobStore:
                     "memory_budget_bytes": policy.data["long"]["memory_budget_gib"] * 1024**3,
                     "disk_budget_bytes": policy.data["long"]["disk_budget_gib"] * 1024**3,
                 })
+            if demand.get("recipe_id") == QUALITY480_RECIPE:
+                if not active:
+                    demand["cgroup_baseline_bytes"] = snapshot.get("cgroup_current_bytes")
+                elif all(item.get("recipe_id") == QUALITY480_RECIPE for item in demands):
+                    baselines = {item.get("cgroup_baseline_bytes") for item in demands}
+                    if len(baselines) == 1:
+                        demand["cgroup_baseline_bytes"] = baselines.pop()
             reason = policy.blocked(demand, demands, snapshot, experiment)
             if lease and lease["expires_at"] <= time.time():
                 reason = "validation_lease_expired"
@@ -273,9 +281,17 @@ class JobStore:
             if reason:
                 connection.execute("UPDATE jobs SET admission_reason = ? WHERE prompt_id = ?", (reason, prompt_id))
                 return False
+            if demand.get("recipe_id") == QUALITY480_RECIPE and active:
+                demand["quality480_pair_closed"] = True
+                for item in active:
+                    if item.get("demand_json"):
+                        peer = json.loads(item["demand_json"])
+                        peer["quality480_pair_closed"] = True
+                        connection.execute("UPDATE jobs SET demand_json = ? WHERE prompt_id = ?",
+                                           (json.dumps(peer), item["prompt_id"]))
             connection.execute(
-                "UPDATE jobs SET lane_id = ?, status = 'reserved', admission_reason = NULL, updated_at = ?, version = version + 1 WHERE prompt_id = ? AND status = 'queued'",
-                (lane_id, time.time(), prompt_id),
+                "UPDATE jobs SET lane_id = ?, status = 'reserved', demand_json = ?, admission_reason = NULL, updated_at = ?, version = version + 1 WHERE prompt_id = ? AND status = 'queued'",
+                (lane_id, json.dumps(demand), time.time(), prompt_id),
             )
         return True
 
@@ -617,6 +633,8 @@ class Fleet:
 
     async def select_lane(self, profile: str, demand: dict[str, Any] | None = None,
                           experiment: dict[str, Any] | None = None) -> Lane | None:
+        if demand and demand.get("recipe_id") == QUALITY480_RECIPE and not quality480_available():
+            return None
         try:
             queues = await self.inspect_queues()
             if any(item["untracked_count"] for item in queues):
@@ -629,7 +647,7 @@ class Fleet:
                 continue
             if not lane.enabled:
                 continue
-            if lane.preview_only and profile != "preview":
+            if lane.preview_only and profile != "preview" and (not demand or demand.get("recipe_id") != QUALITY480_RECIPE):
                 continue
             if self.store.active_for_lane(lane.id):
                 continue
@@ -827,6 +845,13 @@ fleet = Fleet()
 app = FastAPI(title="H3 Fleet", version="0.1.0", lifespan=lifespan)
 
 
+def quality480_available() -> bool:
+    rule = fleet.policy.data.get("quality480_i2v")
+    return bool(rule and all(any(lane.enabled and lane.id == lane_id
+                                 and lane.gpu_uuid == rule["gpu_uuids"][lane_id]
+                                 for lane in fleet.lanes) for lane_id in rule["lanes"]))
+
+
 def router_authenticated(request: Request) -> bool:
     key = os.environ.get("H3_ROUTER_KEY", "")
     return bool(key) and hmac.compare_digest(
@@ -880,7 +905,7 @@ def execution_public(job: dict[str, Any]) -> dict[str, Any]:
         "updated_at": job["updated_at"],
         "admission_reason": job.get("admission_reason"),
         "reconciliation_required": job["status"] == "reconciling",
-        "recipe_id": job.get("recipe_id"),
+        "recipe_id": job.get("recipe_id") or contract.get("recipe_id"),
         "recipe_version": job.get("recipe_version"),
         "backend_id": backend.get("id"),
         "runtime_version": backend.get("runtime_version"),
@@ -967,6 +992,7 @@ async def router_options(request: Request) -> dict[str, Any]:
             for profile in ("preview", "quality")
         },
         "capacity_policy": fleet.policy.data,
+        "managed_recipes": ([QUALITY480_RECIPE] if quality480_available() else []),
         "recipe_catalog": fleet.recipes.public(),
         "required_assets": {
             "i2v": ["first_frame"],
@@ -1011,7 +1037,12 @@ async def set_release_validation_gate(request: Request) -> dict[str, Any]:
 @app.get("/api/router/capacity")
 async def router_capacity(request: Request) -> dict[str, Any]:
     router_protected(request)
-    queues = await fleet.inspect_queues()
+    try:
+        queues = await fleet.inspect_queues()
+    except (httpx.HTTPError, ValueError) as error:
+        # An offline/unreadable worker is unavailable capacity, never an idle
+        # lane. Keep endpoint errors private and let callers try another host.
+        raise HTTPException(503, "capacity_unavailable") from error
     snapshot = await fleet.capacity_snapshot(queues)
     active = fleet.store.active()
     lease = fleet.store.validation_lease()
@@ -1143,6 +1174,11 @@ async def router_create_execution(request: Request) -> dict[str, Any]:
             asset_names[name] = (
                 f"h3exec_{prefix}_{hashes[name][:12]}_{name}{upload['extension']}"
             )
+        recipe_id = fields.get("recipe_id") or ("A4" if fields.get("profile", "preview") == "preview"
+                                                and fields.get("mode") == "t2v" and duration == 15
+                                                and fields.get("aspect_ratio") == "9:16" and not asset_names else None)
+        if recipe_id == QUALITY480_RECIPE and not quality480_available():
+            raise HTTPException(status_code=400, detail="quality480 recipe is not available on this fleet")
         try:
             workflow, contract = build_workflow(
                 execution_id=execution_id,
@@ -1153,13 +1189,11 @@ async def router_create_execution(request: Request) -> dict[str, Any]:
                 seed=seed,
                 aspect_ratio=fields.get("aspect_ratio", "16:9"),
                 assets=asset_names,
+                recipe_id=recipe_id if recipe_id == QUALITY480_RECIPE else None,
             )
         except (FileNotFoundError, ValueError) as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
-        recipe_id = fields.get("recipe_id") or ("A4" if fields.get("profile", "preview") == "preview"
-                                                and fields.get("mode") == "t2v" and duration == 15
-                                                and fields.get("aspect_ratio") == "9:16" and not asset_names else None)
-        if recipe_id:
+        if recipe_id and recipe_id != QUALITY480_RECIPE:
             if (fields.get("profile", "preview") != "preview" or fields.get("mode") != "t2v"
                     or duration != 15 or fields.get("aspect_ratio") != "9:16" or asset_names):
                 raise HTTPException(400, "recipes require 15s portrait native-audio T2V preview")
@@ -1196,7 +1230,8 @@ async def router_create_execution(request: Request) -> dict[str, Any]:
                 "h3": {
                     **metadata,
                     "execution_id": execution_id,
-                    "stage": "preview" if fields.get("profile", "preview") == "preview" else "local_768",
+                    "stage": ("quality_480" if recipe_id == QUALITY480_RECIPE else
+                              "preview" if fields.get("profile", "preview") == "preview" else "local_768"),
                     "profile": fields.get("profile", "preview"),
                     "contract": contract,
                     **({"recipe_id": recipe_id} if recipe_id else {}),
@@ -1318,7 +1353,8 @@ async def submit_prompt(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         raise HTTPException(status_code=503, detail="H3 fleet is draining")
     if not isinstance(payload.get("prompt"), dict):
         raise HTTPException(status_code=400, detail="prompt must be an object")
-    if payload.get("extra_data", {}).get("h3", {}).get("recipe_id"):
+    if (payload.get("extra_data", {}).get("h3", {}).get("recipe_id")
+            and payload["extra_data"]["h3"]["recipe_id"] != QUALITY480_RECIPE):
         return await fleet.recipes.submit(payload)
     stage, profile = classify(payload)
     execution_id, request_digest = execution_identity(payload)

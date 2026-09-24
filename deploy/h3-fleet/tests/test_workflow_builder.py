@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from app.workflow_builder import actual_duration, build_workflow, frames_for_duration
+from app.managed_video import QUALITY480_RECIPE
 
 
 def write_template(path: Path, *, preview: bool) -> None:
@@ -72,3 +75,45 @@ def test_duration_uses_h3_frame_grid() -> None:
     assert frames_for_duration(5) == 124
     assert actual_duration(5) == 124 / 24
     assert frames_for_duration(15) == 362
+
+
+def test_preview_i2v_centers_first_frame_without_stretching(tmp_path, monkeypatch) -> None:
+    templates(tmp_path, monkeypatch)
+    workflow, _ = build_workflow(
+        execution_id="preview-i2v", profile="preview", mode="i2v", prompt="scene",
+        duration=15, seed=1, aspect_ratio="16:9", assets={"first_frame": "square.png"},
+    )
+    conditioning = workflow["2"]["inputs"]
+    scaled = workflow[conditioning["first_frame"][0]]
+    assert scaled["class_type"] == "ImageScale"
+    assert scaled["inputs"]["crop"] == "center"
+    assert (scaled["inputs"]["width"], scaled["inputs"]["height"]) == (864, 480)
+    assert workflow[scaled["inputs"]["image"][0]]["inputs"]["image"] == "square.png"
+
+
+def test_quality480_pins_proven_graph_and_rejects_other_shapes() -> None:
+    workflow, contract = build_workflow(
+        execution_id="video-one", profile="quality", mode="i2v", prompt="  product scene  ",
+        duration=15, seed=7, aspect_ratio="16:9", assets={"first_frame": "source.png"},
+        recipe_id=QUALITY480_RECIPE,
+    )
+    assert workflow["5"]["inputs"]["prompt"] == "product scene"
+    assert workflow["20"]["inputs"]["image"] == "source.png"
+    assert workflow["21"]["inputs"]["crop"] == "center"
+    assert workflow["22"]["inputs"]["chunks"] == 4
+    assert workflow["23"]["inputs"]["head_chunks"] == 4
+    assert contract["recipe_id"] == QUALITY480_RECIPE and contract["frame_count"] == 362
+    for duration, aspect in ((5, "16:9"), (15, "9:16")):
+        with pytest.raises(ValueError, match="requires 15s landscape"):
+            build_workflow(execution_id="video-two", profile="quality", mode="i2v", prompt="scene",
+                           duration=duration, seed=7, aspect_ratio=aspect,
+                           assets={"first_frame": "source.png"}, recipe_id=QUALITY480_RECIPE)
+
+
+def test_quality480_template_requires_new_version_after_edit(tmp_path, monkeypatch) -> None:
+    import app.managed_video as managed_video
+    changed = tmp_path / "changed.json"
+    changed.write_bytes(managed_video.QUALITY480_TEMPLATE.read_bytes() + b" ")
+    monkeypatch.setattr(managed_video, "QUALITY480_TEMPLATE", changed)
+    with pytest.raises(ValueError, match="changed without a new version"):
+        managed_video.build_quality480("one", "scene", 1, "source.png")

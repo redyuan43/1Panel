@@ -206,7 +206,7 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
     @app.post("/jobs/{job_id}/cancel")
     async def cancel_image(job_id: str, request: Request):
         owner, admin = principal(request)
-        job = await current(request).cancel_image(job_id, None if admin else owner)
+        job = await current(request).cancel(job_id, None if admin else owner)
         return current(request).public(job, internal=admin)
 
     @app.post("/jobs/{job_id}/purge")

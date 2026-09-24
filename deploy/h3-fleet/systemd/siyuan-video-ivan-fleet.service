@@ -1,0 +1,16 @@
+[Unit]
+Description=SIYUAN video Ivan H3 Fleet
+After=network-online.target siyuan-video-ivan-workers.service
+Requires=siyuan-video-ivan-workers.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ivan/.local/state/siyuan-video-production
+Environment=SIYUAN_VIDEO_FLEET_RELEASE=/home/ivan/.local/state/siyuan-video-production/current/h3-fleet
+ExecStart=/mnt/ivan-ext4-offload/h3-fleet/venv/bin/python /home/ivan/.local/state/siyuan-video-production/current/h3-fleet/scripts/serve_video_ivan_fleet.py ivan
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

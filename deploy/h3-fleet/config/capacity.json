@@ -5,6 +5,7 @@
     "quality": {"max_frames": 124, "steps": 14, "max_parallel": 2, "lanes": ["fast", "main"], "memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "20260907-233628/gate3-dual-14step-768-124/report.json"}
   },
   "long": {"max_parallel": 1, "lanes": ["fast"], "memory_budget_gib": 24, "preview_memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "preview 362 frames: 20260907-233628/custom-subway-winner-15s-turbo6/report.json; quality 362 frames: unvalidated"},
+  "quality480_i2v": {"recipe_id": "h3-i2va-480p15-3060-v1", "max_parallel": 2, "lanes": ["main", "preview"], "gpu_uuids": {"main": "GPU-08c21842-c266-7f7d-6e5d-d494d4c20c4f", "preview": "GPU-b9ca94d5-6180-2d81-bb33-5ad04722f492"}, "memory_budget_gib": 15, "disk_budget_gib": 1, "evidence": "outputs/media-validation-20260924/dual3060/acceptance.json (2026-09-24 fixed recipe, two RTX 3060 UUID-bound workers)"},
   "studio_preview": {"max_frames": 362, "steps": 4, "max_parallel": 3, "lanes": ["fast", "main", "preview"], "memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "studio-full15-20260909/h3val_306ff5b26d804d43/report.json; studio-full15-20260909/h3val_73e47812fca04434/report.json (two triple batches, non-cached sampling, full media and memory telemetry)"},
   "mixed_profiles": false,
   "mixed_short_long": false,

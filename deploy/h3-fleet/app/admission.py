@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .managed_video import QUALITY480_RECIPE, validate_quality480
+
 
 
 BUSY = ("reserved", "reconciling", "submitted", "running", "cancelling")
@@ -197,6 +199,21 @@ class CapacityPolicy:
                 raise ValueError("capacity exceeds the reviewed short-job evidence boundary")
         if self.data["long"]["max_parallel"] != 1:
             raise ValueError("long-job concurrency has not been validated")
+        quality480 = self.data.get("quality480_i2v")
+        if quality480 is not None and (
+                quality480.get("recipe_id") != QUALITY480_RECIPE
+                or quality480.get("max_parallel") != 2
+                or quality480.get("lanes") != ["main", "preview"]
+                or not isinstance(quality480.get("gpu_uuids"), dict)
+                or set(quality480["gpu_uuids"]) != {"main", "preview"}
+                or any(not isinstance(value, str) or not value.startswith("GPU-")
+                       for value in quality480["gpu_uuids"].values())
+                or len(set(quality480["gpu_uuids"].values())) != 2
+                or type(quality480.get("memory_budget_gib")) is not int
+                or quality480["memory_budget_gib"] < 15
+                or quality480.get("disk_budget_gib", 0) < 1
+                or not quality480.get("evidence")):
+            raise ValueError("quality480 dual-lane capacity requires fixed recipe evidence")
         studio = self.data.get("studio_preview")
         if studio is not None:
             if (studio.get("max_frames") != 362 or studio.get("steps") != 4
@@ -211,6 +228,13 @@ class CapacityPolicy:
 
     def demand(self, payload: dict[str, Any], profile: str) -> dict[str, Any]:
         """Use executed graph dimensions, never a client's duration/profile claim alone."""
+        if payload.get("extra_data", {}).get("h3", {}).get("recipe_id") == QUALITY480_RECIPE:
+            if profile != "quality" or not self.data.get("quality480_i2v"):
+                raise ValueError("quality480 recipe is not qualified by this capacity policy")
+            demand = validate_quality480(payload)
+            rule = self.data["quality480_i2v"]
+            return {**demand, "memory_budget_bytes": rule["memory_budget_gib"] * GIB,
+                    "disk_budget_bytes": rule["disk_budget_gib"] * GIB}
         if payload.get("extra_data", {}).get("h3", {}).get("studio") is True:
             return self.studio_demand(payload, profile)
         nodes = list(payload.get("prompt", {}).values())
@@ -259,6 +283,8 @@ class CapacityPolicy:
         if experiment:
             return {**self.data["long"], "max_parallel": experiment["max_parallel"],
                     "lanes": self.data["short"][experiment["profile"]]["lanes"]}
+        if demand.get("recipe_id") == QUALITY480_RECIPE:
+            return self.data["quality480_i2v"]
         if self.parallel_studio_preview(demand):
             return self.data["studio_preview"]
         return self.data["short"][demand["profile"]] if demand["class"] == "short" else self.data["long"]
@@ -360,7 +386,15 @@ class CapacityPolicy:
         if mixed and any(item["profile"] == demand["profile"] for item in active):
             return "mixed_profile_slot_full"
         parallel_preview = not experiment and all(self.parallel_studio_preview(item) for item in [demand, *active])
-        if not mixed and not parallel_preview and active and ((demand["class"] == "long" and not experiment) or any(
+        parallel_quality480 = not experiment and all(
+            item.get("recipe_id") == QUALITY480_RECIPE for item in [demand, *active])
+        # A pair uses one frozen cgroup baseline. Once both slots have been
+        # filled, wait until the cohort is idle before opening a new pair:
+        # leftover allocations from a completed peer cannot be attributed to
+        # the still-running job safely.
+        if parallel_quality480 and active and any(item.get("quality480_pair_closed") for item in active):
+            return "quality480_wait_for_idle"
+        if not mixed and not parallel_preview and not parallel_quality480 and active and ((demand["class"] == "long" and not experiment) or any(
             (item["class"] == "long" and not experiment) or item["profile"] != demand["profile"] for item in active
         )):
             return "exclusive_workload_active"
@@ -370,6 +404,15 @@ class CapacityPolicy:
             return "resource_telemetry_unavailable"
         limits = self.data["resources"]
         memory = demand["memory_budget_bytes"] + sum(item["memory_budget_bytes"] for item in active)
+        if parallel_quality480 and active:
+            baseline = demand.get("cgroup_baseline_bytes")
+            if (type(baseline) is not int or baseline < 0
+                    or any(item.get("cgroup_baseline_bytes") != baseline for item in active)
+                    or snapshot.get("cgroup_current_bytes", -1) < baseline):
+                return "quality480_baseline_unavailable"
+            active_budget = sum(item["memory_budget_bytes"] for item in active)
+            observed_growth = min(active_budget, snapshot["cgroup_current_bytes"] - baseline)
+            memory = demand["memory_budget_bytes"] + active_budget - observed_growth
         disk = demand["disk_budget_bytes"] + sum(item["disk_budget_bytes"] for item in active)
         gates = (
             (snapshot["memory_available_bytes"] - memory < limits["min_available_ram_gib"] * GIB, "ram_headroom"),

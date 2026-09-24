@@ -28,6 +28,7 @@ from .contracts import (
 from .providers import CodexProvider, H3Provider, QwenProvider
 from .storage import MediaStore
 from .image_direct import DirectGeneration, SINGLE, compatible
+from .video_direct import VideoGeneration, single_video_request
 from ..media_policy import validate_media_limits
 from ..image_generation import validate_snapshot, cloud_allowed, route
 from .video_review import VideoReviewer, technical_review
@@ -87,6 +88,7 @@ class MediaService:
         from .creative import CreativeService
         self.creative = CreativeService(self)
         self.direct = DirectGeneration(self, executors)
+        self.video_direct = VideoGeneration(self)
 
     def lock(self, job_id: str):
         return self.locks.setdefault(job_id, asyncio.Lock())
@@ -106,7 +108,8 @@ class MediaService:
         self.runner = asyncio.create_task(self._run())
 
     async def close(self):
-        tasks = [self.runner, self.image_task, *self.video_tasks.values(), *self.creative.tasks.values(), *self.direct.tasks.values()]
+        tasks = [self.runner, self.image_task, *self.video_tasks.values(), *self.creative.tasks.values(),
+                 *self.direct.tasks.values(), *self.video_direct.tasks.values()]
         for task in tasks:
             if task:
                 task.cancel()
@@ -130,7 +133,10 @@ class MediaService:
     async def tick(self):
         await self.creative.tick()
         await self.direct.tick()
+        await self.video_direct.tick()
         for job in self.store.active():
+            if job["kind"] == "video" and job.get("execution_kind") == SINGLE:
+                continue
             if job["kind"] == "image":
                 if job.get("execution_kind") == SINGLE:
                     continue
@@ -202,6 +208,21 @@ class MediaService:
                 **video_workflow_options(),
             },
         }
+        video_specs = sorted({(capability["mode"], duration, aspect)
+                              for endpoint in self.video_direct.executors
+                              if (settings["enabled"] and settings["videos_enabled"]
+                                  and "siyuan-video" in models
+                                  and endpoint["enabled"] and endpoint["qualified"])
+                              for capability in endpoint["capabilities"]
+                              for duration in capability["durations"]
+                              for aspect in capability["aspect_ratios"]})
+        result["single_generation"] = {
+            "version": 1, "video_workflow_mode": SINGLE,
+            "video_modes": sorted({mode for mode, _, _ in video_specs}), "stages": False,
+            "video_capabilities": [{"mode": mode, "duration": duration, "aspect_ratio": aspect}
+                                   for mode, duration, aspect in video_specs],
+            "configured": bool(video_specs),
+        }
         if settings["h3_ready"] and settings["videos_enabled"] and "siyuan-video" in models:
             try:
                 result["videos"] = {
@@ -243,8 +264,20 @@ class MediaService:
             if not direct and body["model"] == "siyuan-image" and not settings["codex_ready"]:
                 raise MediaError("codex_not_verified", "Codex media isolation has not been verified.", 503)
         else:
-            body = video_request(body)
-            if not settings["h3_ready"]:
+            if not isinstance(body, dict):
+                raise MediaError("invalid_media_parameters", "Media parameters must be an object.")
+            direct = body.get("workflow_mode") == SINGLE or body.get("model") == "minimax-h3"
+            body = single_video_request(body) if direct else video_request(body)
+            policy = validate_media_limits(policy or {})
+            if not isinstance(idem, str) or not 1 <= len(idem) <= 128:
+                raise MediaError("invalid_idempotency_key", "Invalid idempotency key.")
+            if (existing := self.store.replay(owner, kind, body, idem)) is not None:
+                return existing
+            if body["duration"] > policy.get("video_max_seconds", 3600):
+                raise MediaError("media_duration_limit", "Video exceeds the account duration limit.", 403)
+            if direct and not self.video_direct.candidates(body):
+                raise MediaError("media_no_compatible_executor", "No qualified executor supports this video request.", 503)
+            if not direct and not settings["h3_ready"]:
                 raise MediaError("h3_not_verified", "H3 media contract has not been verified.", 503)
         if not settings["enabled"] or (not (kind == "image" and generation is not None) and not settings[kind + "s_enabled"]):
             raise MediaError("media_disabled", "Media generation is disabled.", 503)
@@ -268,10 +301,10 @@ class MediaService:
                 )
         job = self.store.create(owner, kind, body, idem, request_id,
                                 generation["policy"]["queue_limit"] if generation else settings["queue_limit"],
-                                policy=policy if kind == "image" else None,
+                                policy=policy,
                                 execution_kind=SINGLE if direct else None,
                                 image_generation=generation if kind == "image" else None)[0]
-        if kind == "video" and workflow_mode(body) != "legacy_pipeline" and not job.get("stages"):
+        if kind == "video" and not direct and workflow_mode(body) != "legacy_pipeline" and not job.get("stages"):
             job = self.store.update(
                 job["id"],
                 status="in_progress",
@@ -1743,6 +1776,12 @@ class MediaService:
             )
         return self.store.update(job["id"], **changes)
 
+    async def cancel(self, job_id: str, owner: str | None):
+        job = self.store.get(job_id, owner)
+        if job["kind"] == "video" and job.get("execution_kind") == SINGLE:
+            return await self.video_direct.cancel(job)
+        return await self.cancel_image(job_id, owner)
+
     async def cancel_image(self, job_id: str, owner: str | None):
         job = self.store.get(job_id, owner)
         if job["kind"] == "image" and job.get("execution_kind") == SINGLE:
@@ -1805,7 +1844,12 @@ class MediaService:
             "creative_profile", "aspect_ratio",
         )
         result = {field: job[field] for field in fields if field in job}
-        if job["kind"] == "video":
+        if job["kind"] == "video" and job.get("execution_kind") == SINGLE:
+            result["execution_kind"] = SINGLE
+            result["progress"] = job.get("progress", 100 if job["status"] == "completed" else 0)
+            result["aspect_ratio"] = job["request"].get("aspect_ratio", "16:9")
+            result["workflow_mode"] = SINGLE
+        elif job["kind"] == "video":
             result.setdefault("workflow_mode", workflow_mode(job["request"]))
             result.setdefault("creative_profile", job["request"].get("creative_profile", "auto"))
             result.setdefault("aspect_ratio", job["request"].get("aspect_ratio", "16:9"))

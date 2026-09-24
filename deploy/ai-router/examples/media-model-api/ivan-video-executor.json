@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "executors": [
+    {
+      "id": "ivan-h3-video",
+      "adapter": "h3",
+      "url": "http://100.96.79.21:19390",
+      "key_env": "AI_ROUTER_IVAN_VIDEO_KEY",
+      "resource_id": "ivan_h3_video_3060_pair",
+      "model": "minimax-h3",
+      "enabled": false,
+      "qualified": false,
+      "priority": 100,
+      "max_parallel": 2,
+      "capabilities": [
+        {
+          "mode": "i2v",
+          "profile": "quality",
+          "recipe_id": "h3-i2va-480p15-3060-v1",
+          "durations": [15],
+          "aspect_ratios": ["16:9"]
+        }
+      ]
+    }
+  ]
+}

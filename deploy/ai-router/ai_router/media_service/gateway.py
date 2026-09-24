@@ -60,10 +60,10 @@ async def connection(request: Request, principal: dict):
         "X-Media-Admin": str(principal["admin"]).lower(),
         "X-Media-Models": ",".join(principal["models"]),
         "X-Request-ID": request.state.server_request_id,
+        "X-Media-Policy": json.dumps(principal.get("media_policy", {}), separators=(",", ":")),
     }
     if "image_generation" in principal:
         headers["X-Image-Generation"] = json.dumps(principal["image_generation"], separators=(",", ":"))
-        headers["X-Media-Policy"] = json.dumps(principal.get("media_policy", {}), separators=(",", ":"))
     if request.headers.get("idempotency-key"):
         headers["Idempotency-Key"] = request.headers["idempotency-key"]
     async with httpx.AsyncClient(
@@ -322,6 +322,7 @@ def router(*, admin: bool = False) -> APIRouter:
         async with connection(request, principal) as client:
             return JSONResponse(await rpc(client, "POST", f"/jobs/{request.path_params['job_id']}/cancel"))
     result.add_api_route("/images/{job_id}/cancel", endpoint(cancel_image), methods=["POST"])
+    result.add_api_route("/videos/{job_id}/cancel", endpoint(cancel_image), methods=["POST"])
 
     async def job_action(request):
         principal = await authenticate(request)

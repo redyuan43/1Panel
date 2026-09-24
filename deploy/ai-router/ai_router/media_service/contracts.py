@@ -238,7 +238,8 @@ def validate_settings(value: dict) -> dict:
     defaults = {
         "enabled": False, "images_enabled": True, "videos_enabled": True,
         "paid_fallback": True, "daily_paid_images": 20, "queue_limit": 10,
-        "queue_timeout": 120, "image_timeout": 600, "poll_interval": 5,
+        "queue_timeout": 120, "video_queue_timeout": 3600,
+        "image_timeout": 600, "poll_interval": 5,
         "min_free_bytes": 5 * 1024**3, "codex_ready": False, "h3_ready": False,
     }
     if not isinstance(value, dict) or set(value) - defaults.keys():
@@ -249,7 +250,8 @@ def validate_settings(value: dict) -> dict:
             raise MediaError("invalid_media_settings", f"{name} must be boolean.")
     for name, low, high in (
         ("daily_paid_images", 0, 10000), ("queue_limit", 1, 100),
-        ("queue_timeout", 1, 600), ("image_timeout", 1, 3600),
+        ("queue_timeout", 1, 600), ("video_queue_timeout", 1, 7200),
+        ("image_timeout", 1, 3600),
         ("poll_interval", 1, 60), ("min_free_bytes", 0, 1024**5),
     ):
         number = result[name]

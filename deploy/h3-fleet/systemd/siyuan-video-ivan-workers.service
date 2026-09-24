@@ -1,0 +1,18 @@
+[Unit]
+Description=SIYUAN video Ivan RTX 3060 worker pair
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ivan/.local/state/siyuan-video-production
+ExecStart=/usr/bin/python3 /home/ivan/.local/state/siyuan-video-production/current/h3-fleet/scripts/serve_video_ivan_workers.py ivan
+Restart=on-failure
+RestartSec=15
+MemoryAccounting=yes
+MemoryMax=48G
+MemorySwapMax=2G
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target
