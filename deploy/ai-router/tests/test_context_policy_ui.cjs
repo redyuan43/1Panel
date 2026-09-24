@@ -37,6 +37,13 @@ for (const mode of ['legacy','compact','extended']) {
   assert.equal(result.endpoint_id, 'codex-pro-gpt-6-astra');
   assert.equal(result.extended_context_tokens, 500000);
 }
+assert(html.includes('id="prompt-enhancement-enabled"'));
+assert.equal(byId('prompt-enhancement-enabled').checked, false);
+byId('prompt-enhancement-enabled').checked = true;
+assert.equal(vm.runInContext('collectSettings().routing.prompt_enhancement.enabled', context), true);
+state.settings.routing.prompt_enhancement = {enabled: true};
+vm.runInContext('renderSettings()', context);
+assert.equal(byId('prompt-enhancement-enabled').checked, true);
 delete state.settings.context_policy;
 vm.runInContext('renderSettings()', context);
 assert.equal(byId('context-policy-mode').value, 'legacy');
