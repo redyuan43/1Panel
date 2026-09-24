@@ -13,10 +13,11 @@ from .compaction import (
     message_hash,
     replace_messages,
 )
-from .errors import ConversationStateConflictError
+from .errors import ConversationStateConflictError, HistoryMigrationRequiredError
 from .phase_timing import timed_async
 from .privacy_view import content_text
-from .reasoning_fields import chat_reasoning
+from .reasoning_fields import chat_reasoning, is_plain_reasoning_item
+from .history_identity import _canonical_tool_arguments, _messages_hash, verified_history_identity, public_history_identity
 from .types import ConversationState, Endpoint
 
 
@@ -64,17 +65,46 @@ def normalize_history_for_provider(
     accepts_reasoning_content = bool(
         contract.get("accepts_reasoning_content")
         or contract.get("requires_reasoning_content")
-        or (provider_family(endpoint) == "deepseek"
+        or endpoint is None
+        or (provider_family(endpoint) in {"deepseek", "vllm", "openai-codex"}
             and endpoint is not None
             and "history_contract" not in endpoint.metadata)
     )
     accepts_reasoning_items = bool(contract.get("accepts_reasoning_items") or (
-        provider_family(endpoint) == "deepseek" and endpoint is not None
+        provider_family(endpoint) in {"deepseek", "openai-codex"} and endpoint is not None
         and "history_contract" not in endpoint.metadata
     )) and (
         endpoint is None or endpoint.capabilities.responses == "native"
     )
     value = copy.deepcopy(body)
+    native_responses = endpoint is not None and endpoint.capabilities.responses == "native"
+    codex_chat_history = native_responses and provider_family(endpoint) == "openai-codex"
+    # Never make a candidate fit by dropping reasoning. An incompatible target
+    # must be rejected before token counting, including on the first turn.
+    items = value.get("messages" if api_kind == "chat" else "input", [])
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        if chat_reasoning(item) and not accepts_reasoning_content:
+            raise HistoryMigrationRequiredError("the target cannot preserve historical reasoning")
+        accepts_plain_item = (
+            native_responses and contract.get("accepts_text_reasoning_items") is True
+            and is_plain_reasoning_item(item)
+        )
+        if item.get("type") == "reasoning" and not (accepts_reasoning_items or accepts_plain_item):
+            raise HistoryMigrationRequiredError("the target cannot preserve historical reasoning items")
+        if api_kind == "chat" and (item.get("codex_reasoning_items") or item.get("codex_message_items")):
+            if not codex_chat_history:
+                raise HistoryMigrationRequiredError("opaque provider history requires its native protocol")
+            reasoning_items = item.get("codex_reasoning_items") or []
+            message_items = item.get("codex_message_items") or []
+            if (item.get("role") != "assistant"
+                    or not isinstance(reasoning_items, list) or not isinstance(message_items, list)
+                    or any(not isinstance(entry, dict) or entry.get("type") != "reasoning"
+                           or not entry.get("encrypted_content") for entry in reasoning_items)
+                    or any(not isinstance(entry, dict) or entry.get("type") != "message"
+                           or entry.get("role") != "assistant" for entry in message_items)):
+                raise HistoryMigrationRequiredError("invalid opaque provider history")
     if contract.get("preserve_thinking"):
         history_items = value.get("messages" if api_kind == "chat" else "input", [])
         if isinstance(history_items, dict):
@@ -99,6 +129,7 @@ def normalize_history_for_provider(
                     normalized := _normalize_chat_item(
                         item,
                         accepts_reasoning_content=accepts_reasoning_content,
+                        accepts_codex_history=codex_chat_history,
                     )
                 ) is not None
             ]
@@ -115,6 +146,7 @@ def normalize_history_for_provider(
                     item,
                     accepts_reasoning_content=accepts_reasoning_content,
                     accepts_reasoning_items=accepts_reasoning_items,
+                    native=native_responses,
                 )
             )
             is not None
@@ -168,6 +200,7 @@ def _normalize_chat_item(
     item: dict[str, Any],
     *,
     accepts_reasoning_content: bool = False,
+    accepts_codex_history: bool = False,
 ) -> dict[str, Any] | None:
     role = str(item.get("role", "")).lower()
     if role not in {"system", "developer", "user", "assistant", "tool"}:
@@ -179,6 +212,8 @@ def _normalize_chat_item(
     }
     if role == "assistant":
         allowed.update({"tool_calls", "refusal", "audio"})
+        if accepts_codex_history:
+            allowed.update({"codex_reasoning_items", "codex_message_items"})
         if accepts_reasoning_content:
             allowed.add("reasoning_content")
     elif role == "tool":
@@ -232,8 +267,17 @@ def _normalize_responses_item(
     *,
     accepts_reasoning_content: bool = False,
     accepts_reasoning_items: bool = False,
+    native: bool = False,
 ) -> dict[str, Any] | None:
     item_type = str(item.get("type", ""))
+    if native:
+        # Native Responses items include provider tools and item references.
+        # Preserve their full payload; the target validates its own schema.
+        result = copy.deepcopy(item)
+        if accepts_reasoning_content and chat_reasoning(item) is not None:
+            result["reasoning_content"] = chat_reasoning(item)
+            result.pop("reasoning", None)
+        return result
     if item_type == "reasoning":
         if not accepts_reasoning_items:
             return None
@@ -273,7 +317,7 @@ def _normalize_responses_item(
         if accepts_reasoning_content:
             allowed.add("reasoning_content")
     else:
-        return None
+        raise HistoryMigrationRequiredError("the target cannot preserve this Responses history item")
     result = {
         key: copy.deepcopy(value)
         for key, value in item.items()
@@ -292,21 +336,6 @@ def _normalize_responses_item(
     return result
 
 
-def _canonical_tool_arguments(value: Any) -> Any:
-    if not isinstance(value, str):
-        return copy.deepcopy(value)
-    try:
-        parsed = json.loads(value)
-    except (json.JSONDecodeError, TypeError):
-        return value
-    return json.dumps(
-        parsed,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-
 def history_identities(
     messages: list[dict[str, Any]],
 ) -> tuple[str, ...]:
@@ -323,88 +352,6 @@ def history_identities(
     )
 
 
-def verified_history_identity(messages: list[dict[str, Any]]) -> str:
-    """Routing evidence only: never use this representation as model input."""
-    items = _verified_history_items(messages)
-    anchor = any(
-        (m.get("role") == "assistant" and (m.get("content") or m.get("tool_calls")))
-        or m.get("type") in {"tool_transaction_v5", "function_call"}
-        for m in items
-    )
-    strength = "strong" if anchor else "weak"
-    return f"v5-history-{strength}-{len(items)}-{_messages_hash(items)}"
-
-
-def _verified_history_items(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    # Preserve all model-visible fields, including prose, images and reasoning.
-    keys = {"role", "content", "name", "tool_calls", "tool_call_id", "refusal", "audio", "reasoning_content"}
-    canonical = []
-    for message in messages:
-        if not isinstance(message, dict):
-            canonical.append({"invalid_item": message})
-            continue
-        item = copy.deepcopy({k: v for k, v in message.items() if k in keys} if "role" in message else message)
-        content = item.get("content")
-        if isinstance(content, list) and content and all(
-                isinstance(part, dict) and part.get("type") in {"text", "input_text", "output_text"}
-                and isinstance(part.get("text"), str) and set(part) <= {"type", "text", "annotations"}
-                and part.get("annotations") in (None, []) for part in content):
-            item["content"] = "".join(part["text"] for part in content)
-        if item.get("role") == "assistant" and isinstance(item.get("tool_calls"), list):
-            if item.get("content") in (None, ""):
-                item["content"] = None
-            for call in item["tool_calls"]:
-                if isinstance(call, dict) and isinstance(call.get("function"), dict) and "arguments" in call["function"]:
-                    call["function"]["arguments"] = _canonical_tool_arguments(call["function"]["arguments"])
-        canonical.append(item)
-    result, index = [], 0
-    while index < len(canonical):
-        transaction = _verified_tool_transaction(canonical, index)
-        if transaction is None:
-            result.append(canonical[index])
-            index += 1
-        else:
-            item, index = transaction
-            result.append(item)
-    return result
-
-
-def _verified_tool_transaction(messages, start):
-    first = messages[start]
-    if first.get("role") != "assistant" or not first.get("tool_calls"):
-        return None
-    head = {k: v for k, v in first.items() if k != "tool_calls"}
-    calls, outputs, seen, answered = [], [], set(), set()
-    index = start
-    while index < len(messages):
-        item = messages[index]
-        if item.get("role") == "assistant" and item.get("tool_calls"):
-            if index != start and (item.get("content") not in (None, "")
-                    or set(item) - {"role", "content", "tool_calls"}):
-                break
-            if not isinstance(item["tool_calls"], list):
-                return None
-            for call in item["tool_calls"]:
-                if not isinstance(call, dict) or not isinstance(call.get("id"), str) or not call["id"] or call["id"] in seen:
-                    return None
-                seen.add(call["id"])
-                calls.append(call)
-        elif item.get("role") == "tool":
-            call_id = item.get("tool_call_id")
-            if not isinstance(call_id, str) or call_id not in seen or call_id in answered:
-                return None
-            answered.add(call_id)
-            outputs.append(item)
-        else:
-            break
-        index += 1
-    if not seen or seen != answered:
-        return None
-    # Separate ordered call/result lists allow only grouping/interleaving changes.
-    # Never discard prose or sort IDs: reordered calls/results remain different.
-    return {"type": "tool_transaction_v5", "head": head, "calls": calls, "outputs": outputs}, index
-
-
 def history_lookup_identities(
     messages: list[dict[str, Any]],
 ) -> tuple[str, ...]:
@@ -412,16 +359,6 @@ def history_lookup_identities(
     for end in range(len(messages) - 1, 0, -1):
         values.extend(history_identities(messages[:end]))
     return tuple(dict.fromkeys(values))
-
-
-def _messages_hash(messages: list[dict[str, Any]]) -> str:
-    payload = json.dumps(
-        messages,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _canonical_history_items(
@@ -680,6 +617,8 @@ async def persist_history(
     assistant_message: dict[str, Any] | None = None,
     assistant_items: list[dict[str, Any]] | None = None,
     persist_messages: bool = True,
+    public_body: dict[str, Any] | None = None,
+    public_assistant_items: list[dict[str, Any]] | None = None,
 ) -> None:
     if state is None:
         return
@@ -699,6 +638,13 @@ async def persist_history(
         state.encrypted_capsule = compactor.cipher.encrypt(messages)
         state.boundary_hash = message_hash(messages[-1])
     await conversations.save(state)
+    if public_body is not None and public_assistant_items:
+        # Publish before the success response ends; archive queue latency must
+        # not make a completed exchange look like a new conversation.
+        await conversations.map_history(client_id, (public_history_identity(
+            extract_messages(public_body, api_kind), public_assistant_items,
+            client_id=client_id, protocol=api_kind,
+        ),), state.branch_id or state.conversation_id)
     await conversations.map_history(
         client_id,
         history_identities(messages),

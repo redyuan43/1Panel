@@ -37,7 +37,7 @@ def test_prose_tool_grouping_identity_preserves_input():
     grouped, split = histories()
     before = copy.deepcopy([grouped, split])
     assert verified_history_identity(grouped) == verified_history_identity(split)
-    assert "v5-history-strong-" in verified_history_identity(grouped)
+    assert "v7-history-strong-" in verified_history_identity(grouped)
     assert [grouped, split] == before
 
 

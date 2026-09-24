@@ -85,24 +85,12 @@ def test_chat_history_is_converted_for_target_contract() -> None:
     }
     original = copy.deepcopy(body)
 
-    stripped = normalize_history_for_provider(
-        body,
-        "chat",
-        endpoint_with_contract(),
-    )
+    with pytest.raises(HistoryMigrationRequiredError):
+        normalize_history_for_provider(body, "chat", endpoint_with_contract())
     assert body == original
-    assert [item["role"] for item in stripped["messages"]] == [
-        "user",
-        "assistant",
-        "tool",
-    ]
-    assistant = stripped["messages"][1]
-    assert "reasoning_content" not in assistant
-    assert "codex_reasoning_items" not in assistant
-    assert assistant["tool_calls"][0]["function"]["arguments"] == (
-        '{"a":1,"b":2}'
-    )
-    assert stripped["messages"][2]["tool_call_id"] == "call-1"
+    with pytest.raises(HistoryMigrationRequiredError, match="native protocol"):
+        normalize_history_for_provider(body, "chat", endpoint_with_contract(accepts_reasoning_content=True))
+    body["messages"][1].pop("codex_reasoning_items")
 
     accepted = normalize_history_for_provider(
         body,
@@ -111,6 +99,7 @@ def test_chat_history_is_converted_for_target_contract() -> None:
     )
     assert accepted["messages"][1]["reasoning_content"] == "private chain"
     assert "codex_reasoning_items" not in accepted["messages"][1]
+
 
 
 def test_responses_history_preserves_order_and_target_supported_fields() -> None:
@@ -143,17 +132,8 @@ def test_responses_history_preserves_order_and_target_supported_fields() -> None
         ]
     }
 
-    stripped = normalize_history_for_provider(
-        body,
-        "responses",
-        endpoint_with_contract(),
-    )
-    assert [item["type"] for item in stripped["input"]] == [
-        "function_call",
-        "function_call_output",
-        "message",
-    ]
-    assert all("reasoning_content" not in item for item in stripped["input"])
+    with pytest.raises(HistoryMigrationRequiredError):
+        normalize_history_for_provider(body, "responses", endpoint_with_contract())
 
     accepted = normalize_history_for_provider(
         body,
@@ -172,6 +152,7 @@ def test_responses_history_preserves_order_and_target_supported_fields() -> None
     assert accepted["input"][0]["encrypted_content"] == "cipher"
     assert accepted["input"][1]["reasoning_content"] == "private chain"
     assert accepted["input"][3]["reasoning_content"] == "message chain"
+
 
 
 @pytest.mark.parametrize("api_kind", ["chat", "responses"])

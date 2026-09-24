@@ -178,6 +178,7 @@ class TrainingArchive:
         status_code: int,
         response_payload: bytes | None = None,
         assistant_items: list[dict[str, Any]] | None = None,
+        public_assistant_items: list[dict[str, Any]] | None = None,
         usage: dict[str, Any] | None = None,
     ) -> None:
         if not token:
@@ -191,6 +192,7 @@ class TrainingArchive:
                 "status_code": status_code,
                 "body": _response_value(response_payload),
                 "assistant_items": assistant_items,
+                "public_assistant_items": public_assistant_items,
                 "usage": usage,
                 "complete": True,
             }

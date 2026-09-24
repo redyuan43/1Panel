@@ -19,7 +19,7 @@ from .history_index import index_completed
 from .policy import ConversationRepository
 from .store import RedisStateStore
 from .training_archive import TrainingArchive, archive_event
-from .workbuddy_history import WorkBuddyHistory
+from .history_identity import is_verified_history_identity
 
 log = logging.getLogger(__name__)
 OPERATIONS = {"begin", "mark_routed", "set_effective_context", "record_pipeline", "complete", "fail"}
@@ -28,14 +28,12 @@ OPERATIONS = {"begin", "mark_routed", "set_effective_context", "record_pipeline"
 async def publish_history(runtime, trace, archive):
     reader = ArchiveReader(str(archive.database_path), str(archive.key_path))
     await index_completed(runtime, trace, reader)
-    await asyncio.to_thread(WorkBuddyHistory(
-        runtime.route_traces.database_path, str(archive.database_path), str(archive.key_path)
-    ).record, trace)
     history = next((c for c in trace.get("observation", {}).get("content", {}).get("checks", [])
                     if c.get("check") == "workbuddy_history"), {})
-    aliases = [v for v in history.get("raw_identities", []) if "v5-history-" not in v]
+    aliases = [v for v in history.get("raw_identities", []) if not is_verified_history_identity(v)]
     if aliases and trace.get("branch_id"):
         await runtime.conversations.map_history(trace["client_id"], tuple(aliases), trace["branch_id"])
+
 
 
 class ArchiveWorker:
