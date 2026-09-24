@@ -125,7 +125,7 @@ class RoutedCompactor(CheckpointedCompactor):
             evaluation=Evaluation("general", None, 1.0, "background_compaction"),
             prompt_tokens=tokens, output_reserve_tokens=self.summary_output_tokens,
             modalities={"text"}, has_tools=False, required_capabilities=RequestCapabilities(protocol="chat"),
-            conversation=None, routing_key=self.job["id"],
+            conversation=None, client_id=owner, routing_key=self.job["id"],
             routing_options=routing_options)
         if decision.endpoint.id != endpoint.id:
             raise CompactionUnavailableError("background compaction cannot silently change models")

@@ -913,3 +913,59 @@ endpoints:
       output_cost_per_million_usd: 3.96
       max_output_tokens: 384000
       thinking_via_extra_body: true
+
+  # nx1 (Orin NX 16G) 专用诊断端点：仅供 home-assistant / check-boards 通过
+  # client_route_binding 调用，用于 Home Assistant 与 check_boards 服务的故障
+  # 诊断。端点级 client_allowlist 把其他账号（含 models=["*"]）挡在显式请求
+  # 之外；auto_candidate=false 使其永不进入自动路由。
+  # 源注册默认禁用；上线后经 Control revision CAS 运行时 enable。
+  # 2026-09-24 现场读取：nx1 用户服务启动主模型与 mmproj，监听 18083；
+  # /v1/models 声明 multimodal、n_ctx=98304；一次真实红色图片 +
+  # response_format=json_object 返回可解析的 {"color":"red"}。只验证单图短请求。
+  - id: nx1-ornith-35b-a3b-96k
+    public_model: siyuan/ornith-nx1-96k
+    provider_model: /home/nx/weight/Ornith-1.5-35B-A3B-IQ2_S.gguf
+    api_base: http://100.119.5.57:18083/v1
+    node: nx1
+    role: responder
+    tier: local-large
+    tier_rank: 30
+    modalities: [text, image]
+    tasks: [general, code, batch, home-automation]
+    safe_context_tokens: 98304
+    configured_context_tokens: 98304
+    max_concurrency: 1
+    backend_type: llama_cpp
+    health_url: http://100.119.5.57:18083/health
+    load_url: http://100.119.5.57:18083/slots
+    backend_api_key_env: AI_ROUTER_NX1_BACKEND_KEY
+    client_allowlist: [home-assistant, check-boards]
+    enabled: false
+    auto_candidate: false
+    capabilities:
+      chat: true
+      responses: adapter
+      tools: none
+      tool_choice: false
+      tool_choice_modes: []
+      structured_output: [json_object]
+      streaming: true
+      validation_status: live-single-image-json-object-2026-09-24
+      validated_at: "2026-09-24"
+    quality: {}
+    metadata:
+      device_label: Jetson Orin NX 16G (nx1)
+      transport: tailscale-direct
+      engine: llama.cpp llama-server (user service nx1-ornith-35b-a3b-iq2s)
+      vision_projector: mmproj-Ornith-1.5-35B-A3B-bf16.gguf
+      model_artifact: Ornith-1.5-35B-A3B-IQ2_S.gguf
+      max_images: 1
+      quantization: IQ2_S-2.5bpw
+      kv_cache: q4_0
+      speculative_method: mtp
+      context_status: engine-declared-98304-not-long-input-validated
+      quality_status: live-single-image-red-json-2026-09-24
+      thinking_model: true
+      history_contract:
+        accepts_reasoning_content: true
+      purpose: homeassistant-checkboards-diagnostics-dedicated

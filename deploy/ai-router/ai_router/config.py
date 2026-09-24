@@ -384,6 +384,24 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
     profile_ids = [item.id for item in deployment_profiles]
     if len(profile_ids) != len(set(profile_ids)):
         raise ValueError("endpoint deployment profile IDs must be unique")
+    # to_dict()/asdict() 输出字段名 allowed_client_ids；EndpointConfigManager
+    # 的运行时覆盖会做 to_dict→from_dict 往返重建，必须同时兼容两个键名，
+    # 否则端点级允许列表会在往返中静默丢失。
+    allowlist_value = value.get(
+        "client_allowlist",
+        value.get("allowed_client_ids", []),
+    )
+    # asdict() 把 tuple 字段原样输出（运行时覆盖重建不经 JSON），
+    # 必须直接接受 tuple 形态的 allowed_client_ids。
+    if isinstance(allowlist_value, tuple):
+        allowlist_value = list(allowlist_value)
+    if not isinstance(allowlist_value, list) or not all(
+        isinstance(item, str) and item.strip() == item and item
+        for item in allowlist_value
+    ):
+        raise ValueError(
+            "endpoint client_allowlist must be a list of nonempty strings"
+        )
     return Endpoint(
         id=str(value["id"]),
         public_model=str(value["public_model"]),
@@ -404,6 +422,7 @@ def endpoint_from_dict(value: dict[str, Any]) -> Endpoint:
         backend_api_key_env=str(value.get("backend_api_key_env", "AI_ROUTER_BACKEND_API_KEY")),
         enabled=bool(value.get("enabled", True)),
         auto_candidate=bool(value.get("auto_candidate", True)),
+        allowed_client_ids=tuple(allowlist_value),
         cloud=bool(value.get("cloud", False)),
         capabilities=EndpointCapabilities(
             chat=bool(capabilities_value.get("chat", True)),

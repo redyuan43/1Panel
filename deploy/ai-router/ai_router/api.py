@@ -1474,6 +1474,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                 conversation=routing_conversation,
                 excluded_endpoints=excluded,
                 identity=identity,
+                client_id=authenticated.policy.id,
                 routing_options=routing_options,
                 summary_scope=summary_scope,
             )
@@ -4391,6 +4392,7 @@ async def _maybe_compact_for_route(
     conversation: ConversationState | None,
     excluded_endpoints: set[str],
     identity: IdentityProfile,
+    client_id: str = "",
     routing_options: dict[str, Any] | None = None,
     summary_scope=None,
 ) -> tuple[dict[str, Any], int, Any | None]:
@@ -4415,6 +4417,7 @@ async def _maybe_compact_for_route(
             required_capabilities=required_capabilities,
             conversation=conversation,
             excluded_endpoint_ids=excluded_endpoints,
+            client_id=client_id,
             routing_key=f"{request_id}:preflight",
             routing_options=routing_options,
             candidate_prompt_tokens={
@@ -4438,6 +4441,7 @@ async def _maybe_compact_for_route(
                 required_capabilities=required_capabilities,
                 conversation=conversation,
                 excluded_endpoint_ids=excluded_endpoints,
+                client_id=client_id,
                 routing_key=f"{request_id}:compaction-target",
                 routing_options=routing_options,
             )

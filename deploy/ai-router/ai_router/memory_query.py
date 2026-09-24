@@ -55,7 +55,7 @@ async def rewrite_query(current, query, *, client_id, key_id, deadline):
             prompt_tokens=tokens, output_reserve_tokens=256, modalities={"text"}, has_tools=False,
             required_capabilities=RequestCapabilities(protocol="chat",
                 structured_output="json_object" if "response_format" in request else None), conversation=None,
-            routing_key=operation_id, routing_options=resolve(settings.section("routing"),
+            client_id=client_id, routing_key=operation_id, routing_options=resolve(settings.section("routing"),
                 policy.routing_mode, policy.local_only))
         if decision.endpoint.id != endpoint.id:
             return None, "model_changed"

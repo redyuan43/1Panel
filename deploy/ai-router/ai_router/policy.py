@@ -427,6 +427,15 @@ class RoutingPolicy:
                 if requested_model == "auto"
                 else list(self.registry.by_public_model(requested_model))
             )
+        # 端点级客户端允许列表：未列入 allowed_client_ids 的账号不得触达该端点，
+        # 覆盖显式模型请求与定向路由（含 client_route_binding / route directive）；
+        # 列表为空表示不限制。未授权方统一表现为通用 404 无候选，不泄漏专用端点存在。
+        endpoints = [
+            item
+            for item in endpoints
+            if not item.allowed_client_ids
+            or client_id in item.allowed_client_ids
+        ]
         # Scope the pin to this authenticated request; the shared registry is immutable.
         pin = next(
             (

@@ -83,19 +83,25 @@ routing:
       prewarm_min_prompt_tokens: 45000
       capacity_wait_seconds: 900
   client_route_bindings:
+    # 2026-09-23：home-assistant / check-boards 专用诊断端点切换为 nx1 的
+    # Ornith-1.5-35B-A3B（nx1 用户服务，18083，96K 窗口）。旧 Qwen38 模型名保留在
+    # requested_models 以免既有调用方断裂（统一被绑定重定向到新端点），
+    # 新公开模型名一并放行。回滚：target_endpoint_id 改回 ai-qwen38-27b 即可。
     - client_id: home-assistant
       requested_models:
         - auto
+        - siyuan/ornith-nx1-96k
         - huihui/Qwen3.8-27B-Q4-DFlash2
         - huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
-      target_endpoint_id: ai-qwen38-27b
+      target_endpoint_id: nx1-ornith-35b-a3b-96k
       ignored_route_tiers: [local-large]
     - client_id: check-boards
       requested_models:
         - auto
+        - siyuan/ornith-nx1-96k
         - huihui/Qwen3.8-27B-Q4-DFlash2
         - huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF
-      target_endpoint_id: ai-qwen38-27b
+      target_endpoint_id: nx1-ornith-35b-a3b-96k
       ignored_route_tiers: [local-large]
   new_request_capacity_wait_seconds: 0
   all_local_busy_policy: cloud_or_429
@@ -275,6 +281,9 @@ clients:
       key_env: AI_ROUTER_CHECK_BOARDS_API_KEY
       models:
         - siyuan/qwen38-v100-196k
+        # 绑定目标端点的 public_model 必须在账号 models 白名单内，
+        # 否则 ensure_model_access 会在绑定路由后拒绝请求。
+        - siyuan/ornith-nx1-96k
       rpm_limit: 240
       tpm_limit: 2000000
       max_parallel_requests: 4

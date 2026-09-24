@@ -197,6 +197,10 @@ class Endpoint:
     backend_api_key_env: str = "AI_ROUTER_BACKEND_API_KEY"
     enabled: bool = True
     auto_candidate: bool = True
+    # 端点级客户端允许列表；为空表示不限制。专用端点用它把其他账号
+    # （含 models=["*"] 的账号）挡在显式模型请求之外，与 client_route_binding
+    # 一起构成双向隔离。
+    allowed_client_ids: tuple[str, ...] = ()
     cloud: bool = False
     capabilities: EndpointCapabilities = field(
         default_factory=EndpointCapabilities

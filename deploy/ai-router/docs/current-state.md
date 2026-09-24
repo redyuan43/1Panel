@@ -10,6 +10,16 @@
 
 # AI Router 当前状态
 
+## 2026-09-24 nx1 视觉启用后的专用路由校准（已部署）
+
+- 08:26:51 的 Home Assistant 请求 `21c1561d55e841a4bab22199d313b5b9` 同时包含图片和 `response_format=json_object`，Router 在候选检查中因 nx1 端点仅登记 `text` 返回 422 `no_compatible_model`，没有调用 nx1。这个请求发生在 nx1 视觉服务 08:27:38 重启之前。
+- 08:27:38 后的 nx1 用户服务命令行包含 Ornith 主模型和 mmproj；08:34 后尝试 128K 时因显存不足崩溃，后来重新调整为 96K。最新 `/v1/models` 报告 multimodal、n_ctx=98304、模型 ID 为 `/home/nx/weight/Ornith-1.5-35B-A3B-IQ2_S.gguf`，Router 容器到该服务的健康检查返回 200；原 Router 注册仍是 `text`、旧容器模型路径，端点有效状态仅覆盖 `enabled=true`。
+- 一次受控真实请求向 nx1 发送合成红色 PNG、`response_format=json_object`、`max_tokens=128`，返回 HTTP 200，正文是可解析 JSON `{"color":"red"}`，`finish_reason=stop`。这是单图短请求的语义证据，不证明多图、长上下文或所有 JSON 形态。
+- 已把 nx1 注册的图片模态、`json_object`、模型路径和 96K 上下文对齐上述证据；定向绑定与账号允许列表不变。基于四个当时运行镜像各自叠加单文件注册表补丁，逐台排空／替换四个 Router 实例；其他 17 个端点的注册配置未改变。两台 API 镜像分别为 `sha256:32283094640597be4632ddaf776792a07db7d618a0cded26dea45bfcaf64e075`、`sha256:306110301e8675c274997ac1e7be321829e36bf5ffc6a7afb92dc7064efa1a08`，两台 Control 均为 `sha256:27fa3cc6f44e8a3ac52fc380c114f467be30866179881af1e4581040b0437c98`。
+- 发布后 `home-assistant` 请求 `5b8e37f673b949ad9aefa34b9b448d59`（图片＋`json_object`）选中 nx1 并以 HTTP 200 成功终结，无路由错误。四实例注册哈希一致、设置哈希未变、健康正常、零重启；两台 API 均非 draining，nx1 仍健康并声明 96K。证据见 `outputs/nx1-vision-route-20260924/verification.json`。这是实际选路与请求成功证据；该业务回复的具体内容未在本轮审阅。
+- 代码审查后给端点声明增加 `max_images=1`，只开放已实测的单图范围；双图请求在隔离测试中于上游前返回 422。这项审查修正目前只在源码中，尚未替换上述四台运行镜像；生产多图门禁仍待后续发布。
+- 此外，单实例 `max_concurrency=1` 曾使 check-boards 并发请求返回 429 `model_capacity_busy`，服务不可用期间还有 503 `unhealthy_or_stale`。放开图片能力不解决这两类错误。
+
 ## 2026-09-24 设置局部更新覆盖全量配置（已恢复并部署修复）
 
 - 2026-09-23 23:36 +08:00，管理接口收到只包含 `routing` 的 `PUT /api/settings`，却将它当作完整运行设置写入。`identity.enabled` 因覆盖退回默认 `false`，公开模型请求在选路前返回 `503 public model identity is unavailable`；同次覆盖还使 cloud、failover 等运行设置退回默认值。请求 `d8085405fe3549e6aff207fba7076ab2` 属于这一故障窗口，未产生路由轨迹。
