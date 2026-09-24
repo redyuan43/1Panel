@@ -122,6 +122,33 @@ def test_media_grants_are_independent_and_preserved():
                            public_model_id="siyuan/auto", existing=account)
 
 
+def test_minimax_h3_requires_internal_account_grant():
+    from ai_router.errors import RouterError
+    from ai_router.media_service.gateway import model_descriptors
+
+    common = {"id": "video-client", "name": "Video", "models": ["siyuan/auto"],
+              "rpm_limit": 10, "tpm_limit": 1000, "max_parallel_requests": 1}
+    with pytest.raises(RouterError) as rejected:
+        _validated_account({**common, "media_models": ["minimax-h3"]},
+                           allowed_models={"siyuan/auto"}, public_model_id="siyuan/auto", existing=None)
+    assert rejected.value.code == "invalid_media_models"
+
+    internal = _validated_account({**common, "disclosure_mode": "internal",
+                                   "media_models": ["minimax-h3"]},
+                                  allowed_models={"siyuan/auto"}, public_model_id="siyuan/auto", existing=None)
+    assert internal["media_models"] == ["minimax-h3"]
+    with pytest.raises(RouterError) as downgrade:
+        _validated_account({"disclosure_mode": "public"}, allowed_models={"siyuan/auto"},
+                           public_model_id="siyuan/auto", existing=internal)
+    assert downgrade.value.code == "invalid_media_models"
+    descriptors = model_descriptors(SimpleNamespace(media_models=("minimax-h3",),
+                                                    disclosure_mode="internal"))
+    assert descriptors == [{"id": "minimax-h3", "object": "model", "owned_by": "siyuan",
+                            "output_modalities": ["video"]}]
+    assert model_descriptors(SimpleNamespace(media_models=("minimax-h3",),
+                                             disclosure_mode="public")) == []
+
+
 @pytest.mark.parametrize("body,edit", [
     ({"prompt": "x", "mask": "ignored"}, False), ({"prompt": "x", "n": 2}, False),
     ({"prompt": "x", "images": [asset()]}, False), ({"prompt": "x"}, True),

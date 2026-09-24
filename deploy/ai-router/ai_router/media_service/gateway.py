@@ -40,7 +40,7 @@ logging.getLogger("uvicorn.access").addFilter(MediaAccessLogFilter())
 def model_descriptors(policy) -> list[dict]:
     return [
         {"id": model, "object": "model", "owned_by": "siyuan",
-         "output_modalities": ["video" if model == "siyuan-video" else "image"]}
+         "output_modalities": ["video" if model in {"siyuan-video", "minimax-h3"} else "image"]}
         for model in policy.media_models
         if model in MODELS and (policy.disclosure_mode != "public" or model in PUBLIC_MODELS)
     ]

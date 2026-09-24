@@ -542,7 +542,7 @@ def _validated_account(
     media_models = value.get("media_models", existing.get("media_models", []) if existing else [])
     permitted_media = {"siyuan-image", "siyuan-video"}
     if disclosure_mode == "internal":
-        permitted_media.update({"qwen-image-3.0-pro", "qwen-image-2.1"})
+        permitted_media.update({"qwen-image-3.0-pro", "qwen-image-2.1", "minimax-h3"})
     if not isinstance(media_models, list) or any(
         not isinstance(item, str) or item not in permitted_media for item in media_models
     ):
