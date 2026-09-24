@@ -10,6 +10,25 @@
 
 # AI Router 当前状态
 
+## 2026-09-24 会话故障等待与 Bonsai2 续聊
+
+- 新增 `routing.conversation_stability.health_wait_seconds`（0–120 秒，默认 20）；
+  策略界面提供“故障切换等待（秒）”。启用会话稳定策略后，当前模型健康异常时
+  在预算内复检，恢复即继续，超时再筛选候选；过期的备用健康记录重新读取。
+  显式指定、定向选择以及已确认历史不兼容不进入此等待。此参数只约束健康恢复等待，
+  不代表整条请求超时；推理中途失败仍遵循原失败处理规则。
+- `recovery_mode=manual` 时，效率模式保留当前合格模型，不因旧模型恢复或性能评分
+  改变而切回；硬约束和用户明确选择继续生效。
+- Bonsai2 196K 声明支持 `reasoning_content`，带思考历史时显式传
+  `chat_template_kwargs.preserve_thinking=true`；拒绝显式丢弃思考的请求。
+  覆盖 Chat 思考别名、工具结果和 Router 自身 Responses 输出续传；没有开放
+  其他提供商专属或加密思考格式。
+- 仓库默认稳定策略仍关闭；本次授权发布将线上启用、等待设为 20 秒、恢复方式设为
+  manual。Bonsai2 的仓库启用状态仍为关闭，线上既有激活覆盖保持。
+- 发布工件、逐实例镜像/源码核验及真实请求结果保存在
+  `outputs/conversation-stability-20260924-r1/`；部署采用各运行镜像上的窄补丁，
+  不混入工作区其余未提交改动。测试及上线结果见该目录最终报告。
+
 ## 2026-09-24 nx1 视觉启用后的专用路由校准（已部署）
 
 - 08:26:51 的 Home Assistant 请求 `21c1561d55e841a4bab22199d313b5b9` 同时包含图片和 `response_format=json_object`，Router 在候选检查中因 nx1 端点仅登记 `text` 返回 422 `no_compatible_model`，没有调用 nx1。这个请求发生在 nx1 视觉服务 08:27:38 重启之前。

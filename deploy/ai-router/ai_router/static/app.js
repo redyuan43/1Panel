@@ -4050,13 +4050,9 @@ function renderSettings() {
   byId("stability-enabled").checked = Boolean(
     value("routing.conversation_stability.enabled", false),
   );
-  byId("stability-failure-threshold").value = value(
-    "routing.conversation_stability.health_failure_threshold",
-    2,
-  );
-  byId("stability-recheck-interval").value = value(
-    "routing.conversation_stability.health_recheck_interval_seconds",
-    10,
+  byId("stability-health-wait").value = value(
+    "routing.conversation_stability.health_wait_seconds",
+    20,
   );
   byId("stability-recovery-mode").value = value(
     "routing.conversation_stability.recovery_mode",
@@ -4657,16 +4653,9 @@ function validateSettingsDraft(draft) {
     errors.push("定向暗语不能重复");
   }
   const stability = draft.routing.conversation_stability || {};
-  if (
-    !Number.isInteger(Number(stability.health_failure_threshold))
-    || Number(stability.health_failure_threshold) < 1
-    || Number(stability.health_failure_threshold) > 5
-  ) {
-    errors.push("连续健康失败阈值须为 1 到 5");
-  }
-  const recheck = Number(stability.health_recheck_interval_seconds);
-  if (!Number.isFinite(recheck) || recheck < 0 || recheck > 60) {
-    errors.push("健康复检间隔须在 0 到 60 秒之间");
+  const healthWait = Number(stability.health_wait_seconds);
+  if (!Number.isFinite(healthWait) || healthWait < 0 || healthWait > 120) {
+    errors.push("故障切换等待须在 0 到 120 秒之间");
   }
   if (!["manual", "next_turn", "when_idle"].includes(stability.recovery_mode)) {
     errors.push("迁移恢复方式不合法");
@@ -4818,12 +4807,7 @@ function collectSettings() {
       conversation_stability: {
         ...state.settings.routing.conversation_stability,
         enabled: byId("stability-enabled").checked,
-        health_failure_threshold: Number(
-          byId("stability-failure-threshold").value,
-        ),
-        health_recheck_interval_seconds: Number(
-          byId("stability-recheck-interval").value,
-        ),
+        health_wait_seconds: Number(byId("stability-health-wait").value),
         recovery_mode: byId("stability-recovery-mode").value,
         preserve_tier_after_migration:
           byId("stability-preserve-tier").checked,

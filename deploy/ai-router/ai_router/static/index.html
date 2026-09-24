@@ -1163,12 +1163,8 @@
                   <input id="stability-preserve-tier" type="checkbox">
                 </label>
                 <label>
-                  连续健康失败阈值
-                  <input id="stability-failure-threshold" type="number" min="1" max="5" step="1">
-                </label>
-                <label>
-                  复检间隔（秒）
-                  <input id="stability-recheck-interval" type="number" min="0" max="60" step="1">
+                  故障切换等待（秒）
+                  <input id="stability-health-wait" type="number" min="0" max="120" step="1">
                 </label>
                 <label class="wide">
                   迁移后恢复方式
@@ -1179,7 +1175,9 @@
                   </select>
                 </label>
                 <p class="wide field-hint">
-                  仅健康异常进入复检；上下文、模态、授权、协议和工具能力不兼容仍立即迁移。
+                  健康异常时在设定时间内复检，恢复即继续原模型，超时再选择可用模型。
+                  手动恢复时，效率模式也保持当前可用模型，不因速度变化或原模型恢复而换回。
+                  上下文、模态、授权、历史和工具能力不兼容仍立即重新选择。
                 </p>
               </div>
             </section>

@@ -1,0 +1,42 @@
+# Verified 196K single-slot backend; activation is a revision-checked runtime override.
+id: ivan-v10016-bonsai2-196k
+public_model: siyuan/bonsai2-v10016-196k
+provider_model: bonsai2-27b-ternary-prism
+api_base: http://100.120.143.109:18090/v1
+node: ivan-v10016
+role: responder
+tier: local-general
+tier_rank: 20
+modalities: [text]
+tasks: [general, code, batch, long-context]
+safe_context_tokens: 196608
+configured_context_tokens: 196608
+max_concurrency: 1
+backend_type: llama_cpp
+health_url: http://100.120.143.109:18090/health
+load_url: http://100.120.143.109:18090/slots
+enabled: false
+auto_candidate: false
+capabilities:
+  chat: true
+  responses: adapter
+  tools: parallel
+  tool_choice: true
+  tool_choice_modes: [auto, none, required, function]
+  structured_output: [json_object, json_schema]
+  streaming: true
+  output_token_limit: true
+  validation_status: live-tools-parallel-json-stream-roundtrip-text-only
+  validated_at: "2026-09-23"
+quality: {}
+metadata:
+  history_contract:
+    accepts_reasoning_content: true
+    preserve_thinking: true
+  service_unit: v100-prism.service
+  model_artifact: Ternary-Bonsai-2-27B-PQ2_0.gguf
+  quantization: PQ2_0
+  kv_cache: Q8
+  device_label: V100 16G
+  context_status: live-195206-input-retrieval-validated
+  quality_status: unbenchmarked
