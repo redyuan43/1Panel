@@ -10,6 +10,12 @@
 
 # AI Router 当前状态
 
+## 2026-09-24 WorkBuddy 本轮提示词优化（隔离 worktree 实验）
+
+- 从 ivan 的 `/opt/WorkBuddy/resources/app.asar` 只读核对了 WorkBuddy 增强提示词的两段模板及只发送输入框文本的处理器；实验使用该版本的原模板。
+- 控制台新增默认关闭的 `routing.prompt_enhancement.enabled`，只对 `workbuddy-public` 与 `workbuddy-qwen36-shared` 生效。选路及历史身份沿用原文，目标模型确定后最多对当前文本进行一次独立优化调用，模型可见请求副本使用合格改写；长文本、代码、边界不清、目标不支持输出上限或优化失败均发送原文。
+- 额外调用独立计入账号速率与云端预算；付费云端目标在优化前先为主请求保留预算余量，余量不足时跳过优化。审计只记录状态、原因、长度、token 与目标，不记录正文。本节记录隔离工作区实现；尚未部署或激活生产开关，真实请求结果以本次验收报告为准。
+
 ## 2026-09-24 nx1 视觉启用后的专用路由校准（已部署）
 
 - 08:26:51 的 Home Assistant 请求 `21c1561d55e841a4bab22199d313b5b9` 同时包含图片和 `response_format=json_object`，Router 在候选检查中因 nx1 端点仅登记 `text` 返回 422 `no_compatible_model`，没有调用 nx1。这个请求发生在 nx1 视觉服务 08:27:38 重启之前。

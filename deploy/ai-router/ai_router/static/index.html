@@ -1059,6 +1059,22 @@
 
             <section class="settings-band policy-stage-card">
               <div class="settings-title">
+                <h3>WorkBuddy 提示词优化（实验）</h3>
+                <span>Prompt enhancement</span>
+              </div>
+              <div class="control-grid">
+                <label class="toggle-row wide">
+                  <span>每轮自动优化当前用户文本</span>
+                  <input id="prompt-enhancement-enabled" type="checkbox">
+                </label>
+                <p class="wide field-hint">仅限 WorkBuddy 账号。每轮可能额外调用当前目标模型；历史、附件与图片不参与。长文本、代码、目标不支持固定输出上限或优化失败时发送原文，改写不会显示在 WorkBuddy 输入框。</p>
+              </div>
+            </section>
+
+            <div class="policy-flow-connector"></div>
+
+            <section class="settings-band policy-stage-card">
+              <div class="settings-title">
                 <h3>任务评估</h3>
                 <span>Evaluation and compaction</span>
               </div>

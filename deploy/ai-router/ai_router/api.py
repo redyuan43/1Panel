@@ -86,6 +86,7 @@ from .prompt_directives import (
     resolve_conversation_directive,
     sanitize_prompt_directives,
 )
+from .prompt_enhancement import CLIENT_IDS as PROMPT_ENHANCEMENT_CLIENT_IDS, EnhancementSession
 from .protocol import (
     move_workbuddy_dynamic_context,
     normalize_llama_tool_schemas,
@@ -803,6 +804,17 @@ async def _proxy(request: Request, api_kind: str) -> Response:
         disclosure_mode=authenticated.policy.disclosure_mode,
     )
     request.state.route_trace = trace
+    enhancement_session = (
+        EnhancementSession(
+            received_body, api_kind,
+            client_id=authenticated.policy.id,
+            policy=authenticated.policy,
+            request_id=request_id,
+        )
+        if authenticated.policy.id in PROMPT_ENHANCEMENT_CLIENT_IDS
+        and current.settings.section("routing").get("prompt_enhancement", {}).get("enabled") is True
+        else None
+    )
     if current_timings() is not None:
         trace.payload.setdefault("observation", {})["router_phase_timings"] = current_timings()
     await _save_request_trace(current, trace)
@@ -1707,6 +1719,7 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     projection_revision=effective_revision,
                     admission_fallback=admission_busy_seen,
                     admission_deadline=admission_window.deadline,
+                    enhancement_session=enhancement_session,
                 )
                 capsule = capsule or pre_route_capsule
                 persistence_body = _history_body_for_persistence(
@@ -3126,6 +3139,7 @@ async def _acquire_route_capacity(
     projection_revision: str | None = None,
     admission_fallback: bool = False,
     admission_deadline: float | None = None,
+    enhancement_session: EnhancementSession | None = None,
 ) -> tuple[RouteDecision, dict[str, Any], Any | None, Any | None, int, float]:
     identity = identity or IdentityProfile.from_settings(
         current.settings.section("identity")
@@ -3614,6 +3628,15 @@ async def _acquire_route_capacity(
                 await pool.release(request_id, trace)
             continue
         capsule = capsule or carried_capsule
+        if enhancement_session is not None:
+            routed_body = await enhancement_session.apply(
+                current, decision, routed_body,
+                count_chat=lambda value: count_tokens(current, value, "chat"),
+                count_routed=lambda value: count_tokens(
+                    current, identity.inject(value, api_kind), api_kind,
+                ),
+                trace=trace,
+            )
         if getattr(current, "history_memory", None) is not None:
             from .memory_recall import prepare_recall
             projection, recall_reason = await prepare_recall(
