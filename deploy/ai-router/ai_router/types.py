@@ -460,6 +460,7 @@ class ClientPolicy:
     allow_compaction: bool = False
     disclosure_mode: str = "internal"
     media_models: tuple[str, ...] = ()
+    media_limits: dict[str, Any] = field(default_factory=dict)
     routing_mode: str = "inherit"
     local_only: bool = False
     history_owner_confirmed: bool = False

@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "comfy_url": "http://127.0.0.1:8188",
+  "recipes": [
+    {
+      "id": "qwen21-t2i-landscape-candidate-v1",
+      "model": "qwen-image-2.1",
+      "mode": "t2i",
+      "graph_file": "/opt/1panel/image-adapter/recipes/qwen21-t2i-nx5-v1.api.json",
+      "bindings": {
+        "prompt": [
+          [
+            "4",
+            "prompt"
+          ]
+        ],
+        "seed": [
+          [
+            "5",
+            "seed"
+          ]
+        ],
+        "width": [
+          [
+            "8",
+            "width"
+          ]
+        ],
+        "height": [
+          [
+            "8",
+            "height"
+          ]
+        ]
+      },
+      "output_node": "7",
+      "aspect_ratios": {
+        "auto": [
+          1024,
+          1024
+        ],
+        "square": [
+          1024,
+          1024
+        ],
+        "landscape": [
+          1280,
+          720
+        ]
+      },
+      "backgrounds": [
+        "auto",
+        "opaque"
+      ]
+    },
+    {
+      "id": "qwen21-edit-nx5-v1",
+      "model": "qwen-image-2.1",
+      "mode": "i2i",
+      "graph_file": "/opt/1panel/image-adapter/recipes/qwen21-edit-nx5-v1.api.json",
+      "bindings": {
+        "prompt": [
+          [
+            "4",
+            "prompt"
+          ]
+        ],
+        "seed": [
+          [
+            "5",
+            "seed"
+          ]
+        ],
+        "images": [
+          [
+            "8",
+            "image"
+          ]
+        ]
+      },
+      "output_node": "7",
+      "aspect_ratios": {
+        "auto": [
+          1024,
+          1024
+        ]
+      },
+      "backgrounds": [
+        "auto",
+        "opaque"
+      ]
+    }
+  ]
+}

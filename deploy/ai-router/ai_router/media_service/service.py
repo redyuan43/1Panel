@@ -27,6 +27,9 @@ from .contracts import (
 )
 from .providers import CodexProvider, H3Provider, QwenProvider
 from .storage import MediaStore
+from .image_direct import DirectGeneration, SINGLE, compatible
+from ..media_policy import validate_media_limits
+from ..image_generation import validate_snapshot, cloud_allowed, route
 from .video_review import VideoReviewer, technical_review
 from .video_workflows import (
     build_prompt_package,
@@ -68,7 +71,7 @@ class _LocalStream:
 
 
 class MediaService:
-    def __init__(self, store: MediaStore, *, client=None, codex=None, qwen=None, h3=None):
+    def __init__(self, store: MediaStore, *, client=None, codex=None, qwen=None, h3=None, executors=None):
         self.store = store
         self.client = client or httpx.AsyncClient(trust_env=False, follow_redirects=False)
         self.codex = codex or CodexProvider()
@@ -83,6 +86,7 @@ class MediaService:
         self.reviewer = VideoReviewer(self.client)
         from .creative import CreativeService
         self.creative = CreativeService(self)
+        self.direct = DirectGeneration(self, executors)
 
     def lock(self, job_id: str):
         return self.locks.setdefault(job_id, asyncio.Lock())
@@ -102,7 +106,7 @@ class MediaService:
         self.runner = asyncio.create_task(self._run())
 
     async def close(self):
-        tasks = [self.runner, self.image_task, *self.video_tasks.values(), *self.creative.tasks.values()]
+        tasks = [self.runner, self.image_task, *self.video_tasks.values(), *self.creative.tasks.values(), *self.direct.tasks.values()]
         for task in tasks:
             if task:
                 task.cancel()
@@ -125,13 +129,16 @@ class MediaService:
 
     async def tick(self):
         await self.creative.tick()
+        await self.direct.tick()
         for job in self.store.active():
             if job["kind"] == "image":
+                if job.get("execution_kind") == SINGLE:
+                    continue
                 if self.image_task and not self.image_task.done():
                     continue
                 if job.get("next_reconcile_at", 0) > time.time():
                     continue
-                if job["status"] == "queued" and time.time() - job["created_at"] > self.store.settings()["queue_timeout"]:
+                if job["status"] == "queued" and time.time() - job["created_at"] > job.get("image_generation", {}).get("policy", {}).get("queue_timeout", self.store.settings()["queue_timeout"]):
                     self.store.update(job["id"], status="failed", error={"code": "media_queue_timeout", "message": "Queue wait expired."})
                     continue
                 if job["status"] != "queued" and not job["provider_state"].get("thread_id") and not job["provider_state"].get("task_id"):
@@ -206,18 +213,41 @@ class MediaService:
                 pass
         return result
 
-    def submit(self, owner: str, kind: str, body: dict, idem: str, request_id: str, *, edit=False):
+    def submit(self, owner: str, kind: str, body: dict, idem: str, request_id: str, *, edit=False, policy=None, generation=None):
         settings = self.store.settings()
-        if not settings["enabled"] or not settings[kind + "s_enabled"]:
-            raise MediaError("media_disabled", "Media generation is disabled.", 503)
+        direct = False
         if kind == "image":
             body = image_request(body, edit)
-            if body["model"] == "siyuan-image" and not settings["codex_ready"]:
+            if not isinstance(idem, str) or not 1 <= len(idem) <= 128:
+                raise MediaError("invalid_idempotency_key", "Invalid idempotency key.")
+            if (existing := self.store.replay(owner, kind, body, idem)) is not None:
+                return existing
+            policy = validate_media_limits(policy or {})
+            if generation is not None:
+                generation = validate_snapshot(generation)
+                if not generation["policy"]["enabled"]:
+                    raise MediaError("media_disabled", "Image generation is disabled by policy.", 503)
+                planned = {"request": body, "image_generation": generation, "media_policy": policy}
+                direct = route(planned) != "cloud_only"
+                if not direct and not cloud_allowed(planned):
+                    raise MediaError("media_cloud_forbidden", "Image cloud generation is not permitted.", 403)
+                selected = [item for item in self.direct.executors if item["id"] in generation["policy"]["local_resources"]]
+                if direct and selected and not any(compatible({**item, "enabled": True, "qualified": True}, body, kind) for item in selected):
+                    raise MediaError("media_no_compatible_executor", "No configured image recipe supports this request.", 422)
+            else:
+                direct = body["model"] == "qwen-image-2.1"
+                if direct and not self.direct.candidates(body, kind):
+                    raise MediaError("media_no_compatible_executor", "No qualified image executor.", 503)
+            if not direct and not policy.get("allow_cloud", True):
+                raise MediaError("media_cloud_forbidden", "Account does not allow cloud images.", 403)
+            if not direct and body["model"] == "siyuan-image" and not settings["codex_ready"]:
                 raise MediaError("codex_not_verified", "Codex media isolation has not been verified.", 503)
         else:
             body = video_request(body)
             if not settings["h3_ready"]:
                 raise MediaError("h3_not_verified", "H3 media contract has not been verified.", 503)
+        if not settings["enabled"] or (not (kind == "image" and generation is not None) and not settings[kind + "s_enabled"]):
+            raise MediaError("media_disabled", "Media generation is disabled.", 503)
         self.space()
         if not isinstance(idem, str) or not 1 <= len(idem) <= 128:
             raise MediaError("invalid_idempotency_key", "Idempotency key must contain 1-128 characters.")
@@ -236,7 +266,11 @@ class MediaService:
                     "Duration ladder cannot safely split this prompt; use quality_gate "
                     "so it can remain one continuous 15-second generation.",
                 )
-        job = self.store.create(owner, kind, body, idem, request_id, settings["queue_limit"])[0]
+        job = self.store.create(owner, kind, body, idem, request_id,
+                                generation["policy"]["queue_limit"] if generation else settings["queue_limit"],
+                                policy=policy if kind == "image" else None,
+                                execution_kind=SINGLE if direct else None,
+                                image_generation=generation if kind == "image" else None)[0]
         if kind == "video" and workflow_mode(body) != "legacy_pipeline" and not job.get("stages"):
             job = self.store.update(
                 job["id"],
@@ -261,11 +295,16 @@ class MediaService:
             state = {**value, "provider": provider}
             self.store.update(job_id, provider_state=state)
 
+        image_policy = original.get("image_generation", {}).get("policy", {})
+        paid_limit = image_policy.get("daily_paid_images", self.store.settings()["daily_paid_images"])
         try:
+            if (not original.get("media_policy", {}).get("allow_cloud", True)
+                    or image_policy.get("allow_cloud") is False):
+                raise MediaError("media_cloud_forbidden", "Cloud generation is not permitted.", 403)
             self.store.update(job_id, status="cancelling" if original.get("cancel_requested") else "in_progress")
             async with timeout(self.store.settings()["image_timeout"]):
                 if provider == "qwen":
-                    self.store.reserve_paid(job_id, self.store.settings()["daily_paid_images"])
+                    self.store.reserve_paid(job_id, paid_limit)
                     result = await self.qwen.generate(body, state, checkpoint, directory)
                 else:
                     if original.get("cancel_requested"):
@@ -281,12 +320,13 @@ class MediaService:
                         if self.store.get(job_id).get("cancel_requested"):
                             raise MediaError("media_cancelled", "Image cancellation was requested.", 409)
                         settings = self.store.settings()
-                        if not settings["paid_fallback"]:
+                        if (body["model"] != "siyuan-image" or body.get("execution") == "local"
+                                or not image_policy.get("paid_fallback", settings["paid_fallback"])):
                             raise
                         if len(body["images"]) > 3 or body["background"] == "transparent":
                             raise MediaError("fallback_incompatible", "No compatible quota fallback for this request.", 422)
                         provider = "qwen"
-                        self.store.reserve_paid(job_id, settings["daily_paid_images"])
+                        self.store.reserve_paid(job_id, paid_limit)
                         checkpoint({})
                         self.store.update(job_id, fallback_applied=True)
                         result = await self.qwen.generate(body, state, checkpoint, directory)
@@ -295,6 +335,11 @@ class MediaService:
                 if data is None:
                     data = await self._image_url(result["url"])
                 info = image_info(data)
+                ratio = body["aspect_ratio"]
+                width, height = info["width"], info["height"]
+                if ((ratio == "square" and width != height) or (ratio == "portrait" and width >= height)
+                        or (ratio == "landscape" and width <= height)):
+                    raise MediaError("image_requirements_unmet", "Generated image aspect ratio does not match the request.", 422)
                 if body["background"] == "transparent" and not info["transparent"]:
                     raise MediaError("image_requirements_unmet", "Generated image is not transparent.", 422)
                 output = await self.archive(job_id, "out_" + job_id, data=data, **info)
@@ -309,6 +354,18 @@ class MediaService:
             current = self.store.get(job_id)
             self.store.update(job_id, status="cancelling" if current.get("cancel_requested") else "reconciling",
                               error={"code": "media_outcome_unknown", "message": "Checking the original task; it will not be resubmitted."})
+        except QuotaExceeded as exc:
+            current = self.store.get(job_id)
+            if (original.get("image_generation") and route(original) == "local_first"
+                    and not current.get("cancel_requested") and provider == "codex"):
+                # The provider reported a definite allowance rejection, not an
+                # unknown outcome. Keep the receipt for audit and wait locally.
+                self.store.update(job_id, status="queued", execution_kind=SINGLE,
+                                  cloud_unavailable=True, cloud_receipt=state, provider_state={},
+                                  provider=None, routing_reason="cloud_quota_local_queued", error=None)
+            else:
+                self.store.update(job_id, status="cancelled" if current.get("cancel_requested") else "failed",
+                                  error={"code": exc.code, "message": str(exc)})
         except MediaError as exc:
             if (
                 provider == "qwen"
@@ -1688,6 +1745,8 @@ class MediaService:
 
     async def cancel_image(self, job_id: str, owner: str | None):
         job = self.store.get(job_id, owner)
+        if job["kind"] == "image" and job.get("execution_kind") == SINGLE:
+            return await self.direct.cancel(job)
         if job["kind"] != "image":
             raise MediaError("media_not_found", "Image task was not found.", 404)
         if job["status"] in TERMINAL:
@@ -1750,6 +1809,16 @@ class MediaService:
             result.setdefault("workflow_mode", workflow_mode(job["request"]))
             result.setdefault("creative_profile", job["request"].get("creative_profile", "auto"))
             result.setdefault("aspect_ratio", job["request"].get("aspect_ratio", "16:9"))
+        if job["kind"] == "image" and job.get("image_generation"):
+            result["delivery"] = job.get("delivery", {"status": "not_reported"})
+            result["policy_revision"] = job["image_generation"]["revision"]
+            result["policy_fingerprint"] = job["image_generation"]["fingerprint"]
+            result["execution"] = "local" if job.get("execution_kind") == SINGLE else "cloud"
+            result["progress"] = job.get("progress", 100 if job["status"] == "completed" else 0)
+            if internal:
+                result["image_generation"] = job["image_generation"]
+                result["routing_reason"] = job.get("routing_reason")
+                result["timing"] = job.get("timing", {})
         result["object"] = "image" if job["kind"] == "image" else "video"
         if internal:
             result.update({field: job.get(field) for field in ("owner", "provider", "provider_state", "request_id", "sync_error", "provider_errors")})

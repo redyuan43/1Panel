@@ -183,11 +183,19 @@ class CodexProvider:
         rpc = CodexRPC()
         try:
             await rpc.start()
-            account = await rpc.call("account/read", {"refreshToken": False})
+            try:
+                account = await rpc.call("account/read", {"refreshToken": False})
+            except QuotaExceeded as exc:
+                if state.get("submitted"):
+                    raise UnknownOutcome("Cannot verify the original task while account reads are limited.") from exc
+                raise
             if (account.get("account") or {}).get("type") not in {"chatgpt", "chatgptAuthTokens"}:
                 raise MediaError("codex_login_required", "ChatGPT login is required.", 503)
             if state.get("thread_id"):
-                result = await rpc.call("thread/read", {"threadId": state["thread_id"], "includeTurns": True})
+                try:
+                    result = await rpc.call("thread/read", {"threadId": state["thread_id"], "includeTurns": True})
+                except QuotaExceeded as exc:
+                    raise UnknownOutcome("Original task query is limited; its outcome is still unknown.") from exc
                 thread = self._owned_thread(result, state["thread_id"], cwd)
                 turns = thread.get("turns", [])
                 if not isinstance(turns, list) or any(not isinstance(turn, dict) for turn in turns):
@@ -349,11 +357,15 @@ class CodexProvider:
 
     @staticmethod
     def _result(item: dict, turn_error: dict | None = None) -> dict:
-        if ((item.get("failure") or {}).get("type") == "usageLimitExceeded"
+        failure = item.get("failure")
+        failure = failure if isinstance(failure, dict) else {}
+        if (failure.get("type") == "usageLimitExceeded"
                 or isinstance(turn_error, dict) and turn_error.get("codexErrorInfo") == "usageLimitExceeded"):
             raise QuotaExceeded()
+        if failure.get("code") == "moderation_blocked":
+            raise MediaError("image_moderation_blocked", "The image provider rejected this generation under its content policy.", 422)
         if item.get("status") != "completed" or not item.get("result"):
-            raise MediaError("image_generation_failed", "Image generation failed.", 502)
+            raise MediaError("image_generation_failed", "Image provider failed without a structured reason; retain this task ID for diagnosis.", 502)
         try:
             data = base64.b64decode(item["result"], validate=True)
         except (ValueError, TypeError) as exc:

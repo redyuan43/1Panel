@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import json
 import os
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -11,6 +12,17 @@ from fastapi.responses import FileResponse, JSONResponse
 from .contracts import MAX_UPLOAD_BYTES, MediaError
 from .service import MediaService
 from .storage import MediaStore
+from ..media_policy import validate_media_limits
+from ..image_generation import validate_snapshot
+
+
+def image_context(request):
+    raw = request.headers.get("x-image-generation")
+    try:
+        return (validate_media_limits(json.loads(request.headers.get("x-media-policy", "{}"))),
+                validate_snapshot(json.loads(raw)) if raw else None)
+    except (ValueError, TypeError) as exc:
+        raise MediaError("invalid_image_policy", "Invalid trusted image policy.") from exc
 
 
 def create_app(service: MediaService | None = None, *, run_worker=True):
@@ -75,7 +87,49 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
 
     @app.get("/options")
     async def options(request: Request):
-        return await current(request).options(request.headers.get("x-media-models", "").split(","))
+        result = await current(request).options(request.headers.get("x-media-models", "").split(","))
+        account, generation = image_context(request)
+        if generation:
+            policy = generation["policy"]
+            result["image_generation"] = {key: policy[key] for key in
+                ("enabled", "default_route", "when_busy", "when_unavailable", "queue_limit", "queue_timeout")}
+            result["image_generation"].update(revision=generation["revision"],
+                allow_cloud=policy["allow_cloud"] and account.get("allow_cloud", True),
+                executions=["local", "cloud"] if policy["allow_cloud"] and account.get("allow_cloud", True) else ["local"])
+        return result
+
+    @app.get("/image-resources")
+    async def image_resources(request: Request):
+        _, admin = principal(request)
+        if not admin:
+            raise MediaError("media_forbidden", "Administrator access required.", 403)
+        _, generation = image_context(request)
+        return {"data": await current(request).direct.resources(generation)}
+
+    @app.post("/jobs/{job_id}/delivery")
+    async def image_delivery(job_id: str, request: Request):
+        owner, admin = principal(request)
+        job = current(request).store.get(job_id, None if admin else owner)
+        value = await request.json()
+        output = job.get("output", {})
+        if (job["kind"] != "image" or job["status"] != "completed" or not isinstance(value, dict)
+                or set(value) != {"artifact_id", "sha256"} or value["artifact_id"] != output.get("id")
+                or value["sha256"] != output.get("sha256")):
+            raise MediaError("invalid_delivery_receipt", "Delivery receipt does not match this image.", 409)
+        delivery = {"status": "client_reported_download", **value}
+        if job.get("delivery") != delivery:
+            current(request).store.update(job_id, delivery=delivery)
+        return {"id": job_id, "delivery": delivery}
+
+    @app.get("/jobs/{job_id}/events")
+    async def image_events(job_id: str, request: Request, after: int = 0):
+        _, admin = principal(request)
+        if not admin:
+            raise MediaError("media_forbidden", "Administrator access required.", 403)
+        job = current(request).store.get(job_id)
+        if job["kind"] != "image":
+            raise MediaError("invalid_media_kind", "Image events only.", 400)
+        return current(request).store.image_events(job_id, after=max(after, 0))
 
     @app.post("/jobs/{kind}")
     async def submit(kind: str, request: Request):
@@ -83,6 +137,9 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
         if kind not in {"image", "video"}:
             raise MediaError("invalid_media_kind", "Unknown media kind.")
         value = await request.json()
+        if not isinstance(value, dict):
+            raise MediaError("invalid_media_parameters", "Expected an object.")
+        policy, generation = image_context(request) if kind == "image" else (None, None)
         model = value.get("model", "siyuan-image" if kind == "image" else "siyuan-video")
         allowed = request.headers.get("x-media-models", "").split(",")
         if not admin and model not in allowed:
@@ -90,6 +147,7 @@ def create_app(service: MediaService | None = None, *, run_worker=True):
         job = current(request).submit(
             owner, kind, value, request.headers.get("idempotency-key", uuid4().hex),
             request.headers.get("x-request-id", uuid4().hex), edit=request.query_params.get("edit") == "true",
+            policy=policy, generation=generation,
         )
         return JSONResponse(current(request).public(job, internal=admin), status_code=202)
 

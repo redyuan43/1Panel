@@ -12,8 +12,8 @@ from typing import Any
 from PIL import Image
 
 
-MODELS = ("siyuan-image", "siyuan-video", "qwen-image-3.0-pro")
-PUBLIC_MODELS = MODELS[:2]
+MODELS = ("qwen-image-2.1", "siyuan-image", "siyuan-video", "qwen-image-3.0-pro")
+PUBLIC_MODELS = ("siyuan-image", "siyuan-video")
 TERMINAL = {"completed", "failed", "cancelled"}
 USE_CASES = ("photo", "product", "ui", "infographic", "illustration", "logo")
 RATIOS = ("auto", "square", "landscape", "portrait")
@@ -105,14 +105,14 @@ def decode_asset(value: dict, *, image: bool = False) -> bytes:
 
 
 def image_request(value: dict, edit: bool = False) -> dict:
-    allowed = {"model", "prompt", "use_case", "aspect_ratio", "background", "response_format", "n", "images"}
+    allowed = {"model", "prompt", "use_case", "aspect_ratio", "background", "response_format", "n", "images", "execution"}
     if not isinstance(value, dict) or set(value) - allowed:
         raise MediaError("invalid_media_parameters", "Unsupported image parameters.")
     result = {
         "model": "siyuan-image", "use_case": "photo", "aspect_ratio": "auto",
         "background": "auto", "response_format": "b64_json", "n": 1, "images": [], **value,
     }
-    if result["model"] not in ("siyuan-image", "qwen-image-3.0-pro"):
+    if result["model"] not in ("siyuan-image", "qwen-image-3.0-pro", "qwen-image-2.1"):
         raise MediaError("model_not_found", "Image model is not available.", 404)
     if not isinstance(result.get("prompt"), str) or not 1 <= len(result["prompt"].strip()) <= 16000:
         raise MediaError("invalid_prompt", "Prompt must contain 1-16000 characters.")
@@ -122,6 +122,11 @@ def image_request(value: dict, edit: bool = False) -> dict:
     ):
         if result[name] not in choices or (name == "n" and type(result[name]) is not int):
             raise MediaError("invalid_media_parameters", f"Invalid {name}.")
+    if "execution" in result and result["execution"] not in ("local", "cloud"):
+        raise MediaError("invalid_media_parameters", "execution must be local or cloud.")
+    if ((result["model"] == "qwen-image-2.1" and result.get("execution") == "cloud")
+            or (result["model"] == "qwen-image-3.0-pro" and result.get("execution") == "local")):
+        raise MediaError("invalid_media_parameters", "Model and execution channel conflict.")
     images = result["images"]
     if not isinstance(images, list) or len(images) > 5 or (edit and not images) or (not edit and images):
         raise MediaError("invalid_reference_images", "Editing requires 1-5 images; generation requires none.")
