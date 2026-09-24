@@ -1328,6 +1328,13 @@ async def _proxy(request: Request, api_kind: str) -> Response:
 
         evaluation = await current.evaluator.evaluate(
             effective_body,
+            classification_body=(
+                identity_input_body
+                if api_kind == "chat"
+                and authenticated.policy.id
+                in {"workbuddy-public", "workbuddy-qwen36-shared"}
+                else effective_body
+            ),
             headers=header_values,
             api_kind=api_kind,
             prompt_tokens=prompt_tokens,

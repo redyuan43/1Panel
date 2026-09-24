@@ -298,3 +298,49 @@ def test_actual_send_uses_projection_without_mutating_history_body(setup, kind, 
         finally:
             await current.internal_client.aclose()
     asyncio.run(scenario())
+@pytest.mark.parametrize('mode', ['seed', 'update', 'continuation', 'responses'])
+def test_catalog_is_not_used_as_recall_question(setup, mode):
+    from ai_router.workbuddy_history import seed_tools, reconcile_tools
+    from ai_router.memory_sources import visible_message
+    raw = {'model': 'siyuan/auto', 'messages': [
+        {'role': 'system', 'content': 'Rules'},
+        {'role': 'user', 'content': 'E_MEMORY_782 配置在哪里？'}],
+        'tools': [{'type': 'function', 'function': {'name': 'Skill',
+                   'description': 'Available image skills', 'parameters': {'type': 'object'}}}]}
+    body, report = seed_tools(raw, 'workbuddy-public')
+    if mode in ('update', 'continuation'):
+        fresh = copy.deepcopy(raw)
+        fresh['messages'] += [
+            {'role': 'assistant', 'content': None, 'tool_calls': [
+                {'id': 'c1', 'type': 'function', 'function': {'name': 'Skill', 'arguments': '{}'}}]},
+            {'role': 'tool', 'tool_call_id': 'c1', 'content': 'tool output'}]
+        if mode == 'update':
+            fresh['tools'][0]['function']['description'] = 'Available browser skills'
+        body, _ = reconcile_tools(fresh, 'workbuddy-public', raw, body, report['positions'])
+    kind = 'responses' if mode == 'responses' else 'chat'
+    if kind == 'responses':
+        body = {'input': body['messages']}
+    original = copy.deepcopy(body)
+    queries = []
+    search = setup[0].history_memory.index.search
+    def capture(client, query, **kwargs):
+        queries.append(query)
+        return search(client, query, **kwargs)
+    setup[0].history_memory.index.search = capture
+    async def scenario():
+        projection, reason = await prepare(setup, body, kind)
+        assert reason == 'prepared'
+        assert queries == ['E_MEMORY_782 配置在哪里？']
+        assert body == original
+        messages = projection.body['input' if kind == 'responses' else 'messages']
+        question = next(i for i, m in enumerate(messages) if visible_message(m)[1] == queries[0])
+        assert RECALL_MARKER in messages[question - 1]['content']
+        assert messages[:question - 1] + messages[question:] == original['input' if kind == 'responses' else 'messages']
+    asyncio.run(scenario())
+
+
+def test_catalog_only_has_no_recall_query(setup):
+    from ai_router.workbuddy_history import TOOLS_MARKER
+    body = {'messages': [{'role': 'user', 'content': TOOLS_MARKER + '\n{}\n</workbuddy_tool_catalog>'}]}
+    projection, reason = asyncio.run(prepare(setup, body))
+    assert projection is None and reason == 'no_query'

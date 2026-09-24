@@ -11,6 +11,7 @@ from .memory_index import MemorySource
 
 
 RECALL_MARKER = "<router-history-recall>"
+WORKBUDDY_TOOL_CATALOG_MARKER = "<workbuddy_tool_catalog>"
 CAPSULE_MARKERS = ("Conversation migration capsule.", "<compacted-summary>", RECALL_MARKER, TOOL_SUMMARY_PREFIX)
 _SECRETS = (
     re.compile(r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----", re.S),
@@ -50,6 +51,10 @@ def visible_message(item: dict) -> tuple[str, str, str]:
     elif role in {"user", "assistant", "tool"}:
         text = visible_text(item.get("content"))
     else:
+        return "", "", ""
+    # Router-generated catalogs are context, never a user query or recall source.
+    if (text.startswith(WORKBUDDY_TOOL_CATALOG_MARKER + "\n")
+            and text.endswith("\n</workbuddy_tool_catalog>")):
         return "", "", ""
     if any(marker in text for marker in CAPSULE_MARKERS):
         return "", "", ""

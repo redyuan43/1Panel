@@ -10,12 +10,124 @@ from contextlib import closing
 
 from .content_audit import ArchiveReader
 from .reasoning_fields import canonical_reasoning_fields
+from .memory_sources import WORKBUDDY_TOOL_CATALOG_MARKER
 from .prefix_break import stage_bodies
-from .protocol import move_workbuddy_dynamic_context, _prepend_workbuddy_dynamic_context, stabilize_workbuddy_tools
+from .protocol import (move_workbuddy_dynamic_context, _prepend_workbuddy_dynamic_context,
+                       stabilize_workbuddy_tools, _WORKBUDDY_DYNAMIC_TOOL_DESCRIPTIONS)
 
 PREFIX_IDENTITY_VERSION = 2
 VERSION = 1
 STAGE = "workbuddy_history_preserved"
+TOOLS_VERSION = 2
+TOOLS_MARKER = WORKBUDDY_TOOL_CATALOG_MARKER
+
+
+def prepare_tools(raw, client_id):
+    """Normalize only the catalog; never relocate an existing message."""
+    if client_id != "workbuddy-public" and not (
+        client_id == "workbuddy-qwen36-shared" and raw.get("model") == "siyuan/qwen36-shared"
+    ):
+        return None
+    messages = raw.get("messages")
+    tools = raw.get("tools")
+    if not isinstance(messages, list) or len(messages) < 2 or not isinstance(tools, list):
+        return None
+    pending = set()
+    for message in messages:
+        if not isinstance(message, dict) or TOOLS_MARKER in json.dumps(message, ensure_ascii=False):
+            return None
+        role = message.get("role")
+        if role == "assistant" and message.get("tool_calls"):
+            if pending:
+                return None
+            calls = message["tool_calls"]
+            if not isinstance(calls, list) or any(not isinstance(c, dict) or not c.get("id") for c in calls):
+                return None
+            pending = {c["id"] for c in calls}
+            if len(pending) != len(calls):
+                return None
+        elif role == "tool":
+            if message.get("tool_call_id") not in pending:
+                return None
+            pending.remove(message["tool_call_id"])
+        elif pending:
+            return None
+    if pending:
+        return None
+    value = copy.deepcopy(raw)
+    catalog = {}
+    names = []
+    for tool in value["tools"]:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if (not isinstance(function, dict) or tool.get("type") != "function"
+                or not isinstance(function.get("name"), str) or not function["name"]):
+            return None
+        name = function["name"]
+        names.append(name)
+        if name in _WORKBUDDY_DYNAMIC_TOOL_DESCRIPTIONS:
+            description = function.get("description")
+            if not isinstance(description, str):
+                return None
+            catalog[name] = description
+            function["description"] = _WORKBUDDY_DYNAMIC_TOOL_DESCRIPTIONS[name]
+    if not catalog or len(set(names)) != len(names):
+        return None
+    # JSON preserves every description character and safely escapes delimiters.
+    block = TOOLS_MARKER + "\n" + json.dumps(catalog, ensure_ascii=False, sort_keys=True) + "\n</workbuddy_tool_catalog>"
+    return value, block
+
+
+def seed_tools(raw, client_id):
+    prepared = prepare_tools(raw, client_id)
+    if prepared is None:
+        return None
+    value, block = prepared
+    value["messages"].append({"role": "user", "content": block})
+    return value, {"version": TOOLS_VERSION, "status": "passed", "association": "new_baseline",
+                   "positions": list(range(len(raw["messages"]))), "history_preserved": True,
+                   "dynamic_update_appended": True, "model_history_prefix_unchanged": False}
+
+
+def reconcile_tools(raw, client_id, old_raw, old_body, positions):
+    fresh, prior = prepare_tools(raw, client_id), prepare_tools(old_raw, client_id)
+    if fresh is None or prior is None:
+        return None
+    value, block = fresh
+    old_normalized, old_block = prior
+    expected_tools = stabilize_workbuddy_tools(old_normalized, "chat", client_id=client_id)[0].get("tools")
+    previous_tools = stabilize_workbuddy_tools(old_body, "chat", client_id=client_id)[0].get("tools")
+    if previous_tools != expected_tools:
+        return None
+    previous, current = rendered_messages(old_raw), rendered_messages(raw)
+    history = old_body.get("messages", [])
+    n = len(previous)
+    if current[:n] != previous or not isinstance(positions, list) or len(positions) != n:
+        return None
+    if (any(type(i) is not int for i in positions) or positions != sorted(set(positions))
+            or not positions or positions[0] < 0 or positions[-1] >= len(history)):
+        return None
+    if rendered_messages({"messages": [history[i] for i in positions]}) != previous:
+        return None
+    extras = [m for i, m in enumerate(history) if i not in set(positions)]
+    if (not extras or extras[-1] != {"role": "user", "content": old_block}
+            or any(m.get("role") != "user" or not isinstance(m.get("content"), str)
+                   or not m["content"].startswith(TOOLS_MARKER + "\n")
+                   or not m["content"].endswith("\n</workbuddy_tool_catalog>") for m in extras)):
+        return None
+    value["messages"] = copy.deepcopy(history)
+    # Keep the verified archived prefix byte-for-byte. Unknown client fields
+    # may be model-visible to a current or future provider and therefore cannot
+    # be copied into preserved history without participating in the proof.
+    mapped = list(positions)
+    for message in raw["messages"][n:]:
+        mapped.append(len(value["messages"]))
+        value["messages"].append(copy.deepcopy(message))
+    if block != old_block:
+        value["messages"].append({"role": "user", "content": block})
+    return value, {"version": TOOLS_VERSION, "status": "passed", "association": "exact_raw_prefix",
+                   "positions": mapped, "history_preserved": True, "preserved_messages": len(history),
+                   "dynamic_update_appended": block != old_block, "model_history_prefix_unchanged": True,
+                   "tools_changed": previous_tools != stabilize_workbuddy_tools(value, "chat", client_id=client_id)[0].get("tools")}
 
 
 def rendered_messages(body):
@@ -24,7 +136,6 @@ def rendered_messages(body):
     keys = ("role", "content", "reasoning_content", "reasoning", "tool_calls", "tool_call_id", "name", "refusal", "audio")
     return [canonical_reasoning_fields({k: m[k] for k in keys if k in m})
             for m in body.get("messages", []) if isinstance(m, dict)]
-
 
 
 def encode(value):
@@ -53,7 +164,6 @@ def chain(body):
         digest = hashlib.sha256(digest + encode(message)).digest()
         result.append(digest.hex())
     return result
-
 
 
 def reconcile(raw, client_id, old_raw, old_body, old_positions=None):
@@ -125,7 +235,6 @@ def reconcile(raw, client_id, old_raw, old_body, old_positions=None):
         "tools_changed": stabilize_workbuddy_tools(old_body, "chat", client_id=client_id)[0].get("tools") != stabilize_workbuddy_tools(value, "chat", client_id=client_id)[0].get("tools")}
 
 
-
 class WorkBuddyHistory:
     def __init__(self, database_path, archive_path=None, key_path=None):
         self.database_path = str(database_path)
@@ -136,8 +245,8 @@ class WorkBuddyHistory:
         return ArchiveReader(self.archive_path, self.key_path)
 
     @staticmethod
-    def scope(client_id, model):
-        return hashlib.sha256(encode([client_id, model, VERSION, PREFIX_IDENTITY_VERSION])).hexdigest()
+    def scope(client_id, model, version=VERSION):
+        return hashlib.sha256(encode([client_id, model, version, PREFIX_IDENTITY_VERSION])).hexdigest()
 
     def record(self, trace, *, archive=None):
         if trace.get("status") != "succeeded" or trace.get("protocol") != "chat":
@@ -149,7 +258,7 @@ class WorkBuddyHistory:
         bodies = stage_bodies(archived)
         raw = bodies.get("after_directives")
         normalized = bodies.get(STAGE) or bodies.get("tools_stabilized")
-        if not raw or not normalized or not prepare(raw, client):
+        if not raw or not normalized:
             return
         # Legacy snapshots must pass the same conservation proof as new ones.
         checks = (archived.get("pipeline") or {}).get("checks", [])
@@ -158,43 +267,57 @@ class WorkBuddyHistory:
         history_check = next((c for c in checks if c.get("check") == "workbuddy_history"), {})
         if history_check.get("reorder_bypassed"):
             return
-        hashes = chain(prepare(raw, client)[1])
+        version = history_check.get("version", VERSION)
+        if version == TOOLS_VERSION:
+            if reconcile_tools(raw, client, raw, normalized, history_check.get("positions")) is None:
+                return
+            hashes = chain(raw)
+        else:
+            prepared = prepare(raw, client)
+            if version != VERSION or prepared is None:
+                return
+            hashes = chain(prepared[1])
         if len(hashes) < 2:
             return
         with closing(sqlite3.connect(self.database_path, timeout=2)) as db, db:
             db.execute("INSERT OR REPLACE INTO workbuddy_history VALUES(?,?,?,?,?,?)", (
-                trace["request_id"], self.scope(client, raw.get("model")), hashes[-1],
-                len(hashes), trace.get("completed_at") or time.time(), VERSION))
+                trace["request_id"], self.scope(client, raw.get("model"), version), hashes[-1],
+                len(hashes), trace.get("completed_at") or time.time(), version))
             db.execute("DELETE FROM workbuddy_history WHERE created_at<?", (time.time()-86400,))
             db.execute("DELETE FROM workbuddy_history WHERE request_id IN (SELECT request_id FROM workbuddy_history ORDER BY created_at DESC LIMIT -1 OFFSET 2048)")
 
     def restore(self, raw, client_id, *, reset=False):
         prepared = prepare(raw, client_id)
-        if prepared is None or reset:
+        tool_prepared = prepare_tools(raw, client_id)
+        if (prepared is None and tool_prepared is None) or reset:
             return None, {"status":"skipped", "association":"unconfirmed", "reason":"reset" if reset else "not_applicable"}
-        _, bare, _ = prepared
-        hashes = chain(bare)
+        bases = []
+        if tool_prepared is not None:
+            bases.append((TOOLS_VERSION, chain(raw)))
+        if prepared is not None:
+            bases.append((VERSION, chain(prepared[1])))
         with closing(sqlite3.connect(self.database_path, timeout=2)) as db:
             # Small metadata-only index; no archive scans on the request path.
             # Filter by the actual prefix before limiting results. A busy
             # account's long conversations must not hide a short exact match.
             rows = []
-            for offset in range(1, len(hashes), 200):
-                batch = hashes[offset:offset + 200]
-                marks = ",".join("?" for _ in batch)
-                rows.extend(db.execute(
-                    "SELECT request_id,prefix_hash,message_count,created_at "
-                    "FROM workbuddy_history WHERE scope=? AND created_at>? AND version=? "
-                    f"AND prefix_hash IN ({marks}) "
-                    "ORDER BY message_count DESC,created_at DESC,request_id DESC LIMIT 3",
-                    (self.scope(client_id, raw.get("model")), time.time()-86400, VERSION, *batch),
-                ).fetchall())
+            for version, hashes in bases:
+                for offset in range(1, len(hashes), 200):
+                    batch = hashes[offset:offset + 200]
+                    marks = ",".join("?" for _ in batch)
+                    rows.extend(row for row in db.execute(
+                        "SELECT request_id,prefix_hash,message_count,created_at,version "
+                        "FROM workbuddy_history WHERE scope=? AND created_at>? AND version=? "
+                        f"AND prefix_hash IN ({marks}) "
+                        "ORDER BY message_count DESC,created_at DESC,request_id DESC LIMIT 3",
+                        (self.scope(client_id, raw.get("model"), version), time.time()-86400, version, *batch),
+                    ).fetchall() if 2 <= row[2] <= len(hashes) and hashes[row[2]-1] == row[1])
         candidates = sorted(
-            (row for row in rows if 2 <= row[2] <= len(hashes) and hashes[row[2]-1] == row[1]),
+            rows,
             key=lambda row: (row[2], row[3], row[0]), reverse=True,
         )
         reader = None
-        for request_id, _, _, _ in candidates[:3]:
+        for request_id, _, _, _, version in candidates[:3]:
             reader = reader or self.reader()
             archived = reader.read(request_id)
             bodies = stage_bodies(archived)
@@ -203,11 +326,15 @@ class WorkBuddyHistory:
             if not old_raw or not old_body:
                 continue
             report = next((c for c in (archived.get("pipeline") or {}).get("checks", []) if c.get("check") == "workbuddy_history"), {})
-            result = reconcile(raw, client_id, old_raw, old_body, report.get("positions"))
+            reconcile_version = reconcile_tools if version == TOOLS_VERSION else reconcile
+            result = reconcile_version(raw, client_id, old_raw, old_body, report.get("positions"))
             if result:
                 value, evidence = result
                 evidence["previous_request_id"] = request_id
                 return value, evidence
+        seeded = seed_tools(raw, client_id)
+        if seeded is not None:
+            return seeded
         return None, {"status":"skipped", "association":"unconfirmed", "reason":"no_verified_raw_prefix"}
 
     async def apply(self, raw, client_id, *, reset=False):

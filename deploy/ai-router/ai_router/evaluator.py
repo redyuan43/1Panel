@@ -48,6 +48,7 @@ class TaskEvaluator:
         self,
         body: dict[str, Any],
         *,
+        classification_body: dict[str, Any] | None = None,
         headers: dict[str, str],
         api_kind: str,
         prompt_tokens: int,
@@ -61,6 +62,8 @@ class TaskEvaluator:
         ) = None,
         after_model_call: Callable[[], Awaitable[None]] | None = None,
     ) -> Evaluation:
+        if classification_body is None:
+            classification_body = body
         modalities = request_modalities(body, api_kind)
         required_tier = headers.get("x-1panel-route-tier", "").strip().lower()
         if required_tier and required_tier not in ALLOWED_TIERS:
@@ -114,7 +117,7 @@ class TaskEvaluator:
                 {"protocol": api_kind},
             )
         complex_code = self._complex_code_preference(
-            body,
+            classification_body,
             required_tier,
             modalities,
         )
@@ -146,7 +149,7 @@ class TaskEvaluator:
                 result.preferred_tier = "subscription-frontier"
             return result
         deterministic = self._deterministic_profile(
-            body,
+            classification_body,
             required_tier,
             modalities,
         )
@@ -232,7 +235,10 @@ class TaskEvaluator:
                 if before_model_call:
                     target = await before_model_call()
                     acquired = True
-                result = await self._call_model(body, target=target)
+                result = await self._call_model(
+                    classification_body,
+                    target=target,
+                )
             except Exception:
                 return _evaluation(
                     current_task or tool_task or "general",
