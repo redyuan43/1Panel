@@ -49,7 +49,8 @@ def test_registry_declares_dedicated_ornith_endpoint() -> None:
     assert endpoint.supports_image_count(1)
     assert endpoint.supports_image_count(2)
     assert endpoint.supports_image_count(5)
-    assert not endpoint.supports_image_count(6)
+    assert endpoint.supports_image_count(6)
+    assert not endpoint.supports_image_count(7)
     assert endpoint.capabilities.structured_output == ("json_object",)
     assert endpoint.allowed_client_ids == ALLOWED_CLIENTS
     assert endpoint.enabled is False
@@ -351,7 +352,7 @@ def test_image_json_request_routes_to_ornith(
         picture(color)
         for color in ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0))
     )
-    five_image_content = [
+    six_image_content = [
         {"type": "text", "text": "Compare these views"},
         {"type": "text", "text": "View one"},
         {"type": "image_url", "image_url": {"url": red}},
@@ -363,6 +364,8 @@ def test_image_json_request_routes_to_ornith(
         {"type": "image_url", "image_url": {"url": blue}},
         {"type": "text", "text": "Crop two"},
         {"type": "image_url", "image_url": {"url": yellow}},
+        {"type": "text", "text": "View one again"},
+        {"type": "image_url", "image_url": {"url": red}},
     ]
     body = {
         "model": "auto",
@@ -395,16 +398,16 @@ def test_image_json_request_routes_to_ornith(
                 "response_format": {"type": "json_object"},
             },
         )
-        five_images = client.post(
+        six_images = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer " + secrets["home-assistant"]},
             json={
                 **body,
-                "messages": [{"role": "user", "content": five_image_content}],
+                "messages": [{"role": "user", "content": six_image_content}],
                 "response_format": {"type": "json_object"},
             },
         )
-        six_images = client.post(
+        seven_images = client.post(
             "/v1/chat/completions",
             headers={"Authorization": "Bearer " + secrets["home-assistant"]},
             json={
@@ -413,7 +416,7 @@ def test_image_json_request_routes_to_ornith(
                     {"type": "text", "text": "Compare all images"},
                     *[
                         {"type": "image_url", "image_url": {"url": image}}
-                        for _ in range(6)
+                        for _ in range(7)
                     ],
                 ]}],
                 "response_format": {"type": "json_object"},
@@ -426,14 +429,14 @@ def test_image_json_request_routes_to_ornith(
     assert captured[1]["body"]["response_format"] == {"type": "json_object"}
     assert two_images.status_code == 200, two_images.text
     assert captured[2]["body"]["model"] == PROVIDER_MODEL
-    assert five_images.status_code == 200, five_images.text
+    assert six_images.status_code == 200, six_images.text
     assert captured[3]["body"]["model"] == PROVIDER_MODEL
-    assert captured[3]["body"]["messages"][0]["content"] == five_image_content
-    assert six_images.status_code == 422, six_images.text
-    assert six_images.json()["error"]["code"] == "no_compatible_model"
+    assert captured[3]["body"]["messages"][0]["content"] == six_image_content
+    assert seven_images.status_code == 422, seven_images.text
+    assert seven_images.json()["error"]["code"] == "no_compatible_model"
     assert len(captured) == 4
     trace = asyncio.run(
-        runtime.route_traces.get(six_images.headers["x-request-id"])
+        runtime.route_traces.get(seven_images.headers["x-request-id"])
     )
     assert trace["status"] == "failed"
     assert trace["error"]["code"] == "no_compatible_model"
@@ -442,7 +445,7 @@ def test_image_json_request_routes_to_ornith(
 
 @pytest.mark.parametrize("api_kind", ["chat", "responses"])
 @pytest.mark.parametrize("stream", [False, True])
-def test_six_images_fail_before_upstream(
+def test_seven_images_fail_before_upstream(
     tmp_path: Path,
     monkeypatch,
     api_kind: str,
@@ -450,7 +453,7 @@ def test_six_images_fail_before_upstream(
 ) -> None:
     runtime, secrets, captured = _runtime(tmp_path, monkeypatch)
     image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lJkAAAAASUVORK5CYII="
-    images = [image] * 6
+    images = [image] * 7
     if api_kind == "chat":
         path = "/v1/chat/completions"
         content = [{"type": "text", "text": "Compare"}] + [
@@ -483,7 +486,7 @@ def test_six_images_fail_before_upstream(
 
 @pytest.mark.parametrize("api_kind", ["chat", "responses"])
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("image_count", [0, 1, 2, 5])
+@pytest.mark.parametrize("image_count", [0, 1, 2, 5, 6])
 def test_protocols_preserve_response_model_for_ornith(
     tmp_path: Path,
     monkeypatch,

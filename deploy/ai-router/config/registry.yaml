@@ -961,7 +961,7 @@ endpoints:
       engine: llama.cpp llama-server (user service nx1-ornith-35b-a3b-iq2s)
       vision_projector: mmproj-Ornith-1.5-35B-A3B-bf16.gguf
       model_artifact: Ornith-1.5-35B-A3B-IQ2_S.gguf
-      max_images: 5
+      max_images: 6
       quantization: IQ2_S-2.5bpw
       kv_cache: q4_0
       speculative_method: mtp

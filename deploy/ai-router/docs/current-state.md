@@ -10,6 +10,20 @@
 
 # AI Router 当前状态
 
+## 2026-09-24 nx1 六图上限（已部署）
+
+- 用户针对 Home Assistant 快递检测的六图输入明确要求扩大上限；仅将 nx1
+  `metadata.max_images` 从 5 提高到 6，保留全部图片及顺序，七图仍拒绝。
+- 本次是业务准入上限调整；既有五图颜色顺序验收不能视为六图快递识别准确性证据。
+  没有更改节点并发、上下文、账号绑定和其他模型能力。
+- 发布工件与回滚基线：`outputs/nx1-six-images-20260924-r1/`。
+- 18:28 +08:00 四实例运行版本均为 `nx1-six-images-20260924-r1`，注册表哈希
+  `86db257795ced809d3584d9798cf9cbc860e518b2305e0e36e3bff2b8423f399`；
+  健康、零重启、API 非排空，运行设置未改变。37 项隔离测试通过。
+- 首轮本地 API 候选配置文件权限错误，恢复原镜像后修正为 0644，并增加镜像运行用户
+  读取检查后重新发布成功；详见该目录 REPORT.md。其他 Router 组件未替换。
+- 发布后 Home Assistant 自然六图请求 `c7a100cf9fc54409bc48908b8eba4fcf`（18:27:53 +08:00）选中 nx1，85.4 秒后 succeeded/200，无路由错误；请求原始存档确认 6 个图片项。未核验快递识别准确性。证据：`outputs/nx1-six-images-20260924-r1/six-image-business-evidence.json`。
+
 ## 2026-09-24 会话故障等待与 Bonsai2 续聊
 
 - 新增 `routing.conversation_stability.health_wait_seconds`（0–120 秒，默认 20）；
