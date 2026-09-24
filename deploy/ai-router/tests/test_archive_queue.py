@@ -65,6 +65,12 @@ async def test_stable_event_id_makes_unknown_enqueue_result_idempotent(tmp_path)
     assert await producer.queue.redis.llen(producer.queue.keys(token)[0]) == 1
     assert await worker.step()
     assert reader.read(request_id)["state"] == "received"
+    # A delayed producer retry can arrive AFTER consumption and receipt cleanup.
+    # The Redis event-ID tombstone must survive ACK until its bounded TTL.
+    await producer.enqueue_event("begin", token, kwargs, event_id="stable-event")
+    assert await producer.queue.redis.llen(producer.queue.keys(token)[0]) == 0
+    assert 0 < await producer.queue.redis.ttl(producer.queue.key("event-ids:" + token)) <= 86400
+    assert not await worker.step()
     await finish(producer, worker)
 
 

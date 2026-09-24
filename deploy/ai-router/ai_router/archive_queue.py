@@ -22,6 +22,7 @@ from .errors import TrainingArchiveUnavailableError
 from .phase_timing import timed_async
 from .training_archive import TrainingArchive
 
+ARCHIVE_EVENT_VERSION = 1
 
 ENQUEUE = """
 if redis.call('HEXISTS', KEYS[7], ARGV[6]) == 1 then return 2 end
@@ -153,7 +154,7 @@ class ArchiveQueue:
     @timed_async("archive_enqueue")
     async def enqueue(self, operation, token, kwargs, *, event_id=None):
         event_id = event_id or uuid4().hex
-        event = {"version": 1, "id": event_id, "operation": operation,
+        event = {"version": ARCHIVE_EVENT_VERSION, "id": event_id, "operation": operation,
                  "token": token, "created_at": time.time(), "kwargs": kwargs}
         try:
             # Includes admission to the bounded serializer, not just network I/O.

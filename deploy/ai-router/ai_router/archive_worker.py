@@ -12,14 +12,14 @@ from types import SimpleNamespace
 
 from redis.asyncio import Redis
 
-from .archive_queue import ArchiveQueue
+from .archive_queue import ARCHIVE_EVENT_VERSION, ArchiveQueue
 from .config import Settings
 from .content_audit import ArchiveReader
 from .history_index import index_completed
+from .history_identity import is_verified_history_identity
 from .policy import ConversationRepository
 from .store import RedisStateStore
 from .training_archive import TrainingArchive, archive_event
-from .history_identity import is_verified_history_identity
 
 log = logging.getLogger(__name__)
 OPERATIONS = {"begin", "mark_routed", "set_effective_context", "record_pipeline", "complete", "fail"}
@@ -33,7 +33,6 @@ async def publish_history(runtime, trace, archive):
     aliases = [v for v in history.get("raw_identities", []) if not is_verified_history_identity(v)]
     if aliases and trace.get("branch_id"):
         await runtime.conversations.map_history(trace["client_id"], tuple(aliases), trace["branch_id"])
-
 
 
 class ArchiveWorker:
@@ -50,7 +49,7 @@ class ArchiveWorker:
             if shutil.disk_usage(self.archive.database_path.parent).free < self.min_free_bytes:
                 raise OSError("archive disk free space is below reserve")
             event = await self.queue.decode(token, encrypted)
-            if event.get("version") != 1 or event.get("token") != token:
+            if event.get("version") != ARCHIVE_EVENT_VERSION or event.get("token") != token:
                 raise ValueError("invalid archive event envelope")
             context = archive_event.set((event["id"], event["created_at"]))
             try:
