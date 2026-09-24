@@ -48,9 +48,29 @@ def sample(data, gpu_ids):
             gpus[uuid] = {"used_mib": int(used), "temperature_c": int(temperature)}
     return {"time": time.time(), "available": kib("MemAvailable"),
             "swap_used": kib("SwapTotal") - kib("SwapFree"),
+            "cgroup_swap_used": int((group / "memory.swap.current").read_text()),
             "root_free": shutil.disk_usage("/").free, "data_free": shutil.disk_usage(data).free,
             "cgroup_current": int((group / "memory.current").read_text()),
             "cgroup_events": counters(group / "memory.events"), "gpus": gpus}
+
+
+def safety_reason(item, baseline):
+    # Host-wide swap can grow because of unrelated services. This worker owns
+    # only its cgroup; retain an absolute host ceiling and the RAM/OOM guards.
+    if item["available"] < 16 * GIB:
+        return "host_ram_floor"
+    if item["root_free"] < 25 * GIB or item["data_free"] < 40 * GIB:
+        return "disk_headroom"
+    if item["swap_used"] > 8 * GIB:
+        return "host_swap_ceiling"
+    if item["cgroup_swap_used"] - baseline["cgroup_swap_used"] > GIB:
+        return "worker_swap_growth"
+    if any(item["cgroup_events"].get(key, 0) > baseline["cgroup_events"].get(key, 0)
+           for key in ("oom", "oom_kill", "max")):
+        return "worker_memory_event"
+    if any(gpu["temperature_c"] >= 90 for gpu in item["gpus"].values()):
+        return "gpu_temperature"
+    return None
 
 
 def prepare(base, data, name, models, plugins):
@@ -114,13 +134,9 @@ def main(role):
             while not STOP:
                 item = sample(data, {gpu for _, gpu, _ in targets})
                 metrics.write(json.dumps(item) + "\n")
-                if (item["available"] < 16 * GIB or item["root_free"] < 25 * GIB
-                        or item["data_free"] < 40 * GIB
-                        or item["swap_used"] - baseline["swap_used"] > GIB
-                        or any(item["cgroup_events"].get(key, 0) > baseline["cgroup_events"].get(key, 0)
-                               for key in ("oom", "oom_kill", "max"))
-                        or any(gpu["temperature_c"] >= 90 for gpu in item["gpus"].values())):
-                    raise RuntimeError("worker safety threshold crossed")
+                reason = safety_reason(item, baseline)
+                if reason:
+                    raise RuntimeError("worker safety threshold crossed: " + reason)
                 if any(process.poll() is not None for process in processes):
                     raise RuntimeError("worker exited")
                 time.sleep(2)
