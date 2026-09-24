@@ -921,7 +921,8 @@ endpoints:
   # 源注册默认禁用；上线后经 Control revision CAS 运行时 enable。
   # 2026-09-24 现场读取：nx1 用户服务启动主模型与 mmproj，监听 18083；
   # /v1/models 声明 multimodal、n_ctx=98304；一次真实红色图片 +
-  # response_format=json_object 返回可解析的 {"color":"red"}。只验证单图短请求。
+  # response_format=json_object 返回可解析的 {"color":"red"}；同请求红/蓝双图
+  # 返回 {"first":"red","second":"blue"}，只开放实测的两图范围。
   - id: nx1-ornith-35b-a3b-96k
     public_model: siyuan/ornith-nx1-96k
     provider_model: /home/nx/weight/Ornith-1.5-35B-A3B-IQ2_S.gguf
@@ -950,7 +951,7 @@ endpoints:
       tool_choice_modes: []
       structured_output: [json_object]
       streaming: true
-      validation_status: live-single-image-json-object-2026-09-24
+      validation_status: live-two-image-json-object-2026-09-24
       validated_at: "2026-09-24"
     quality: {}
     metadata:
@@ -959,12 +960,12 @@ endpoints:
       engine: llama.cpp llama-server (user service nx1-ornith-35b-a3b-iq2s)
       vision_projector: mmproj-Ornith-1.5-35B-A3B-bf16.gguf
       model_artifact: Ornith-1.5-35B-A3B-IQ2_S.gguf
-      max_images: 1
+      max_images: 2
       quantization: IQ2_S-2.5bpw
       kv_cache: q4_0
       speculative_method: mtp
       context_status: engine-declared-98304-not-long-input-validated
-      quality_status: live-single-image-red-json-2026-09-24
+      quality_status: live-two-image-red-blue-json-2026-09-24
       thinking_model: true
       history_contract:
         accepts_reasoning_content: true

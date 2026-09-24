@@ -44,7 +44,8 @@ def test_registry_declares_dedicated_ornith_endpoint() -> None:
     assert endpoint.max_concurrency == 1
     assert endpoint.modalities == ("text", "image")
     assert endpoint.supports_image_count(1)
-    assert not endpoint.supports_image_count(2)
+    assert endpoint.supports_image_count(2)
+    assert not endpoint.supports_image_count(3)
     assert endpoint.capabilities.structured_output == ("json_object",)
     assert endpoint.allowed_client_ids == ALLOWED_CLIENTS
     assert endpoint.enabled is False
@@ -368,16 +369,33 @@ def test_image_json_request_routes_to_ornith(
                 "response_format": {"type": "json_object"},
             },
         )
+        three_images = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer " + secrets["home-assistant"]},
+            json={
+                **body,
+                "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": "Compare all images"},
+                    *[
+                        {"type": "image_url", "image_url": {"url": image}}
+                        for _ in range(3)
+                    ],
+                ]}],
+                "response_format": {"type": "json_object"},
+            },
+        )
     assert image_only.status_code == 200, image_only.text
     assert captured[0]["body"]["model"] == PROVIDER_MODEL
     assert image_json.status_code == 200, image_json.text
     assert captured[1]["body"]["model"] == PROVIDER_MODEL
     assert captured[1]["body"]["response_format"] == {"type": "json_object"}
-    assert two_images.status_code == 422, two_images.text
-    assert two_images.json()["error"]["code"] == "no_compatible_model"
-    assert len(captured) == 2
+    assert two_images.status_code == 200, two_images.text
+    assert captured[2]["body"]["model"] == PROVIDER_MODEL
+    assert three_images.status_code == 422, three_images.text
+    assert three_images.json()["error"]["code"] == "no_compatible_model"
+    assert len(captured) == 3
     trace = asyncio.run(
-        runtime.route_traces.get(two_images.headers["x-request-id"])
+        runtime.route_traces.get(three_images.headers["x-request-id"])
     )
     assert trace["status"] == "failed"
     assert trace["error"]["code"] == "no_compatible_model"
@@ -386,13 +404,13 @@ def test_image_json_request_routes_to_ornith(
 
 @pytest.mark.parametrize("api_kind", ["chat", "responses"])
 @pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("image_json", [False, True])
+@pytest.mark.parametrize("image_count", [0, 1, 2])
 def test_protocols_preserve_response_model_for_ornith(
     tmp_path: Path,
     monkeypatch,
     api_kind: str,
     stream: bool,
-    image_json: bool,
+    image_count: int,
 ) -> None:
     runtime, secrets, captured = _runtime(tmp_path, monkeypatch)
     path = "/v1/chat/completions" if api_kind == "chat" else "/v1/responses"
@@ -403,8 +421,11 @@ def test_protocols_preserve_response_model_for_ornith(
             "messages": [{"role": "user", "content": (
                 [
                     {"type": "text", "text": "describe"},
-                    {"type": "image_url", "image_url": {"url": image}},
-                ] if image_json else "hello"
+                    *[
+                        {"type": "image_url", "image_url": {"url": image}}
+                        for _ in range(image_count)
+                    ],
+                ] if image_count else "hello"
             )}],
             "stream": stream,
         }
@@ -412,11 +433,14 @@ def test_protocols_preserve_response_model_for_ornith(
         else {"model": PUBLIC_MODEL, "input": (
             [{"role": "user", "content": [
                 {"type": "input_text", "text": "describe"},
-                {"type": "input_image", "image_url": image},
-            ]}] if image_json else "hello"
+                *[
+                    {"type": "input_image", "image_url": image}
+                    for _ in range(image_count)
+                ],
+            ]}] if image_count else "hello"
         ), "stream": stream}
     )
-    if image_json:
+    if image_count:
         if api_kind == "chat":
             body["response_format"] = {"type": "json_object"}
         else:
@@ -453,7 +477,7 @@ def test_protocols_preserve_response_model_for_ornith(
         assert set(models) == {PUBLIC_MODEL}
     assert response.headers["x-1panel-route-model"] == PUBLIC_MODEL
     assert captured[0]["body"]["model"] == PROVIDER_MODEL
-    if image_json:
+    if image_count:
         assert captured[0]["body"]["response_format"] == {"type": "json_object"}
     asyncio.run(runtime.close())
 
