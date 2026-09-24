@@ -934,29 +934,31 @@ function renderEndpointTable(endpoints) {
   endpoints = ViewPreferences.sortEndpoints(endpoints, byId("endpoint-sort").value, byId("endpoint-sort-direction").value);
   const enabled = endpoints.filter(({endpoint}) => endpoint.enabled).length;
   byId("endpoint-count").textContent =
-    `${endpoints.filter((item) => item.status.healthy).length}/${endpoints.length} 健康 · ${enabled} 启用`;
+    `${endpoints.filter((item) => item.status.healthy).length}/${endpoints.length} 健康 · ${enabled} 启用 · ${endpoints.length - enabled} 停用`;
+  endpoints = EndpointSummary.visible(endpoints, byId("endpoint-show-disabled").checked);
   byId("endpoint-table").innerHTML = endpoints.map(({endpoint, status, management, cache_declaration}) => `
     <tr>
-      <td>${endpointStatusBadge(endpoint, status)}</td>
-      <td><span class="node-label node-${escapeHtml(endpoint.node)}">${escapeHtml(endpoint.node.toUpperCase())}</span></td>
+      <td><span class="node-label node-${escapeHtml(endpoint.node)}">${escapeHtml(EndpointSummary.device(endpoint))}</span></td>
       <td>
         <strong class="table-primary">${escapeHtml(endpoint.public_model)}</strong>
         <span class="table-secondary">${escapeHtml(endpoint.id)}</span>
+        <details data-cache-detail="endpoint-${escapeHtml(endpoint.id)}">
+          <summary>能力与配置详情</summary>
+          <p>等级：${escapeHtml(endpoint.tier)} · 配置上下文：${formatTokens(endpoint.configured_context_tokens)}</p>
+          <p>${capabilitySummary(endpoint.capabilities, status.detail?.effective_modalities || endpoint.modalities)}</p>
+          <p>缓存：${endpointCacheStatus(endpoint, status, cache_declaration)}</p>
+          <p>验证：${escapeHtml(endpoint.capabilities?.validation_status || "未验证")} · ${escapeHtml(endpoint.capabilities?.validated_at || "—")}</p>
+          <p>配置：${endpointConfigStatus(management)}</p>
+          <p>并发为后端观测与路由配置，不表示缓存命中或保证接单。</p>
+        </details>
       </td>
-      <td>${escapeHtml(endpoint.tier)}</td>
+      <td>${endpointStatusBadge(endpoint, status)}</td>
+      <td>${escapeHtml(EndpointSummary.concurrency(endpoint, status))}</td>
       <td>
         <strong class="table-primary">${formatTokens(status.eligible_context_tokens || endpoint.safe_context_tokens)}</strong>
         <span class="table-secondary">配置 ${formatTokens(endpoint.configured_context_tokens)}</span>
       </td>
-      <td>${status.healthy ? `${Math.round(status.load_headroom * 100)}%` : "—"}</td>
-      <td>${endpointCacheStatus(endpoint, status, cache_declaration)}</td>
-      <td>${capabilitySummary(endpoint.capabilities, status.detail?.effective_modalities || endpoint.modalities)}</td>
-      <td>
-        <strong class="table-primary">${escapeHtml(endpoint.capabilities?.validation_status || "unverified")}</strong>
-        <span class="table-secondary">${escapeHtml(endpoint.capabilities?.validated_at || "—")}</span>
-      </td>
-      <td>${endpoint.auto_candidate ? "是" : "否"}</td>
-      <td>${endpointConfigStatus(management)}</td>
+      <td>${escapeHtml(EndpointSummary.automatic(endpoint, status))}</td>
       <td>
         <div class="row-actions">
           <button class="secondary compact" type="button" data-endpoint-edit="${escapeHtml(endpoint.id)}">编辑</button>
@@ -969,7 +971,7 @@ function renderEndpointTable(endpoints) {
         </div>
       </td>
     </tr>
-  `).join("");
+  `).join("") || emptyRow(7, "暂无启用端点，可勾选“显示停用端点”查看");
   bindEndpointActions();
 }
 
@@ -5453,7 +5455,8 @@ ViewPreferences.fields(["endpoint-sort","endpoint-sort-direction","auto-refresh"
 ViewPreferences.details();
 byId("trace-filter-reset").addEventListener("click",()=>ViewPreferences.capture(["trace-mode-filter","trace-review-filter","trace-privacy-filter","trace-client-filter","trace-task-filter","trace-model-filter","trace-status-filter","trace-search","trace-group-conversation"].map(id=>"#"+id)));
 byId("cache-deployment-anomalies").checked=state.cacheDeploymentAnomaliesOnly;
-for(const id of ["endpoint-sort","endpoint-sort-direction"])byId(id).addEventListener("change",()=>{if(state.dashboard)renderEndpointTable(state.dashboard.endpoints);});
+ViewPreferences.fields(["#endpoint-show-disabled"]);
+for(const id of ["endpoint-sort","endpoint-sort-direction","endpoint-show-disabled"])byId(id).addEventListener("change",()=>{if(state.dashboard)renderEndpointTable(state.dashboard.endpoints);});
 initializeCacheAudit();
 setAuditSubview(cacheView.view);
 if (state.key) connect();

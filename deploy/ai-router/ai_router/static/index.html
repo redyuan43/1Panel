@@ -183,6 +183,7 @@
           <div class="section-heading">
             <h3>注册端点</h3>
             <span id="endpoint-count" class="section-meta"></span>
+            <label><input id="endpoint-show-disabled" type="checkbox"> 显示停用端点</label>
             <label>排序 <select id="endpoint-sort"><option value="default">注册顺序</option><option value="node">节点</option><option value="model">模型</option><option value="status">状态</option><option value="context">上下文容量</option><option value="load">负载余量</option></select></label>
             <label>方向 <select id="endpoint-sort-direction"><option value="asc">升序</option><option value="desc">降序</option></select></label>
             <span class="section-meta">页面选择自动记住 · 当前浏览器</span>
@@ -191,17 +192,12 @@
             <table>
               <thead>
                 <tr>
-                  <th>状态</th>
-                  <th>节点</th>
+                  <th>设备</th>
                   <th>模型</th>
-                  <th>等级</th>
-                  <th>安全 / 配置上下文</th>
-                  <th>负载余量</th>
-                  <th>前缀缓存</th>
-                  <th>协议能力</th>
-                  <th>验证状态</th>
-                  <th>自动候选</th>
-                  <th>配置</th>
+                  <th>运行状态</th>
+                  <th>运行数 / 路由上限</th>
+                  <th>可用上下文</th>
+                  <th>参与自动路由</th>
                   <th>操作</th>
                 </tr>
               </thead>
@@ -1630,6 +1626,7 @@
 
     <script src="/assets/vendor/mermaid/mermaid.min.js"></script>
     <script src="/assets/view-preferences.js"></script>
+    <script src="/assets/endpoint-summary.js"></script>
     <script src="/assets/cache-audit.js"></script>
     <script src="/assets/routing-modes.js"></script>
     <script src="/assets/image-policy.js"></script>
