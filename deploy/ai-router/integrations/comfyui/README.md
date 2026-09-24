@@ -2,7 +2,7 @@
 
 把 `siyuan_media/` 放到客户 ComfyUI 的 `custom_nodes/`，在该 ComfyUI 的 Python 环境安装 `siyuan_media/requirements.txt`，然后按客户自己的维护流程重启。
 
-ComfyUI 进程环境需要 `SIYUAN_API_BASE`（现有 Router 的 `/v1` 地址）和 `SIYUAN_API_KEY`（现有账号签发的 Key）。凭证不会进入节点参数或工作流；账号需有 `siyuan-video` 授权。
+ComfyUI 进程环境需要 `SIYUAN_API_BASE`（现有 Router 的 `/v1` 地址）和 `SIYUAN_API_KEY`（现有账号签发的 Key）。凭证不会进入节点参数或工作流；账号需有 `siyuan-video` 授权。显式选择 `minimax-h3` 时，需由内部账号单独授予该模型。
 
 `SIYUAN 单次视频生成` 节点接收提示词、模型、时长、画幅、seed、唯一 `request_id` 和可选首帧。它输出 VIDEO、文件路径与任务 ID，后面可以连接客户自己的保存或后期节点。客户不能指定 GPU、采样步数或服务端配方。
 

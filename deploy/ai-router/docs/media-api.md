@@ -17,7 +17,7 @@ separate. The latest local tool-schema normalization does not apply to media.
 - Public routes use existing Client Keys, with explicit `media_models` grants.
   Existing clients receive no media permissions. Public grants allow only
   `siyuan-image` and `siyuan-video`; internal clients may select
-  `qwen-image-3.0-pro` explicitly.
+  `qwen-image-3.0-pro`, `qwen-image-2.1` and `minimax-h3` explicitly.
 - `/api/media/*` uses the existing Admin Key. The console is at `/media`.
 - Both Router API and control processes need `AI_ROUTER_MEDIA_INTERNAL_KEY`,
   matching the host daemon. The daemon listens only on `127.0.0.1:14020`.
