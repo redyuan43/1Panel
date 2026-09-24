@@ -160,7 +160,7 @@ services:
     environment:
       <<: *router-environment
       AI_ROUTER_INSTANCE_ID: router-api-local
-      AI_ROUTER_ARCHIVE_QUEUE_ENABLED: ${AI_ROUTER_ARCHIVE_QUEUE_ENABLED:-false}
+      AI_ROUTER_ARCHIVE_QUEUE_ENABLED: ${AI_ROUTER_ARCHIVE_QUEUE_ENABLED:-true}
       AI_ROUTER_TRAINING_ENABLED: "true"
       AI_ROUTER_TRAINING_DB_PATH: /training/conversations.sqlite3
       AI_ROUTER_TRAINING_KEY_PATH: /training/training.key
@@ -197,7 +197,7 @@ services:
     environment:
       <<: *router-environment
       AI_ROUTER_INSTANCE_ID: router-api-tail
-      AI_ROUTER_ARCHIVE_QUEUE_ENABLED: ${AI_ROUTER_ARCHIVE_QUEUE_ENABLED:-false}
+      AI_ROUTER_ARCHIVE_QUEUE_ENABLED: ${AI_ROUTER_ARCHIVE_QUEUE_ENABLED:-true}
       AI_ROUTER_TRAINING_ENABLED: "true"
       AI_ROUTER_TRAINING_DB_PATH: /training/conversations.sqlite3
       AI_ROUTER_TRAINING_KEY_PATH: /training/training.key
