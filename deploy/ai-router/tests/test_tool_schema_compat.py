@@ -247,8 +247,9 @@ class RecordingCounter:
 def runtime_for(endpoint):
     return SimpleNamespace(
         token_counter=RecordingCounter(),
-        settings=SimpleNamespace(section=lambda _: {}),
+        settings=SimpleNamespace(section=lambda name: {"enabled": True} if name == "compaction" else {}),
         registry=SimpleNamespace(by_id=lambda _: endpoint),
+        scheduler=SimpleNamespace(admission=SimpleNamespace(enabled=False)),
     )
 
 
@@ -523,7 +524,7 @@ def test_compaction_reselection_keeps_backend_neutral_tools(monkeypatch, api_kin
             public_model="test/next",
         )
         runtime = runtime_for(local)
-        runtime.settings = SimpleNamespace(section=lambda _: {"affinity_capacity_wait_seconds": 0})
+        runtime.settings = SimpleNamespace(section=lambda name: {"enabled": True} if name == "compaction" else {"affinity_capacity_wait_seconds": 0})
         decisions = [decision_for(local, api_kind), decision_for(next_endpoint, api_kind)]
         runtime.policy = SimpleNamespace(choose=AsyncMock(side_effect=decisions))
         runtime.draining_marker = AsyncMock(return_value=None)
