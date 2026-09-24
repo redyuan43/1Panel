@@ -20,6 +20,7 @@ CLIENT_IDS = frozenset({"workbuddy-public", "workbuddy-qwen36-shared"})
 MAX_INPUT_CHARS = 800
 MAX_OUTPUT_CHARS = 800
 MAX_OUTPUT_TOKENS = 1024
+MAX_EXTRA_PROMPT_TOKENS = MAX_OUTPUT_CHARS * 5
 TIMEOUT_SECONDS = 15.0
 _QUERY = re.compile(
     r"<user_query(?:\s[^>]*)?>((?:(?!</user_query\s*>).)*)</user_query\s*>\s*$",
@@ -238,11 +239,48 @@ class EnhancementSession:
     ) -> dict[str, Any]:
         original_tokens = decision.prompt_tokens
         original_context = decision.context_required
+        main_guard = None
         try:
-            return await self._apply(
-                current, decision, body,
-                count_chat=count_chat, count_routed=count_routed, trace=trace,
-            )
+            if (
+                self.source is not None
+                and not self.attempted
+                and decision.endpoint.capabilities.chat
+                and decision.endpoint.capabilities.output_token_limit
+                and getattr(decision.endpoint, "cloud", False)
+                and getattr(decision.endpoint, "metadata", {}).get("billing_mode") != "subscription"
+            ):
+                try:
+                    main_guard = await current.budget.reserve(
+                        decision.endpoint,
+                        request_id=f"{self.request_id}:enhance-main-guard",
+                        prompt_tokens=original_tokens + MAX_EXTRA_PROMPT_TOKENS,
+                        output_reserve_tokens=decision.output_reserve_tokens,
+                    )
+                except Exception as error:
+                    self.attempted = True
+                    details = {
+                        "state": "skipped", "reason": "main_budget_guard_unavailable",
+                        "target_id": decision.endpoint.id,
+                        "error_type": type(error).__name__,
+                    }
+                    if trace is not None:
+                        trace.payload["prompt_enhancement"] = details
+                    try:
+                        current.audit.write(
+                            "prompt_enhancement", request_id=self.request_id,
+                            client_id=self.client_id, **details,
+                        )
+                    except Exception:
+                        pass
+                    return body
+            try:
+                return await self._apply(
+                    current, decision, body,
+                    count_chat=count_chat, count_routed=count_routed, trace=trace,
+                )
+            finally:
+                if main_guard is not None:
+                    await current.budget.release(main_guard)
         except Exception as error:
             decision.prompt_tokens = original_tokens
             decision.context_required = original_context

@@ -238,6 +238,62 @@ def test_selected_model_call_applies_once_and_keeps_original(monkeypatch):
     assert events[-1][1]["state"] == "applied"
 
 
+def test_paid_cloud_skips_enhancer_when_main_budget_guard_is_unavailable(monkeypatch):
+    calls = []
+
+    async def fake_model(*_args):
+        calls.append("called")
+        return {"choices": [{"message": {"content": "请说明这个函数的用途"}}]}
+
+    monkeypatch.setattr(enhancement, "_request_model", fake_model)
+    current, events, _charges = _runtime()
+
+    class Budget:
+        async def reserve(self, _endpoint, **kwargs):
+            if kwargs["prompt_tokens"] + kwargs["output_reserve_tokens"] > 100:
+                raise RuntimeError("synthetic cloud budget limit")
+            return kwargs["request_id"]
+
+    current.budget = Budget()
+    decision = _decision()
+    decision.endpoint.cloud = True
+    decision.endpoint.metadata = {}
+    body = _body()
+    trace = SimpleNamespace(payload={})
+    result = asyncio.run(_session(body).apply(
+        current, decision, body, count_chat=_count_chat,
+        count_routed=_count_routed, trace=trace,
+    ))
+    assert result is body
+    assert calls == []
+    assert trace.payload["prompt_enhancement"]["reason"] == "main_budget_guard_unavailable"
+    assert events[-1][1]["reason"] == "main_budget_guard_unavailable"
+    assert decision.prompt_tokens + decision.output_reserve_tokens <= 100
+
+
+def test_paid_cloud_holds_main_budget_guard_until_enhancement_finishes(monkeypatch):
+    async def fake_model(*_args):
+        return {"choices": [{"message": {"content": "请说明这个函数的用途"}}], "usage": {}}
+
+    monkeypatch.setattr(enhancement, "_request_model", fake_model)
+    current, _events, charges = _runtime()
+    decision = _decision()
+    decision.endpoint.cloud = True
+    decision.endpoint.metadata = {}
+    body = _body()
+    result = asyncio.run(_session(body).apply(
+        current, decision, body, count_chat=_count_chat,
+        count_routed=_count_routed, trace=None,
+    ))
+    assert result["messages"][-1]["content"] == "请说明这个函数的用途"
+    assert charges == [
+        ("reserve", "test-request:enhance-main-guard"),
+        ("reserve", "test-request:enhance"),
+        ("settle", "test-request:enhance"),
+        ("release", "test-request:enhance-main-guard"),
+    ]
+
+
 def test_timeout_falls_back_to_original_and_conservatively_charges(monkeypatch):
     async def timeout(*_args):
         raise TimeoutError("synthetic timeout")
@@ -547,7 +603,13 @@ def test_public_auto_enhancement_follows_selected_model(
     )
     body = {"model": "siyuan/auto", "stream": stream}
     if api_kind == "chat":
-        body["messages"] = [{"role": "user", "content": "整理这段话"}]
+        body["messages"] = [
+            {"role": "system", "content": (
+                "stable instructions\n"
+                "<workbuddy_dynamic_context>dynamic data</workbuddy_dynamic_context>"
+            )},
+            {"role": "user", "content": "整理这段话"},
+        ]
     else:
         body["input"] = "整理这段话"
     with TestClient(create_app(runtime)) as client:
@@ -559,6 +621,9 @@ def test_public_auto_enhancement_follows_selected_model(
     assert len(selected) == len(upstream_calls) == 1
     assert "请把这段话整理成简明摘要" in str(upstream_calls[0])
     assert "整理这段话" not in str(upstream_calls[0])
+    if api_kind == "chat":
+        assert "<workbuddy_dynamic_context>" in str(upstream_calls[0])
+        assert "dynamic data" in str(upstream_calls[0])
     assert upstream_calls[0]["model"] == runtime.registry.by_id(selected[0]).provider_model
     asyncio.run(runtime.internal_client.aclose())
     asyncio.run(runtime.close())
