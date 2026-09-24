@@ -147,7 +147,7 @@ class CreativeService:
             self.asset(identifier, owner)
         return result
 
-    def create(self, owner, value, idem):
+    def create(self, owner, value, idem, *, policy=None, generation=None):
         if not isinstance(idem, str) or not 1 <= len(idem) <= 128:
             raise MediaError("idempotency_required", "创建任务需要幂等标识。")
         value = self.validate(owner, value)
@@ -162,6 +162,8 @@ class CreativeService:
                         "status": "planning" if value["kind"] == "video" else "draft", "spec": value,
                         "asset_ids": value["asset_ids"], "messages": [{"role": "user", "content": value["prompt"]}],
                         "directions": [], "history": [], "authorization": None, "created_at": time.time()}
+            if value["kind"] == "image" and generation is not None:
+                workflow.update(image_generation=generation, media_policy=policy or {})
             if value["kind"] == "image" and value.get("start") is True:
                 workflow["status"] = "imaging"
                 workflow["authorization"] = {"source": "user_request", "revision": 1, "images": 1, "automatic_regenerations": 0}
@@ -206,9 +208,11 @@ class CreativeService:
             workflow.update(directions=directions, questions=questions, status="draft")
             self.save(workflow)
 
-    async def action(self, identifier, owner, body, idem):
+    async def action(self, identifier, owner, body, idem, *, policy=None, generation=None):
         async with self.media.lock("creative:" + identifier):
             workflow = self.get(identifier, owner)
+            if generation is not None and not workflow.get("image_generation"):
+                workflow.update(image_generation=generation, media_policy=policy or {})
             if not isinstance(body, dict) or not isinstance(idem, str) or not 1 <= len(idem) <= 128:
                 raise MediaError("invalid_operation", "需要操作内容和幂等标识。")
             digest = fingerprint(body)
@@ -343,7 +347,9 @@ class CreativeService:
         references = [self.asset_payload(a) for a in assets]
         if references:
             body["images"] = references
-        job = self.media.submit(workflow["owner"], "image", body, key, workflow["id"], edit=bool(references))
+        job = self.media.submit(workflow["owner"], "image", body, key, workflow["id"], edit=bool(references),
+                                policy=workflow.get("media_policy") if workflow["spec"]["kind"] == "image" else None,
+                                generation=workflow.get("image_generation") if workflow["spec"]["kind"] == "image" else None)
         return self.store.update(job["id"], creative_workflow_id=workflow["id"])
 
     def submit_video(self, workflow, direction, duration, key):
@@ -515,7 +521,7 @@ class CreativeService:
                 self.tasks[identifier] = asyncio.create_task(self.process(identifier))
 
     def public(self, workflow, *, admin=False):
-        result = {k: copy.deepcopy(v) for k, v in workflow.items() if k != "owner"}
+        result = {k: copy.deepcopy(v) for k, v in workflow.items() if k != "owner" and (admin or k not in {"image_generation", "media_policy"})}
         result["jobs"] = {}
         ids = [workflow.get("image_job_id"), workflow.get("final_job_id")] + [d.get(k) for d in workflow["directions"] for k in ("sample_job_id", "image_job_id")]
         for version in workflow["history"]:

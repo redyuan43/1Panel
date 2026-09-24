@@ -566,6 +566,9 @@ def client_policies(settings: Settings) -> tuple[ClientPolicy, ...]:
 
 
 def validate_settings(value: dict[str, Any]) -> None:
+    from .image_generation import validate_image_generation
+    if "image_generation" in value:
+        validate_image_generation(value["image_generation"])
     from .lmcache_runtime import validate_lmcache_settings
     from .prompt_directives import validate_prompt_directives
     from .privacy_review import validate_review_settings

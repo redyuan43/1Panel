@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/assets/style.css">
     <link rel="stylesheet" href="/assets/routing-modes.css">
     <link rel="stylesheet" href="/assets/costs.css">
+    <link rel="stylesheet" href="/assets/image-policy.css">
   </head>
   <body>
     <header class="app-header">
@@ -857,7 +858,11 @@
               <button type="button" data-policy-section="capacity-fallback">容量兜底</button>
             </div>
           </div>
-          <section class="routing-mode-panel" aria-label="路由策略">
+          <div class="policy-node-nav" aria-label="策略类型"><button type="button" data-policy-kind="text" aria-pressed="true">文本策略</button><button type="button" data-policy-kind="image" aria-pressed="false">生图策略</button></div>
+<div id="policy-impact-report" class="policy-impact-report" hidden></div>
+<section id="image-policy-panel" hidden><h2>生图策略</h2><p class="wide"><a href="/media/legacy">查看图片任务、下载结果与事件日志</a></p><p id="image-policy-summary" aria-live="polite"></p><div class="policy-flow"><section class="settings-band policy-stage-card"><div class="settings-title"><h3>权限检查</h3></div><div class="control-grid"><label class="toggle-row"><span>接受新的生图请求</span><input id="image-policy-enabled" type="checkbox"></label><label class="toggle-row"><span>允许云端API调用</span><input id="image-policy-allow_cloud" type="checkbox"></label><p class="wide">账号“仅本地”、媒体授权及额度始终生效。关闭云端会阻止显式云端请求。</p></div></section><div class="policy-flow-connector"></div><section class="settings-band policy-stage-card"><div class="settings-title"><h3>本地资源选择</h3></div><div class="control-grid"><label>参与调度的节点ID（逗号分隔）<input id="image-policy-local_resources" type="text"></label><p class="wide">先启用NX5；NX6交接验收后加入。未登记、未启用或未验收的节点不能执行。</p><button id="image-policy-refresh" type="button" class="secondary">查看当前资源</button><pre class="wide" id="image-policy-resources" aria-live="polite">点击查看当前资源；配置选择不代表现场就绪。</pre></div></section><div class="policy-flow-connector"></div><section class="settings-band policy-stage-card"><div class="settings-title"><h3>忙闲分流</h3></div><div class="control-grid"><label>默认通道<select id="image-policy-default_route"><option value="local_first">本地优先</option><option value="local_only">仅本地</option><option value="cloud_only">仅云端</option></select></label><label>本地忙时<select id="image-policy-when_busy"><option value="queue">排队</option><option value="cloud">尝试云端，否则排队</option><option value="error">立即报错</option></select></label><label>本地不可用时<select id="image-policy-when_unavailable"><option value="queue">排队</option><option value="cloud">尝试云端，否则排队</option><option value="error">立即报错</option></select></label><label>图片队列上限<input id="image-policy-queue_limit" type="number" min="1" max="100" step="1"></label><label>最长排队时间（秒）<input id="image-policy-queue_timeout" type="number" min="1" max="86400" step="1"></label></div></section><div class="policy-flow-connector"></div><section class="settings-band policy-stage-card"><div class="settings-title"><h3>云端生成</h3></div><div class="control-grid"><label>已支持的云端通道<select id="image-policy-cloud_provider"><option value="codex">Codex</option></select></label><label class="toggle-row"><span>Codex额度耗尽后允许Qwen付费备用</span><input id="image-policy-paid_fallback" type="checkbox"></label><label>每日付费图片上限<input id="image-policy-daily_paid_images" type="number" min="0" max="10000" step="1"></label><p class="wide">付费备用还须配置有效凭证、满足图片能力和账号付费额度；本次默认关闭。</p></div></section><div class="policy-flow-connector"></div><section class="settings-band policy-stage-card"><div class="settings-title"><h3>校验归档与交付</h3></div><div class="control-grid"><p class="wide">生成完成后校验文件并归档；WorkBuddy下载到客户端并返回文件链接。下载失败只恢复下载。审核拒绝停止重试；结果未知只查询原任务，不换机重复生成。</p></div></section></div></section>
+<div id="text-policy-panel">
+<section class="routing-mode-panel" aria-label="路由策略">
             <div class="routing-mode-toolbar">
               <h2>路由策略</h2>
               <label>页面模式 <select id="routing-mode-view"><option value="simple">简单</option><option value="advanced">高级</option></select></label>
@@ -906,7 +911,6 @@
             </div>
             <div class="routing-mode-toolbar"><button id="routing-apply" type="button">验证并应用</button><span id="routing-apply-state" role="status"></span></div>
           </section>
-          <div id="policy-impact-report" class="policy-impact-report" hidden></div>
           <div class="policy-flow">
             <section class="settings-band policy-stage-card">
               <div class="settings-title">
@@ -1384,6 +1388,7 @@
             </section>
           </div>
 
+          </div>
           <div class="settings-actions">
             <button id="reload" type="button" class="secondary">重新加载</button>
             <label class="revision-rollback">
@@ -1627,6 +1632,7 @@
     <script src="/assets/view-preferences.js"></script>
     <script src="/assets/cache-audit.js"></script>
     <script src="/assets/routing-modes.js"></script>
+    <script src="/assets/image-policy.js"></script>
     <script src="/assets/app.js"></script>
     <script src="/assets/costs.js"></script>
   </body>

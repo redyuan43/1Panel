@@ -36,7 +36,9 @@ def install_internal(app, current, principal):
         if not isinstance(value, dict):
             raise MediaError("invalid_workflow", "创作参数必须是对象。")
         access(request, kind=value.get("kind", "video"))
-        workflow = service.create(owner, value, request.headers.get("idempotency-key"))
+        from .app import image_context
+        policy, generation = image_context(request) if value.get("kind") == "image" else (None, None)
+        workflow = service.create(owner, value, request.headers.get("idempotency-key"), policy=policy, generation=generation)
         return JSONResponse(service.public(workflow, admin=admin), status_code=202)
 
     @app.get("/creative/workflows/{workflow_id}")
@@ -61,7 +63,10 @@ def install_internal(app, current, principal):
             raise MediaError("invalid_workflow", "方案修改必须是对象。")
         if body.get("spec", {}).get("kind"):
             access(request, kind=body["spec"]["kind"])
-        result = await service.action(workflow_id, None if admin else owner, body, request.headers.get("idempotency-key"))
+        from .app import image_context
+        account, generation = image_context(request) if body.get("spec", {}).get("kind", workflow["spec"]["kind"]) == "image" else (None, None)
+        result = await service.action(workflow_id, None if admin else owner, body, request.headers.get("idempotency-key"),
+                                      policy=account, generation=generation)
         return service.public(result, admin=admin)
 
     @app.get("/creative/workflows/{workflow_id}/events")
@@ -77,7 +82,7 @@ def install_internal(app, current, principal):
         return {"data": [{"id": r[0], "created_at": r[1], **json.loads(r[2])} for r in rows]}
 
 
-def install_gateway(router, endpoint, authenticate, decorate, *, admin):
+def install_gateway(router, endpoint, authenticate, decorate, *, admin, image_snapshot=None):
     from .gateway import connection, rpc
     prefix = "" if admin else "/media"
 
@@ -115,6 +120,8 @@ def install_gateway(router, endpoint, authenticate, decorate, *, admin):
             if await request.app.state.runtime.store.increment_window(f"router:media-submit:{principal['owner']}", 1, 60) > principal["rpm_limit"]:
                 raise MediaError("media_rate_limit", "提交过于频繁。", 429)
             body = await request.json()
+            if image_snapshot is not None:
+                principal = await image_snapshot(request, principal)
             if identifier:
                 path += "/actions"
                 if request.url.path.endswith("/messages"):

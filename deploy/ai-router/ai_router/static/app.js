@@ -3952,6 +3952,7 @@ async function loadSettings() {
 function renderSettings() {
   RoutingModeUI.render(state.settings);
   if (!state.settings) return;
+  ImagePolicyUI.render(state.settings, api);
   byId("identity-enabled").checked = Boolean(value("identity.enabled", false));
   byId("identity-model-id").value = value(
     "identity.public_model_id",
@@ -4158,6 +4159,7 @@ function renderPolicyImpact(impact) {
   }
   target.hidden = false;
   target.innerHTML = `
+    ${impact.image_generation ? `<strong>生图策略校验通过；仅影响新图片任务，未验证设备或调用模型。</strong><span>云端 ${impact.image_generation.policy.allow_cloud ? "允许（仍受账号限制）" : "禁止"} · 图片排队上限 ${Number(impact.image_generation.policy.queue_limit)} · 最长 ${Number(impact.image_generation.policy.queue_timeout)} 秒</span>` : ""}
     <strong>离线回放 ${Number(impact.evaluated_requests || 0)} 条 Auto 请求</strong>
     <span>健康复检候选 ${Number(impact.health_recheck_candidates || 0)}</span>
     <span>潜在迁移变化 ${Number(impact.route_changes || 0)}</span>
@@ -4712,6 +4714,7 @@ function collectSettings() {
     },
   };
   return {
+    image_generation: ImagePolicyUI.collect(),
     affinity: {
       ...state.settings.affinity,
       ttl_seconds: Number(byId("affinity-ttl-minutes").value) * 60,
@@ -4836,7 +4839,7 @@ async function saveSettings(event) {
   event.preventDefault();
   const button = event.submitter;
   const draft = collectSettings();
-  const errors = validateSettingsDraft(draft);
+  const errors = [...validateSettingsDraft(draft), ...ImagePolicyUI.validate(draft.image_generation)];
   if (errors.length) {
     notice(errors[0], true);
     return;

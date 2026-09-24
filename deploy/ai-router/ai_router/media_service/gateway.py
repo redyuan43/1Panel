@@ -4,6 +4,7 @@ import asyncio
 import base64
 import hashlib
 import logging
+import json
 import os
 import secrets
 import time
@@ -16,6 +17,9 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.datastructures import UploadFile
+
+from ..media_policy import effective_media_policy
+from ..image_generation import trusted_snapshot
 
 from .contracts import ID_PATTERN, MAX_UPLOAD_BYTES, MODELS, PUBLIC_MODELS, MediaError
 
@@ -57,6 +61,9 @@ async def connection(request: Request, principal: dict):
         "X-Media-Models": ",".join(principal["models"]),
         "X-Request-ID": request.state.server_request_id,
     }
+    if "image_generation" in principal:
+        headers["X-Image-Generation"] = json.dumps(principal["image_generation"], separators=(",", ":"))
+        headers["X-Media-Policy"] = json.dumps(principal.get("media_policy", {}), separators=(",", ":"))
     if request.headers.get("idempotency-key"):
         headers["Idempotency-Key"] = request.headers["idempotency-key"]
     async with httpx.AsyncClient(
@@ -93,6 +100,7 @@ def router(*, admin: bool = False) -> APIRouter:
         request.state.disclosure_mode = client.policy.disclosure_mode
         request.state.media_owner = client.policy.id
         return {"owner": client.policy.id, "admin": False, "models": client.policy.media_models,
+                "media_policy": effective_media_policy(client.policy),
                 "key_id": client.key_id, "rpm_limit": min(client.policy.rpm_limit, 30)}
 
     def endpoint(fn):
@@ -212,10 +220,35 @@ def router(*, admin: bool = False) -> APIRouter:
         return job
 
     async def options(request):
-        principal = await authenticate(request)
+        principal = await image_snapshot(request, await authenticate(request))
         async with connection(request, principal) as client:
             return JSONResponse(await rpc(client, "GET", "/options"))
     result.add_api_route("/options" if admin else "/media/options", endpoint(options), methods=["GET"])
+
+    async def image_snapshot(request, principal):
+        value = await trusted_snapshot(request.app.state.runtime)
+        return {**principal, "image_generation": value} if value else principal
+
+    async def image_delivery(request):
+        principal = await authenticate(request)
+        async with connection(request, principal) as client:
+            return JSONResponse(await rpc(client, "POST", f"/jobs/{request.path_params['job_id']}/delivery",
+                                          json=await request.json()))
+    result.add_api_route("/images/{job_id}/delivery", endpoint(image_delivery), methods=["POST"])
+
+    if admin:
+        async def image_resources(request):
+            principal = await image_snapshot(request, await authenticate(request))
+            async with connection(request, principal) as client:
+                return JSONResponse(await rpc(client, "GET", "/image-resources"))
+        result.add_api_route("/image-resources", endpoint(image_resources), methods=["GET"])
+
+        async def image_events(request):
+            principal = await authenticate(request)
+            async with connection(request, principal) as client:
+                return JSONResponse(await rpc(client, "GET", f"/jobs/{request.path_params['job_id']}/events",
+                                              params={"after": request.query_params.get("after", "0")}))
+        result.add_api_route("/images/{job_id}/events", endpoint(image_events), methods=["GET"])
 
     async def submit(request):
         principal = await authenticate(request)
@@ -231,6 +264,8 @@ def router(*, admin: bool = False) -> APIRouter:
             for value in request.headers.getlist("prefer")
             for preference in parse_http_list(value)
         )
+        if not video:
+            principal = await image_snapshot(request, principal)
         body = await form_body(request, video=video)
         model = body.get("model", "siyuan-video" if video else "siyuan-image")
         if not principal["admin"] and model not in principal["models"]:
@@ -393,5 +428,5 @@ def router(*, admin: bool = False) -> APIRouter:
                                               **({"json": await request.json()} if request.method == "PUT" else {})))
         result.add_api_route("/settings", endpoint(settings), methods=["GET", "PUT"])
     from .creative_api import install_gateway
-    install_gateway(result, endpoint, authenticate, decorate, admin=admin)
+    install_gateway(result, endpoint, authenticate, decorate, admin=admin, image_snapshot=image_snapshot)
     return result

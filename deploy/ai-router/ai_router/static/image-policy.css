@@ -1,0 +1,2 @@
+#image-policy-panel pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+#image-policy-panel .control-grid > .wide { grid-column: 1 / -1; }

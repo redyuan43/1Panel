@@ -64,17 +64,50 @@ class MediaStore:
             db.execute("INSERT OR REPLACE INTO settings VALUES (1, ?)", (json.dumps(value),))
         return value
 
-    def create(self, owner: str, kind: str, body: dict, idem: str, request_id: str, limit: int) -> tuple[dict, bool]:
+    @staticmethod
+    def _replay(row, digest):
+        if not row:
+            return None
+        if row["digest"] != digest:
+            raise MediaError("idempotency_conflict", "Idempotency key was used with different parameters.", 409)
+        existing = json.loads(row["value"])
+        if existing.get("deleted"):
+            raise MediaError("media_deleted", "The original task was deleted; it will not be regenerated.", 410)
+        return existing
+
+    def replay(self, owner, kind, body, idem):
+        with self.connect() as db:
+            row = db.execute("SELECT digest,value FROM jobs WHERE owner=? AND kind=? AND idem=?", (owner, kind, idem)).fetchone()
+        return self._replay(row, fingerprint(body))
+
+    def create(self, owner: str, kind: str, body: dict, idem: str, request_id: str, limit: int,
+               *, policy: dict | None = None, execution_kind: str | None = None, image_generation: dict | None = None, recipe_snapshot: dict | None = None) -> tuple[dict, bool]:
         digest = fingerprint(body)
         with self.connect() as db:
             row = db.execute("SELECT digest,value FROM jobs WHERE owner=? AND kind=? AND idem=?", (owner, kind, idem)).fetchone()
-            if row:
-                if row["digest"] != digest:
-                    raise MediaError("idempotency_conflict", "Idempotency key was used with different parameters.", 409)
-                existing = json.loads(row["value"])
-                if existing.get("deleted"):
-                    raise MediaError("media_deleted", "The original task was deleted; it will not be regenerated.", 410)
+            if (existing := self._replay(row, digest)) is not None:
                 return existing, False
+            policy = dict(policy or {})
+            # Admission and insertion share the same write transaction. Different
+            # keys/processes cannot race around the account quota.
+            maximum = policy.get(kind + "_max_active")
+            if maximum is not None:
+                active = db.execute(
+                    "SELECT count(*) FROM jobs WHERE owner=? AND kind=? AND "
+                    "json_extract(value,'$.status') NOT IN ('completed','failed','cancelled')",
+                    (owner, kind),
+                ).fetchone()[0]
+                if active >= maximum:
+                    raise MediaError("media_account_busy", "Account media concurrency limit reached.", 429)
+            daily = policy.get(kind + "_daily_requests")
+            if daily is not None:
+                day_start = int(time.time() // 86400) * 86400
+                accepted = db.execute(
+                    "SELECT count(*) FROM jobs WHERE owner=? AND kind=? AND created>=?",
+                    (owner, kind, day_start),
+                ).fetchone()[0]
+                if accepted >= daily:
+                    raise MediaError("media_account_daily_limit", "Account daily media allowance exhausted.", 429)
             pending = db.execute(
                 "SELECT count(*) FROM jobs WHERE json_extract(value,'$.status')='queued' AND kind=?", (kind,),
             ).fetchone()[0]
@@ -85,6 +118,10 @@ class MediaStore:
                 "owner": owner, "kind": kind, "model": body["model"], "request": body,
                 "request_id": request_id, "status": "queued", "created_at": time.time(),
                 "updated_at": time.time(), "stages": [], "deleted": False, "provider_state": {},
+                "media_policy": policy,
+                **({"recipe_snapshot": recipe_snapshot} if recipe_snapshot is not None else {}),
+                **({"image_generation": image_generation} if image_generation is not None else {}),
+                **({"execution_kind": execution_kind} if execution_kind else {}),
             }
             db.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?,?)",
                        (job["id"], owner, kind, idem, digest, job["created_at"], json.dumps(job)))
@@ -106,8 +143,26 @@ class MediaStore:
                 raise MediaError("media_not_found", "Media task was not found.", 404)
             job = {**json.loads(row[0]), **changes, "updated_at": time.time()}
             db.execute("UPDATE jobs SET value=? WHERE id=?", (json.dumps(job), job_id))
-            self._event(db, job_id, {"type": "updated", "fields": list(changes), "status": job["status"]})
+            event = {"type": "updated", "fields": list(changes), "status": job["status"]}
+            if job["kind"] == "image":
+                event.update({key: job.get(key) for key in ("routing_reason", "error", "provider", "delivery")})
+                event["executor"] = job["provider_state"].get("endpoint", {}).get("id")
+                event["recipe"] = job["provider_state"].get("capability", {}).get("recipe")
+                if "status" in changes:
+                    timing = dict(job.get("timing", {}))
+                    timing.setdefault(job["status"], time.time())
+                    job["timing"] = timing
+                    db.execute("UPDATE jobs SET value=? WHERE id=?", (json.dumps(job), job_id))
+            self._event(db, job_id, event)
         return job
+
+    def image_events(self, job_id, *, after=0, limit=100):
+        with self.connect() as db:
+            rows = db.execute("SELECT sequence,created,value FROM events WHERE job_id=? AND sequence>? ORDER BY sequence LIMIT ?",
+                              (job_id, after, min(max(limit, 1), 100) + 1)).fetchall()
+        page = rows[:limit]
+        return {"data": [{"sequence": row["sequence"], "created_at": row["created"], **json.loads(row["value"])} for row in page],
+                "next_cursor": page[-1]["sequence"] if len(rows) > limit else None}
 
     def list(self, owner: str | None = None, kind: str | None = None, *, after: str | None = None, limit: int = 50) -> dict:
         clauses, args = ["json_extract(value,'$.deleted')=0"], []
@@ -183,6 +238,19 @@ class MediaStore:
             count = db.execute("SELECT count(*) FROM paid WHERE day=? AND released=0", (day,)).fetchone()[0]
             if count >= limit:
                 raise MediaError("paid_media_limit", "Daily paid image allowance is exhausted.", 429)
+            row = db.execute("SELECT value FROM jobs WHERE id=?", (job_id,)).fetchone()
+            job = json.loads(row[0]) if row else {}
+            policy = job.get("media_policy", {})
+            if not policy.get("allow_cloud", True):
+                raise MediaError("media_cloud_forbidden", "Account does not allow cloud generation.", 403)
+            account_limit = policy.get("paid_images_daily")
+            if account_limit is not None:
+                used = db.execute(
+                    "SELECT count(*) FROM paid JOIN jobs ON jobs.id=paid.job_id "
+                    "WHERE paid.day=? AND paid.released=0 AND jobs.owner=?", (day, job["owner"]),
+                ).fetchone()[0]
+                if used >= account_limit:
+                    raise MediaError("paid_media_account_limit", "Account paid image allowance exhausted.", 429)
             db.execute("INSERT INTO paid(job_id,day) VALUES (?,?)", (job_id, day))
 
     def release_paid(self, job_id: str):

@@ -349,11 +349,15 @@ class CodexProvider:
 
     @staticmethod
     def _result(item: dict, turn_error: dict | None = None) -> dict:
-        if ((item.get("failure") or {}).get("type") == "usageLimitExceeded"
+        failure = item.get("failure")
+        failure = failure if isinstance(failure, dict) else {}
+        if (failure.get("type") == "usageLimitExceeded"
                 or isinstance(turn_error, dict) and turn_error.get("codexErrorInfo") == "usageLimitExceeded"):
             raise QuotaExceeded()
+        if failure.get("code") == "moderation_blocked":
+            raise MediaError("image_moderation_blocked", "The image provider rejected this generation under its content policy.", 422)
         if item.get("status") != "completed" or not item.get("result"):
-            raise MediaError("image_generation_failed", "Image generation failed.", 502)
+            raise MediaError("image_generation_failed", "Image provider failed without a structured reason; retain this task ID for diagnosis.", 502)
         try:
             data = base64.b64decode(item["result"], validate=True)
         except (ValueError, TypeError) as exc:

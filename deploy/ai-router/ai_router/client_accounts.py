@@ -16,6 +16,7 @@ from .config import Settings, client_policies
 from .errors import AuthenticationError, RouterError
 from .store import StateStore
 from .types import ClientPolicy
+from .media_policy import validate_media_limits
 
 
 CLIENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{1,62}$")
@@ -541,11 +542,17 @@ def _validated_account(
     media_models = value.get("media_models", existing.get("media_models", []) if existing else [])
     permitted_media = {"siyuan-image", "siyuan-video"}
     if disclosure_mode == "internal":
-        permitted_media.add("qwen-image-3.0-pro")
+        permitted_media.update({"qwen-image-3.0-pro", "qwen-image-2.1"})
     if not isinstance(media_models, list) or any(
         not isinstance(item, str) or item not in permitted_media for item in media_models
     ):
         raise RouterError("invalid media model grants", status_code=400, code="invalid_media_models")
+    try:
+        media_limits = validate_media_limits(value.get(
+            "media_limits", existing.get("media_limits", {}) if existing else {},
+        ))
+    except ValueError as exc:
+        raise RouterError(str(exc), status_code=400, code="invalid_media_limits") from exc
     try:
         rpm_limit = int(
             value.get(
@@ -620,6 +627,7 @@ def _validated_account(
         ),
         "models": list(models),
         "media_models": list(dict.fromkeys(media_models)),
+        "media_limits": media_limits,
         "rpm_limit": rpm_limit,
         "tpm_limit": tpm_limit,
         "max_parallel_requests": max_parallel,
@@ -655,6 +663,7 @@ def _policy_from_account(value: dict[str, Any]) -> ClientPolicy:
         key_env="",
         models=tuple(str(item) for item in value.get("models", [])),
         media_models=tuple(str(item) for item in value.get("media_models", [])),
+        media_limits=validate_media_limits(value.get("media_limits", {})),
         rpm_limit=int(value["rpm_limit"]),
         tpm_limit=int(value["tpm_limit"]),
         max_parallel_requests=int(value["max_parallel_requests"]),
@@ -681,6 +690,7 @@ def _public_account(
         "enabled": bool(account.get("enabled", False)),
         "models": list(account.get("models", [])),
         "media_models": list(account.get("media_models", [])),
+        "media_limits": dict(account.get("media_limits", {})),
         "rpm_limit": int(account.get("rpm_limit", 0)),
         "tpm_limit": int(account.get("tpm_limit", 0)),
         "max_parallel_requests": int(

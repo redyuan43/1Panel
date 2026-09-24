@@ -16,6 +16,7 @@ from .route_diagnosis import preview_policy_impact
 
 EDITABLE_POLICY_SECTIONS = frozenset(
     {
+        "image_generation",
         "affinity",
         "cloud",
         "compaction",
@@ -307,6 +308,13 @@ class PolicyConfigManager:
             )
             validate_settings(merged)
             report = preview_policy_impact(traces[:500], merged)
+            if "image_generation" in merged:
+                from .image_generation import validate_image_generation
+                report["image_generation"] = {
+                    "policy": validate_image_generation(merged["image_generation"]),
+                    "scope": "new_image_jobs_only",
+                    "runtime_verified": False,
+                }
             validation = {
                 "status": "passed",
                 "validated_at": time.time(),
