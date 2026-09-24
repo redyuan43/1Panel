@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 import json
 import time
 from dataclasses import replace
@@ -10,6 +12,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from PIL import Image
 
 from ai_router.api import create_app
 from ai_router.config import Registry, Settings, endpoint_from_dict
@@ -339,6 +342,28 @@ def test_image_json_request_routes_to_ornith(
 ) -> None:
     runtime, secrets, captured = _runtime(tmp_path, monkeypatch)
     image = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lJkAAAAASUVORK5CYII="
+    def picture(color: tuple[int, int, int]) -> str:
+        output = io.BytesIO()
+        Image.new("RGB", (2, 2), color).save(output, format="PNG")
+        return "data:image/png;base64," + base64.b64encode(output.getvalue()).decode()
+
+    red, green, blue, yellow = (
+        picture(color)
+        for color in ((255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0))
+    )
+    five_image_content = [
+        {"type": "text", "text": "Compare these views"},
+        {"type": "text", "text": "View one"},
+        {"type": "image_url", "image_url": {"url": red}},
+        {"type": "text", "text": "View two"},
+        {"type": "image_url", "image_url": {"url": green}},
+        {"type": "text", "text": "View two again"},
+        {"type": "image_url", "image_url": {"url": green}},
+        {"type": "text", "text": "Crop one"},
+        {"type": "image_url", "image_url": {"url": blue}},
+        {"type": "text", "text": "Crop two"},
+        {"type": "image_url", "image_url": {"url": yellow}},
+    ]
     body = {
         "model": "auto",
         "messages": [{"role": "user", "content": [
@@ -375,13 +400,7 @@ def test_image_json_request_routes_to_ornith(
             headers={"Authorization": "Bearer " + secrets["home-assistant"]},
             json={
                 **body,
-                "messages": [{"role": "user", "content": [
-                    {"type": "text", "text": "Compare all images"},
-                    *[
-                        {"type": "image_url", "image_url": {"url": image}}
-                        for _ in range(5)
-                    ],
-                ]}],
+                "messages": [{"role": "user", "content": five_image_content}],
                 "response_format": {"type": "json_object"},
             },
         )
@@ -409,6 +428,7 @@ def test_image_json_request_routes_to_ornith(
     assert captured[2]["body"]["model"] == PROVIDER_MODEL
     assert five_images.status_code == 200, five_images.text
     assert captured[3]["body"]["model"] == PROVIDER_MODEL
+    assert captured[3]["body"]["messages"][0]["content"] == five_image_content
     assert six_images.status_code == 422, six_images.text
     assert six_images.json()["error"]["code"] == "no_compatible_model"
     assert len(captured) == 4
