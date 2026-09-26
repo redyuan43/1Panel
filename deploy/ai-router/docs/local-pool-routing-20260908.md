@@ -44,3 +44,30 @@
 ## 首条真实 hello 观察
 
 请求 fc36c1bc975c49a8bea6cff838fff435 按新会话分散规则选择 AMD，当时 AI 有在途请求；Router 排队约 0.02 秒。WorkBuddy 附带约 49K tokens 上下文，AMD 日志在计算 39,352 tokens 时耗时 197.57 秒、进度约 80%。观察时请求未完成，最终缓存计数不可用。这证明分散选择生效，但不证明首字提速；新会话冷计算成本仍是限制，完整 A/B/A 验收未完成。
+
+## 2026-09-26 候选组扩为 4 台（新增 2× DGX Spark）
+
+同一候选组由 AI、Edge、AMD 三台扩为四台，新增 `spark-dsv41-flash-256k`
+（2× DGX Spark GB10，CX7 200G 互联，经 Tailscale 私网 `spark.taild500c8.ts.net:8888`
+接入）。组内排序规则、等待与预订机制、近期占用窗口均未改变；只有成员全集变化。
+
+- 成员全集是代码常量 `ai_router/local_pool.py` 的 `MEMBERS`；`config/defaults.yaml`
+  与之对齐。运行时的 `routing.local_pool.members` 改为**已知成员的非空唯一子集**，
+  不再是「必须是全部三台」。这样滚动发布期间新旧镜像的成员清单可以并存：
+  旧清单在新镜像上仍然有效，不需要一次原子切换。未知成员、重复项和空清单继续拒绝。
+- 端点本身的注册、能力与容量声明见 `config/registry.yaml` 的
+  `spark-dsv41-flash-256k`；本轮未执行端点激活验收，能力按服务端启动实况声明，
+  属用户明确指示的例外，不能当作已验收结论。
+- 因为 Spark 声明 `max_concurrency: 2`（引擎 `MAX_NUM_SEQS=2` 的真实值），而
+  组内排序含「近期会话数/并发数」项，Spark 在长期连续负载下不会独占新会话；
+  它在空闲或已有在途会话时才被优先选中，忙时按既有规则溢出到其他成员。
+  这符合本机制的平衡语义，但**不等于「所有新会话都归 Spark」**。
+- 期望把全部自动流量固定到某一台时，应使用账号级 `client_route_bindings`，
+  或关闭本地平衡开关恢复按质量分选型；不要靠修改成员清单达成。
+
+### 回滚
+
+把 `routing.local_pool.members` 写回旧的三成员清单即可让 Spark 退出本组调度，
+不需要重启；再把两个 Router 镜像切回上一 release 标签可回滚代码与注册表。
+端点自身的启停用 `/api/endpoints/{id}/actions/disable`，不需要改代码。
+

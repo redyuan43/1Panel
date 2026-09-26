@@ -925,8 +925,22 @@ def validate_settings(value: dict[str, Any]) -> None:
     if pool:
         from .local_pool import MEMBERS, finite
         members = pool.get("members", list(MEMBERS))
-        if not isinstance(members, list) or not all(isinstance(item, str) for item in members) or len(members) != len(set(members)) or set(members) != set(MEMBERS):
-            raise ValueError("routing.local_pool.members must name the three local peers exactly once")
+        # 允许声明已知成员的任意非空子集：滚动发布时旧镜像的成员清单必须在
+        # 新镜像上继续有效，反之亦然；未知成员、重复项和空清单仍然拒绝。
+        if (
+            not isinstance(members, list)
+            or not members
+            or not all(
+                isinstance(item, str) and item.strip()
+                for item in members
+            )
+            or len(members) != len(set(members))
+            or not set(members).issubset(set(MEMBERS))
+        ):
+            raise ValueError(
+                "routing.local_pool.members must be a non-empty unique "
+                "subset of the known local peers"
+            )
         for field, default, low, high in (("recent_seconds", 600, 60, 3600), ("min_samples", 5, 5, 256),
                                         ("recheck_seconds", 5, 1, 10), ("min_saving_seconds", 5, 1, 120),
                                         ("min_saving_ratio", .2, .05, 1)):

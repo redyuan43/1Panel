@@ -83,6 +83,10 @@ model_aliases:
   siyuan/xiyun:
     endpoint_ids:
       - nx3-qwen36-shared-64k
+  # 2026-09-26：2× DGX Spark 上的 DeepSeek-V4.1-Flash 对外代号。
+  siyuan/lingxi:
+    endpoint_ids:
+      - spark-dsv41-flash-256k
 
 endpoints:
   - id: qwen36-shared-fleet
@@ -1071,3 +1075,70 @@ endpoints:
       device_label: V100 16G
       context_status: live-195206-input-retrieval-validated
       quality_status: unbenchmarked
+
+  # Spark 双机（2× DGX Spark GB10，CX7 200G 互联）上的 DeepSeek-V4.1-Flash。
+  # 2026-09-26 经 Tailscale 私网接入（spark.taild500c8.ts.net:8888），并入
+  # routing.local_pool 成为第 4 个本地成员（见 ai_router/local_pool.py 的 MEMBERS）。
+  # 能力与容量取自服务端启动实况，不是激活验收结论：启动参数含
+  # --enable-auto-tool-choice + --tool-call-parser deepseek_v41（工具）、
+  # --reasoning-parser deepseek_v41（思维链）、/v1/responses 路由存在（Responses
+  # 原生）；LANGUAGE_MODEL_ONLY=0 且 LIMIT_MM={"image":100}（视觉，单请求 100 图）；
+  # MAX_MODEL_LEN=262144、MAX_NUM_SEQS=2、MAX_NUM_BATCHED_TOKENS=2048。
+  # 用户 2026-09-26 明确指示：本轮不逐项执行端点激活验收，能力按已实测上限声明。
+  - id: spark-dsv41-flash-256k
+    public_model: siyuan/dsv41-flash-spark-256k
+    provider_model: DeepSeek-v4.1-Flash-EXL3
+    api_base: http://spark.taild500c8.ts.net:8888/v1
+    node: spark
+    role: responder
+    tier: local-large
+    tier_rank: 35
+    modalities: [text, image]
+    tasks: [general, code, batch, long-context]
+    safe_context_tokens: 262144
+    configured_context_tokens: 262144
+    max_concurrency: 2
+    backend_type: vllm
+    health_url: http://spark.taild500c8.ts.net:8888/health
+    load_url: http://spark.taild500c8.ts.net:8888/metrics
+    enabled: true
+    auto_candidate: true
+    capabilities:
+      chat: true
+      responses: native
+      tools: parallel
+      tool_choice: true
+      tool_choice_modes: [auto, none, required]
+      structured_output: [json_object, json_schema]
+      streaming: true
+      output_token_limit: true
+      validation_status: engine-launch-evidence-tools-responses-vision-256k-user-directed-skip-activation-2026-09-26
+      validated_at: "2026-09-26"
+    quality:
+      general: 130
+      code: 130
+      batch: 130
+      long-context: 130
+    metadata:
+      device_label: 2x DGX Spark GB10 (CX7 200G)
+      transport: tailscale-direct-magicdns
+      engine: vLLM TP=2 EXL3 2.9bpw + DSpark k=3
+      served_model_name: DeepSeek-v4.1-Flash-EXL3
+      max_model_len: 262144
+      max_num_seqs: 2
+      max_num_batched_tokens: 2048
+      max_images: 100
+      reasoning_parser: deepseek_v41
+      tool_call_parser: deepseek_v41
+      auto_tool_choice: true
+      prefix_cache: automatic
+      speculative_method: dspark
+      speculative_tokens: 3
+      history_contract:
+        accepts_reasoning_content: true
+      context_status: engine-declared-262144-user-directed-max-admission
+      vision_status: engine-declared-100-images-per-prompt-2026-09-26
+      quality_status: user-directed-default-priority-unbenchmarked-2026-09-26
+      quality_basis: strongest-local-deployment-256k-1127tps-prefill-49tps-decode-not-same-methodology-benchmarked
+      activation_status: user-directed-skip-endpoint-activation-2026-09-26
+      deployment_repo: redyuan43/dsv41-flash-2x-dgx-spark-deployment

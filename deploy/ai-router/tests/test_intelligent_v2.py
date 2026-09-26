@@ -722,7 +722,7 @@ def test_v2_image_150k_plus_65536_fits_local_256k(
             conversation=None,
         )
     )
-    assert decision.endpoint.id == "ai-qwen38-27b"
+    assert decision.endpoint.id == "spark-dsv41-flash-256k"
     assert decision.output_reserve_tokens == 65536
     assert decision.context_required == 215536
     # DeepSeek 端点已声明图片能力，不再以模态不兼容被拒绝。

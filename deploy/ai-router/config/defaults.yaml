@@ -73,7 +73,9 @@ routing:
         generation: 1
   local_pool:
     enabled: false
-    members: [ai-qwen38-27b, edge-qwen38-flash, amd-qwen38-rocmfpx-128k]
+    # 已知本地成员全集见 ai_router/local_pool.py 的 MEMBERS；运行时可以是
+    # 它的任意非空子集，便于逐台滚动发布时新旧成员清单并存。
+    members: [ai-qwen38-27b, edge-qwen38-flash, amd-qwen38-rocmfpx-128k, spark-dsv41-flash-256k]
     recent_seconds: 600
     min_saving_ratio: 0.20
   affinity_capacity_wait_seconds: 120

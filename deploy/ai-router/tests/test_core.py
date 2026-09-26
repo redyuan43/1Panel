@@ -415,12 +415,13 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     value = settings(tmp_path)
     registry = Registry(ROOT / "config" / "registry.yaml")
     assert value.section("routing")["weights"]["quality"] == 0.50
-    assert len(registry.endpoints) == 18
+    assert len(registry.endpoints) == 19
     assert registry.by_id("ai-qwen38-27b").max_concurrency == 8
     assert all(
         item.max_concurrency == 1
         for item in registry.endpoints
-        if not item.cloud and item.id != "ai-qwen38-27b"
+        if not item.cloud
+        and item.id not in {"ai-qwen38-27b", "spark-dsv41-flash-256k"}
     )
     ivan = registry.by_id("ivan-qwen38-flash-128k")
     assert ivan is not None
@@ -440,6 +441,19 @@ def test_settings_and_registry_load(tmp_path: Path) -> None:
     assert ai.deployment_profiles[0].short_request_rank == 0
     assert ai.metadata["kv_cache"] == "fp8_e5m2"
     assert ai.metadata["speculative_tokens"] == 2
+    spark = registry.by_id("spark-dsv41-flash-256k")
+    assert spark is not None
+    assert spark.public_model == "siyuan/dsv41-flash-spark-256k"
+    assert spark.provider_model == "DeepSeek-v4.1-Flash-EXL3"
+    assert spark.node == "spark"
+    assert spark.tier == "local-large"
+    assert spark.modalities == ("text", "image")
+    assert spark.safe_context_tokens == 262144
+    assert spark.configured_context_tokens == 262144
+    assert spark.max_concurrency == 2
+    assert spark.auto_candidate is True
+    # 新端点是本地最高优先：先越过 ivan（rank 30），其余本地端点不变。
+    assert spark.tier_rank > ivan.tier_rank
     edge = registry.by_id("edge-qwen38-flash")
     assert edge is not None
     assert edge.modalities == ("text",)
@@ -2982,15 +2996,15 @@ def test_auto_prefers_local_unless_cloud_tier_is_required(
             conversation=None,
         )
     )
-    assert local.endpoint.id == "ivan-qwen38-flash-128k"
+    assert local.endpoint.id == "spark-dsv41-flash-256k"
     assert cloud.endpoint.id == "cloud-deepseek-v4-flash"
 
 
 @pytest.mark.parametrize(
     ("provider_priority", "expected_node"),
     [
-        ("local_first", "ivan"),
-        ("balanced", "ivan"),
+        ("local_first", "spark"),
+        ("balanced", "spark"),
         ("cloud_first", "cloud"),
     ],
 )
@@ -4211,6 +4225,7 @@ def test_declared_vision_endpoints_are_registered_for_images() -> None:
         "cloud-deepseek-v4-flash",
         "nx1-ornith-35b-a3b-96k",
         "qwen36-shared-fleet",
+        "spark-dsv41-flash-256k",
         "zhipu-glm-5.3-flash",
     }
     pending_validation = {
@@ -4344,6 +4359,7 @@ def test_large_base64_image_bypasses_text_tpm_and_routes_to_vision(
     )
     encoded = base64.b64encode(image_buffer.getvalue()).decode("ascii")
     local_vision_models = {
+        "DeepSeek-v4.1-Flash-EXL3",
         "huihui/Qwen3.8-27B-Q4-DFlash2",
         "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF",
         "Qwen/Qwen3.8-Flash-Next-ROCmFP4-FAST-imatrix-MTP",
@@ -4409,6 +4425,7 @@ def test_large_base64_image_bypasses_text_tpm_and_routes_to_vision(
         "ai",
         "ivan",
         "amd",
+        "spark",
     }
     run(runtime.internal_client.aclose())
 
@@ -4725,7 +4742,11 @@ def test_auto_vision_workspace_failure_tries_p40_then_v100_then_falls_back(
     assert response.json()["choices"][0]["message"]["content"] == (
         "FALLBACK_OK"
     )
-    assert response.headers["x-1panel-route-node"] in {"ivan", "amd"}
+    assert response.headers["x-1panel-route-node"] in {
+        "spark",
+        "ivan",
+        "amd",
+    }
     assert [httpx.URL(item).port for item in calls[:2]] == [18111, 18110]
     assert runtime.health.failed == [
         "worker-priority-1:image",
@@ -6096,9 +6117,7 @@ def test_workbuddy_missing_tool_call_id_is_repaired_and_stays_local(
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        assert payload["model"] == (
-            "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
-        )
+        assert payload["model"] == "DeepSeek-v4.1-Flash-EXL3"
         assert payload["messages"][2]["tool_call_id"] == "call-lookup"
         return httpx.Response(
             200,
@@ -6163,7 +6182,7 @@ def test_workbuddy_missing_tool_call_id_is_repaired_and_stays_local(
             },
         )
     assert response.status_code == 200
-    assert response.headers["x-1panel-route-node"] == "ivan"
+    assert response.headers["x-1panel-route-node"] == "spark"
     assert response.headers["x-1panel-tool-history-repaired"] == "1"
     assert response.headers["x-1panel-protocol"] == "chat"
     run(runtime.internal_client.aclose())
@@ -6277,22 +6296,28 @@ def test_auto_spills_busy_local_to_next_local_without_cooldown(
     fake_health = FakeHealth(statuses)
     runtime.health = fake_health
     runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
-    edge = registry.by_id("ivan-qwen38-flash-128k")
-    assert edge is not None
-    holder = run(runtime.scheduler.begin_request(None))
-    run(
-        runtime.scheduler.acquire_deployment(
-            holder,
-            edge.id,
-            "edge-holder",
-            timeout_seconds=0.2,
-            affinity_priority=False,
+    busy = registry.by_id("spark-dsv41-flash-256k")
+    assert busy is not None
+    holders = []
+    for index in range(busy.max_concurrency):
+        holder = run(runtime.scheduler.begin_request(None))
+        run(
+            runtime.scheduler.acquire_deployment(
+                holder,
+                busy.id,
+                f"busy-holder-{index}",
+                timeout_seconds=0.2,
+                affinity_priority=False,
+                capacity=busy.max_concurrency,
+            )
         )
-    )
+        holders.append(holder)
 
     async def upstream(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        assert payload["model"] == registry.by_id("ai-qwen38-27b").provider_model
+        assert payload["model"] == registry.by_id(
+            "ivan-qwen38-flash-128k"
+        ).provider_model
         return httpx.Response(
             200,
             headers={"content-type": "application/json"},
@@ -6304,7 +6329,7 @@ def test_auto_spills_busy_local_to_next_local_without_cooldown(
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "SPILLED_TO_AI",
+                            "content": "SPILLED_TO_NEXT_LOCAL",
                         },
                         "finish_reason": "stop",
                     }
@@ -6327,12 +6352,13 @@ def test_auto_spills_busy_local_to_next_local_without_cooldown(
             },
         )
     assert response.status_code == 200
-    assert response.headers["x-1panel-route-node"] == "ai"
+    assert response.headers["x-1panel-route-node"] == "ivan"
     assert response.headers["x-1panel-route-reason"] == "capacity_spillover"
     assert response.headers["x-1panel-capacity-attempts"] == "2"
     assert float(response.headers["x-1panel-queue-wait-ms"]) < 1000
     assert fake_health.failed == []
-    run(holder.release())
+    for holder in holders:
+        run(holder.release())
     run(runtime.internal_client.aclose())
 
 
@@ -6461,11 +6487,13 @@ def test_auto_uses_cloud_after_all_local_capacity_is_busy(
     runtime.health = fake_health
     runtime.policy = RoutingPolicy(registry, runtime.settings, runtime.health)
     holders = []
-    for deployment_id in (
-        "ivan-qwen38-flash-128k",
-        "amd-qwen38-rocmfpx-128k",
-        "worker-priority-0",
-        "worker-priority-1",
+    for deployment_id, capacity in (
+        ("spark-dsv41-flash-256k", 2),
+        ("spark-dsv41-flash-256k", 2),
+        ("ivan-qwen38-flash-128k", 1),
+        ("amd-qwen38-rocmfpx-128k", 1),
+        ("worker-priority-0", 1),
+        ("worker-priority-1", 1),
     ):
         holder = run(runtime.scheduler.begin_request(None))
         run(
@@ -6475,6 +6503,7 @@ def test_auto_uses_cloud_after_all_local_capacity_is_busy(
                 f"holder-{deployment_id}",
                 timeout_seconds=0.2,
                 affinity_priority=False,
+                capacity=capacity,
             )
         )
         holders.append(holder)
@@ -6521,7 +6550,7 @@ def test_auto_uses_cloud_after_all_local_capacity_is_busy(
         response.headers["x-1panel-route-reason"]
         == "cloud_capacity_fallback"
     )
-    assert response.headers["x-1panel-capacity-attempts"] == "4"
+    assert response.headers["x-1panel-capacity-attempts"] == "5"
     assert fake_health.failed == []
     for holder in holders:
         run(holder.release())
@@ -6571,12 +6600,14 @@ def test_auto_returns_429_when_all_local_busy_and_cloud_disabled(
             runtime.health,
         )
         holders = []
-        for deployment_id in (
-            "edge-qwen38-flash",
-            "ivan-qwen38-flash-128k",
-            "amd-qwen38-rocmfpx-128k",
-            "worker-priority-0",
-            "worker-priority-1",
+        for deployment_id, capacity in (
+            ("spark-dsv41-flash-256k", 2),
+            ("spark-dsv41-flash-256k", 2),
+            ("edge-qwen38-flash", 1),
+            ("ivan-qwen38-flash-128k", 1),
+            ("amd-qwen38-rocmfpx-128k", 1),
+            ("worker-priority-0", 1),
+            ("worker-priority-1", 1),
         ):
             holder = await runtime.scheduler.begin_request(None)
             await runtime.scheduler.acquire_deployment(
@@ -6585,6 +6616,7 @@ def test_auto_returns_429_when_all_local_busy_and_cloud_disabled(
                 f"holder-{deployment_id}",
                 timeout_seconds=0.2,
                 affinity_priority=False,
+                capacity=capacity,
             )
             holders.append(holder)
         lease = await runtime.scheduler.begin_request(None)
@@ -6720,15 +6752,20 @@ def test_eight_parallel_auto_capacity_selections_stay_local(
             result[0].endpoint.node
             for _lease, result in selections
         )
-        assert nodes == Counter({"ai": 6, "ivan": 1, "amd": 1})
+        assert sum(nodes.values()) == 8
+        assert set(nodes) <= {"ai", "ivan", "amd", "spark"}
+        # spark 先被填满（2 槽），随后 ivan 的 1 槽，其余落在 ai_pool。
+        assert nodes == Counter({"ai": 5, "spark": 2, "ivan": 1})
         ai_deployments = {
             result[0].deployment_id
             for _lease, result in selections
             if result[0].endpoint.node == "ai"
         }
-        assert ai_deployments == {
+        # ai_pool 的 6 个 worker 里只有被选中的那几个参与，且互不重复。
+        assert ai_deployments <= {
             f"worker-{index}" for index in range(6)
         }
+        assert len(ai_deployments) == nodes["ai"]
         for lease, result in selections:
             await runtime.budget.release(result[3])
             await lease.release()
@@ -6907,9 +6944,7 @@ def test_chat_history_infers_same_conversation_and_worker(
         nonlocal calls
         calls += 1
         payload = json.loads(request.content)
-        assert payload["model"] == (
-            "huihui/Qwen3.8-27B-abliterated-NVFP4-GGUF"
-        )
+        assert payload["model"] == "DeepSeek-v4.1-Flash-EXL3"
         if calls == 1:
             assert len(payload["messages"]) == 1
             answer = "CACHE-ANCHOR"

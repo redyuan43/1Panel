@@ -29,12 +29,15 @@ async def select(pool, endpoints, statuses, rid, conversation=None):
     return e, t
 
 
-def test_parallel_new_conversations_spread_across_three_devices():
+def test_parallel_new_conversations_spread_across_local_devices():
     async def case():
         pool, es, sts = fixtures()
-        choices = await asyncio.gather(*(select(pool, es, sts, str(i)) for i in range(3)))
+        # 2026-09-26 起同组本地设备为 4 台（新增 spark-dsv41-flash-256k），
+        # 并发新会话必须覆盖全部成员，不因单台并发数更大而被重复选中。
+        count = len(MEMBERS)
+        choices = await asyncio.gather(*(select(pool, es, sts, str(i)) for i in range(count)))
         assert {e.id for e, _ in choices} == set(MEMBERS)
-        assert len(await pool.store.list_json(PREFIX + "claim:")) == 3
+        assert len(await pool.store.list_json(PREFIX + "claim:")) == count
     run(case())
 
 
@@ -135,3 +138,24 @@ def test_pool_settings_reject_invalid_values_without_crashing(tmp_path,change):
     value=settings(tmp_path).value
     value["routing"]["local_pool"].update(change)
     with pytest.raises(ValueError): validate_settings(value)
+
+
+@pytest.mark.parametrize("members,accepted", [
+    (list(MEMBERS), True),
+    (list(MEMBERS)[:3], True),  # 滚动发布期间旧镜像的三成员清单必须继续有效。
+    (["spark-dsv41-flash-256k"], True),
+    ([], False),
+    (["unknown-local-node"], False),
+    (list(MEMBERS) + [MEMBERS[0]], False),
+    ([*MEMBERS[:3], "unknown-local-node"], False),
+])
+def test_pool_members_accept_known_subsets_only(tmp_path, members, accepted):
+    from tests.test_core import settings
+    from ai_router.config import validate_settings
+    value = settings(tmp_path).value
+    value["routing"]["local_pool"]["members"] = members
+    if accepted:
+        validate_settings(value)
+    else:
+        with pytest.raises(ValueError):
+            validate_settings(value)

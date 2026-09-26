@@ -1,7 +1,7 @@
 <!-- context-meta
 {
   "status": "current",
-  "last_verified_at": "2026-09-20T18:06:21+08:00",
+  "last_verified_at": "2026-09-26T11:00:00+08:00",
   "verified_commit": "471b3004b14a4c7add9088e3d448a2eb41f7e087",
   "runtime_verification": "read_only_metadata",
   "authoritative_sources": ["../config/defaults.yaml", "../config/registry.yaml", "../ai_router/policy.py", "../ai_router/routing_modes.py", "../ai_router/errors.py"]
@@ -12,6 +12,30 @@
 
 下列带日期的“未部署”描述记录当日快照；之后的生产状态须按运行镜像的
 OCI revision、配置和发布证据重新核验。
+
+## 2026-09-26 新增 2× DGX Spark 本地端点并扩为 4 本地成员（Git 候选）
+
+- 新增端点 `spark-dsv41-flash-256k`：2× DGX Spark GB10 上的
+  `DeepSeek-v4.1-Flash-EXL3`（vLLM TP=2，EXL3 2.9bpw + DSpark k=3），经 Tailscale
+  私网 `http://spark.taild500c8.ts.net:8888/v1` 接入；对外公开名
+  `siyuan/dsv41-flash-spark-256k`，代号别名 `siyuan/lingxi`。
+- 能力与容量来自服务端启动实况，不是端点激活验收结论：`MAX_MODEL_LEN=262144`、
+  `MAX_NUM_SEQS=2`、`MAX_NUM_BATCHED_TOKENS=2048`；启动参数含
+  `--enable-auto-tool-choice` 与 `--tool-call-parser deepseek_v41`（工具）、
+  `--reasoning-parser deepseek_v41`（思维链）；`/v1/responses` 路由存在（Responses
+  原生）；`LANGUAGE_MODEL_ONLY=0` 且 `LIMIT_MM={"image":100}`（视觉，单请求 100 图）。
+- **本轮按用户明确指示不逐项执行端点激活验收**，也未发送真实模型请求做能力复核。
+  因此 `capabilities.validation_status` 记录的是引擎启动证据而非验收结论，
+  注册表与元数据里的 `activation_status` 同义。这与 `docs/endpoint-management.md`
+  要求的「新增能力或提高安全上限必须先通过独立真实验收」是**有意偏离**，
+  引用本端点的能力声明时必须同时引用这条前提。
+- 质量分 `130`（四类任务同值）是**用户指定的默认优先级声明**，不是同口径基准分；
+  元数据 `quality_status` / `quality_basis` 已注明未做同方法学基准。
+- `routing.local_pool` 由三成员扩为四成员（见
+  `docs/local-pool-routing-20260908.md` 的 2026-09-26 节）。成员全集仍是代码常量
+  `ai_router/local_pool.py` 的 `MEMBERS`；校验放宽为「已知成员的非空唯一子集」，
+  使滚动发布期间新旧成员清单可以并存。未知成员、重复项、空清单继续拒绝。
+- 本节描述源码与配置契约；实际镜像、生效成员清单和真实路由结果以本轮发布记录为准。
 
 ## 2026-09-25 单次视频能力与错误语义审查
 

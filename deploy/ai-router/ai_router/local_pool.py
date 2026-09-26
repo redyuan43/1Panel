@@ -7,7 +7,16 @@ import math
 import time
 from uuid import uuid4
 
-MEMBERS = ("ai-qwen38-27b", "edge-qwen38-flash", "amd-qwen38-rocmfpx-128k")
+# 同一候选组的本地设备。2026-09-26 起把 2× DGX Spark 上的
+# spark-dsv41-flash-256k 并入本组，成为第 4 个成员；组内排序规则不变。
+# 运行时的 routing.local_pool.members 必须是非空唯一的已知成员子集，
+# 允许滚动发布期间先保留旧列表，再逐台对齐到本常量。
+MEMBERS = (
+    "ai-qwen38-27b",
+    "edge-qwen38-flash",
+    "amd-qwen38-rocmfpx-128k",
+    "spark-dsv41-flash-256k",
+)
 PREFIX = "router:local-pool:v1:"
 
 
