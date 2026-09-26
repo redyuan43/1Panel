@@ -58,13 +58,15 @@ ComfyUI `execution_start` 分别为 01:06:46.071、01:06:46.115，`execution_suc
 
 当日 20:55 只读核验时，Ivan 根目录剩余 24.325 GiB，低于 worker 启动门槛 25 GiB；worker 报 `worker preflight resources unavailable`，systemd 累计重启约 7,623 次，Fleet 因 `Requires=` 随之反复停止和启动。两卡显存空闲、可用内存约 49 GiB、swap 约 249 MiB，视频 NVMe 剩余 45.663 GiB。逐项读取 worker 的实际采样和门槛，定位为根目录空间。仅清理 Ivan 回收站中已删除的旧 Espressif 分发包 `dist.2.2` 和旧设备模型缓存 `OptGuideOnDeviceModel.2.2`（合计约 5.1 GiB），根目录回升至 29.390 GiB；随后两路 ComfyUI `/system_stats` 均成功，Fleet/worker 恢复 active。Fleet 数据库只有 `completed=4`、`cancelled=2`，活动/排队任务为 0。
 
-为防止下次资源不足时重启风暴，将 worker 失败重试间隔从 15 秒改为 120 秒，并把 Fleet 对 worker 的启动依赖改为 `Wants=`；worker 缺席时容量查询已有 `503 capacity_unavailable` 保护，Fleet 可以保留任务状态查询。该配置的现场发布和故障演练结果见下方最终发布记录。
+为防止下次资源不足时重启风暴，将 worker 失败重试间隔从 15 秒改为 120 秒，并把 Fleet 对 worker 的启动依赖改为 `Wants=`；worker 缺席时容量查询已有 `503 capacity_unavailable` 保护，Fleet 可以保留任务状态查询。配置已从提交 `a988756d6` 发布到 Ivan，两份运行 unit 的 SHA-256 分别为 `f2deaa60664e35990ceaae31709e0c738b027f587ee053002768b0d80bc7309c` 和 `4387a6ba62c5adef51fdd1672d4edb4e19a7c80b2a267c283aed2531cfbf77ef`。
 
 ## 账号与最终发布记录
 
 夜间验收临时账号 `media-night-acceptance-20260925` 的三条成功视频任务已在正式 API 再查为 `completed`；验收 Key 已撤销，账号已停用，本地明文文件已改为 `REVOKED`。local API 用原 Key 复核返回 401。
 
-待补：Ivan systemd 配置发布后的故障演练、Git 提交/推送及最终运行版本。
+发布后受控停止 worker，Fleet 仍保持同一 PID `3114577` 且 active；容量接口从 200 转为 `503 capacity_unavailable`。重新启动 worker 后，两路 ComfyUI 恢复，容量接口回到 200，Fleet PID 未变。最后核验 Ivan 根目录剩余 29.389 GiB、视频 NVMe 剩余 45.663 GiB；worker 与 Fleet 均 active，worker 重启计数在这次手动启动后为 0，活动/排队任务仍为 0。
+
+2026-09-26 最后核验时 Router local/tail 的 API 镜像 ID 均为 `sha256:49cfda35d70fdbd4405567720b35cf56e404bb9a92af3e214dbfb29b0c92f01f`，Control 镜像 ID 均为 `sha256:0a9706fb612a42b5d4081c37055b1cc5553c08e82e51165d27895a65c5e523c7`，OCI revision 均为后续 Spark 提交 `f45d95d9a`，四实例运行且重启计数 0；local/tail API `/health` 均为 200。媒体适配器仍运行 `20260925-video-options-2e270a521` release，服务 active、重启计数 0。Ivan worker 脚本仍为 `b67ef8bd9`，本次只更新其 systemd 单元。源码提交 `a988756d6` 已生成；推送状态以交付时 Git 核验为准。
 
 ## 边界
 

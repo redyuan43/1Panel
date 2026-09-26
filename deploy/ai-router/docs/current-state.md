@@ -65,6 +65,11 @@ OCI revision、配置和发布证据重新核验。
   `POST /api/endpoints/{id}/actions/{enable,disable,auto-enable,auto-disable}`。
   本轮按用户选择**不启用**任何偏向配置，`auto` 语义与上线前一致。
 
+## 2026-09-26 图片与视频正式 API 验收追记
+
+- 2026-09-25 生产镜像先以 `943a2332b` 发布历史错误码修复，媒体适配器以 `2e270a521` 发布 H3-only 能力选项和 422 准入。仅授权 `minimax-h3` 的验收账号读到 `i2v / 15 秒 / 16:9`；未验收的 t2v、4 秒及竖屏组合在建任务前被拒绝。NX5 正式 API 文生图及图片编辑各完成一条；Ivan 正式视频 API 双 RTX 3060 同时完成两条 15 秒视频，NX5 生成图片作为第三条视频首帧也完成。任务、时间、文件哈希、故障注入和资源数据见 `../../../docs/media-acceptance-20260925.md`。
+- 2026-09-26 再核验时，local/tail API 与 Control 已运行后续 `f45d95d9a` 镜像，四实例健康且重启计数为 0；媒体适配器仍为 `20260925-video-options-2e270a521`。Ivan worker 的 systemd 依赖修复另见 H3 状态文档。验收临时 Key 已撤销、账号已停用；生产开放组合未扩展到 t2v、竖屏、其他时长或高分辨率。
+
 ## 2026-09-25 单次视频能力与错误语义审查
 
 - 仅授权 `minimax-h3` 的内部账号也能从 `/v1/media/options` 读取已验收的单次视频组合，客户端 ComfyUI 可以据此预检。

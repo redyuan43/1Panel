@@ -10,11 +10,11 @@
 
 # H3 平台当前状态
 
-## 2026-09-26 Ivan 视频现场恢复与服务依赖修复候选
+## 2026-09-26 Ivan 视频现场恢复与服务依赖修复（已部署）
 
-- 2026-09-25 正式 API 的双 RTX 3060 同时执行两条 `i2v / 15 秒 / 16:9`，两份 362 帧、864×480、含音轨视频均完整解码；其后 NX5 正式生图作为 Ivan 第三条视频首帧的跨模态链路也完成。运行中终止空闲 preview worker 后，main 任务仍完成。文件与耗时证据见 `docs/media-acceptance-20260925.md`；内容画质未由客户验收。
+- 2026-09-25 正式 API 的双 RTX 3060 同时执行两条 `i2v / 15 秒 / 16:9`，两份 362 帧、864×480、含音轨视频均完整解码；其后 NX5 正式生图作为 Ivan 第三条视频首帧的跨模态链路也完成。运行中终止空闲 preview worker 后，main 任务仍完成。文件与耗时证据见 `media-acceptance-20260925.md`；内容画质未由客户验收。
 - 2026-09-26 Ivan 根目录只剩 24.325 GiB，低于 worker 的 25 GiB 启动门槛；worker 连续失败使 Fleet 随 `Requires=` 反复重启。清理回收站中两个已删除的旧缓存目录后，根目录剩余 29.390 GiB，两路 ComfyUI 与 Fleet 恢复；NVMe 视频目录剩余 45.663 GiB，数据库无活动/排队任务。
-- 本次源码候选将 worker 重试间隔由 15 秒改为 120 秒，Fleet 对 worker 改用 `Wants=`。worker 暂不可用时 Fleet 继续提供任务查询，容量接口仍以 `503 capacity_unavailable` 拒绝未知容量。服务文件发布及故障演练结果须另外核对，不以源码候选推断已生效。
+- 提交 `a988756d6` 已将 worker 重试间隔由 15 秒改为 120 秒，Fleet 对 worker 改用 `Wants=`。发布后受控停止 worker，Fleet 保持同一 PID，容量接口返回 `503 capacity_unavailable`；恢复 worker 后两路 ComfyUI 和容量接口正常，Fleet PID 未变。运行 unit 哈希及最后资源快照见 `media-acceptance-20260925.md`。
 
 ## 2026-09-25 Ivan 正式双路验收故障与修复候选
 
