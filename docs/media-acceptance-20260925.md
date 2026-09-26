@@ -66,7 +66,7 @@ ComfyUI `execution_start` 分别为 01:06:46.071、01:06:46.115，`execution_suc
 
 发布后受控停止 worker，Fleet 仍保持同一 PID `3114577` 且 active；容量接口从 200 转为 `503 capacity_unavailable`。重新启动 worker 后，两路 ComfyUI 恢复，容量接口回到 200，Fleet PID 未变。最后核验 Ivan 根目录剩余 29.389 GiB、视频 NVMe 剩余 45.663 GiB；worker 与 Fleet 均 active，worker 重启计数在这次手动启动后为 0，活动/排队任务仍为 0。
 
-2026-09-26 最后核验时 Router local/tail 的 API 镜像 ID 均为 `sha256:49cfda35d70fdbd4405567720b35cf56e404bb9a92af3e214dbfb29b0c92f01f`，Control 镜像 ID 均为 `sha256:0a9706fb612a42b5d4081c37055b1cc5553c08e82e51165d27895a65c5e523c7`，OCI revision 均为后续 Spark 提交 `f45d95d9a`，四实例运行且重启计数 0；local/tail API `/health` 均为 200。媒体适配器仍运行 `20260925-video-options-2e270a521` release，服务 active、重启计数 0。Ivan worker 脚本仍为 `b67ef8bd9`，本次只更新其 systemd 单元。源码提交 `a988756d6` 已生成；推送状态以交付时 Git 核验为准。
+2026-09-26 21:07 最后核验时 Router local/tail 的 API 镜像 ID 均为 `sha256:49cfda35d70fdbd4405567720b35cf56e404bb9a92af3e214dbfb29b0c92f01f`，Control 镜像 ID 均为 `sha256:0a9706fb612a42b5d4081c37055b1cc5553c08e82e51165d27895a65c5e523c7`，OCI revision 均为后续 Spark 提交 `f45d95d9a`，四实例运行且重启计数 0；local/tail API `/health` 均为 200。媒体适配器仍运行 `20260925-video-options-2e270a521` release，服务 active、重启计数 0、鉴权后 `/health` 为 200。Ivan worker 脚本仍为 `b67ef8bd9`，本次只更新其 systemd 单元。代码提交 `a988756d6` 与验收文档已推送至 `fork/dev-v2`；本报告的后续更正以该分支 Git 历史为准。
 
 ## 边界
 
