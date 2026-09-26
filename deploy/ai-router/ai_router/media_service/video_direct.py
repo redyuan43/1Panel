@@ -18,6 +18,7 @@ from .providers import H3Provider
 
 
 SINGLE = "single_generation"
+HANDOFF_WAIT_SECONDS = 300
 logger = logging.getLogger(__name__)
 
 
@@ -65,7 +66,7 @@ def load_pool(path: str | None = None) -> list[dict]:
         required = {"id", "adapter", "url", "key_env", "resource_id", "model", "capabilities", "enabled", "qualified"}
         if not isinstance(endpoint, dict):
             raise ValueError("Invalid media executor fields")
-        optional = {"priority", "max_parallel"}
+        optional = {"priority", "max_parallel", "handoff_url"}
         if not required <= set(endpoint) or set(endpoint) - required - optional:
             raise ValueError("Invalid media executor fields")
         for field in ("id", "resource_id", "key_env"):
@@ -83,6 +84,8 @@ def load_pool(path: str | None = None) -> list[dict]:
                 or not 1 <= endpoint.get("max_parallel", 1) <= 2):
             raise ValueError("Invalid H3 priority or physical capacity")
         endpoint = {**endpoint, "url": private_url(endpoint["url"])}
+        if "handoff_url" in endpoint:
+            endpoint["handoff_url"] = private_url(endpoint["handoff_url"])
         if not isinstance(endpoint["capabilities"], list) or not endpoint["capabilities"]:
             raise ValueError("Executor capabilities are required")
         for capability in endpoint["capabilities"]:
@@ -195,6 +198,26 @@ class VideoGeneration:
             return False
         return len(active) < maximum and not any(row.get("untracked_count") for row in capacity.get("queues", []))
 
+    async def prepare(self, endpoint, operation_id):
+        """Ask a host-local GPU handoff to prepare capacity before probing Fleet."""
+        if "handoff_url" not in endpoint:
+            return "ready"
+        key = os.environ.get(endpoint["key_env"], "")
+        if not key:
+            return "unavailable"
+        try:
+            response = await self.media.client.post(
+                endpoint["handoff_url"] + "/prepare",
+                headers={"Authorization": "Bearer " + key},
+                json={"operation_id": operation_id}, timeout=5,
+            )
+            if response.status_code not in {200, 202}:
+                return "unavailable"
+            state = response.json().get("state")
+            return state if state in {"ready", "preparing", "unavailable"} else "unavailable"
+        except (httpx.HTTPError, ValueError, TypeError):
+            return "unavailable"
+
     async def select(self, job):
         def stopped():
             current = self.store.get(job["id"])
@@ -217,17 +240,28 @@ class VideoGeneration:
 
         async def probe(endpoint, capability):
             try:
-                return endpoint, capability, await self.ready(endpoint, capability)
+                preparation = await self.prepare(endpoint, job["id"])
+                if preparation != "ready":
+                    return endpoint, capability, preparation
+                return endpoint, capability, "ready" if await self.ready(endpoint, capability) else "unavailable"
             except (MediaError, httpx.HTTPError, ValueError, KeyError, TypeError):
-                return endpoint, capability, False
+                return endpoint, capability, "unavailable"
 
         probes = [asyncio.create_task(probe(endpoint, capability))
                   for endpoint, capability in sorted(
                       self.candidates(job["request"]),
                       key=lambda candidate: candidate[0].get("priority", 100))]
         try:
-            for endpoint, capability, available in await asyncio.gather(*probes):
-                if not available:
+            for endpoint, capability, availability in await asyncio.gather(*probes):
+                if availability == "preparing":
+                    since = self.store.get(job["id"]).get("handoff_started_at")
+                    if since is None:
+                        since = time.time()
+                        self.store.update(job["id"], handoff_started_at=since)
+                    if time.time() - since < HANDOFF_WAIT_SECONDS:
+                        return None
+                    continue
+                if availability != "ready":
                     continue
                 # Network probes never hold the shared resource allocation lock.
                 async with self.allocation_lock:
@@ -258,11 +292,22 @@ class VideoGeneration:
             finishing = False
             try:
                 if not state.get("submitted"):
+                    persisted_reservation = bool(state.get("endpoint"))
                     state = await self.select(job)
                     if state is None:
                         return
                     endpoint, capability = state["endpoint"], state["capability"]
                     body = job["request"]
+                    # A process can restart after persisting a slot but before
+                    # sending the execution. Recheck a borrowed GPU before POST.
+                    if persisted_reservation and "handoff_url" in endpoint:
+                        if await self.prepare(endpoint, identifier) != "ready":
+                            return
+                        try:
+                            if not await self.ready(endpoint, capability):
+                                return
+                        except (MediaError, httpx.HTTPError, ValueError, KeyError, TypeError):
+                            return
                     if self.store.get(identifier).get("cancel_requested"):
                         self.store.update(identifier, status="cancelled")
                         return

@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "max_active_jobs": 1,
+  "short": {
+    "preview": {"max_frames": 124, "steps": 6, "max_parallel": 1, "lanes": ["fast"], "memory_budget_gib": 8, "disk_budget_gib": 1, "evidence": "20260907-233628/gate3-triple-6step/report.json"},
+    "quality": {"max_frames": 124, "steps": 14, "max_parallel": 1, "lanes": ["fast"], "memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "20260907-233628/gate3-dual-14step-768-124/report.json"}
+  },
+  "long": {"max_parallel": 1, "lanes": ["fast"], "memory_budget_gib": 24, "preview_memory_budget_gib": 12, "disk_budget_gib": 1, "evidence": "outputs/media-validation-20260924/video-three-card/REPORT.md (u24 15s i2v preview)"},
+  "mixed_profiles": false,
+  "mixed_short_long": false,
+  "resources": {"min_available_ram_gib": 16, "max_cgroup_gib": 32, "max_swap_gib": 1, "swap_idle_stable_seconds": 60, "swap_hard_limit_gib": 8, "swap_recovery_mode": "stable_idle_exclusive_fast_only", "min_root_free_gib": 25, "min_offload_free_gib": 40},
+  "promotion": "u24 RTX 4060 Ti: one qualified 15-second 16:9 image-to-video preview job; no dual-lane or quality480 promotion."
+}

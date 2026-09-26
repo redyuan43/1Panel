@@ -1,0 +1,21 @@
+{
+  "id": "u24-h3-video",
+  "adapter": "h3",
+  "url": "http://100.120.143.109:19390",
+  "handoff_url": "http://100.120.143.109:19391",
+  "key_env": "AI_ROUTER_U24_VIDEO_KEY",
+  "resource_id": "u24_4060_ti",
+  "model": "minimax-h3",
+  "enabled": false,
+  "qualified": false,
+  "priority": 0,
+  "max_parallel": 1,
+  "capabilities": [
+    {
+      "mode": "i2v",
+      "profile": "preview",
+      "durations": [15],
+      "aspect_ratios": ["16:9"]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+[Unit]
+Description=SIYUAN u24 4060 Ti text/video handoff
+After=network-online.target siyuan-video-u24-fleet.service
+Wants=siyuan-video-u24-fleet.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ivan/.local/state/siyuan-video-u24-production
+ExecStart=/home/ivan/h3/fleet-venv/bin/python /home/ivan/.local/state/siyuan-video-u24-production/current/h3-fleet/scripts/serve_video_u24_handoff.py
+Restart=on-failure
+RestartSec=10
+UMask=0077
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

@@ -162,6 +162,120 @@ def test_pool_rejects_unqualified_dimensions(tmp_path):
     config.write_text(json.dumps({"version": 1, "executors": [value]}))
     with pytest.raises(ValueError, match="Invalid H3 qualified capability"):
         load_pool(str(config))
+    value = {**endpoint(), "handoff_url": "https://public.example/prepare"}
+    config.write_text(json.dumps({"version": 1, "executors": [value]}))
+    with pytest.raises(ValueError, match="loopback or Tailscale"):
+        load_pool(str(config))
+
+
+def test_u24_handoff_waits_for_preferred_gpu_then_submits_once(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIDEO_TEST_KEY", "test-only")
+    preparation = ["preparing", "ready"]
+    posts = []
+
+    def handler(request):
+        path = request.url.path
+        if path == "/prepare":
+            return httpx.Response(202, json={"state": preparation.pop(0) if preparation else "ready"})
+        if path.endswith("/options"):
+            return httpx.Response(200, json={"contract_version": 1, "workflow_contract_version": 2,
+                                             "mode": ["i2v"], "managed_recipes": []})
+        if path.endswith("/capacity"):
+            return httpx.Response(200, json={"active": [], "queues": []})
+        if request.method == "POST":
+            posts.append(str(request.url.host))
+            return httpx.Response(202, json={"status": "submitted"})
+        return httpx.Response(200, json={"status": "submitted"})
+
+    async def scenario():
+        svc = service(tmp_path, handler)
+        u24 = {**endpoint(), "id": "u24-h3", "url": "http://100.120.143.109:19390",
+               "handoff_url": "http://100.120.143.109:19391", "resource_id": "u24_4060",
+               "priority": 0, "max_parallel": 1}
+        u24["capabilities"] = [{"mode": "i2v", "profile": "preview", "durations": [15],
+                                "aspect_ratios": ["16:9"]}]
+        svc.video_direct.executors = [u24, endpoint()]
+        job = svc.submit("alice", "video", body(), "u24", "req")
+        await svc.video_direct.step(job["id"])
+        assert posts == []
+        assert svc.store.get(job["id"])["status"] == "queued"
+        await svc.video_direct.step(job["id"])
+        assert posts == ["100.120.143.109"]
+        assert svc.store.get(job["id"])["provider_state"]["endpoint"]["id"] == "u24-h3"
+        await svc.close()
+    asyncio.run(scenario())
+
+
+def test_u24_handoff_unavailable_falls_back_to_ivan(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIDEO_TEST_KEY", "test-only")
+    posts = []
+
+    def handler(request):
+        path = request.url.path
+        if path == "/prepare":
+            return httpx.Response(503, json={"state": "unavailable"})
+        if path.endswith("/options"):
+            return httpx.Response(200, json={"contract_version": 1, "workflow_contract_version": 2,
+                                             "mode": ["i2v"], "managed_recipes": ["h3-i2va-480p15-3060-v1"]})
+        if path.endswith("/capacity"):
+            return httpx.Response(200, json={"active": [], "queues": [],
+                                             "policy": {"quality480_i2v": {"max_parallel": 2}}})
+        if request.method == "POST":
+            posts.append(str(request.url.host))
+            return httpx.Response(202, json={"status": "submitted"})
+        return httpx.Response(200, json={"status": "submitted"})
+
+    async def scenario():
+        svc = service(tmp_path, handler)
+        u24 = {**endpoint(), "id": "u24-h3", "url": "http://100.120.143.109:19390",
+               "handoff_url": "http://100.120.143.109:19391", "resource_id": "u24_4060",
+               "priority": 0, "max_parallel": 1}
+        u24["capabilities"] = [{"mode": "i2v", "profile": "preview", "durations": [15],
+                                "aspect_ratios": ["16:9"]}]
+        svc.video_direct.executors = [u24, endpoint()]
+        job = svc.submit("alice", "video", body(), "fallback", "req")
+        await svc.video_direct.step(job["id"])
+        assert posts == ["100.96.79.21"]
+        await svc.close()
+    asyncio.run(scenario())
+
+
+def test_persisted_u24_slot_rechecks_handoff_before_first_post(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIDEO_TEST_KEY", "test-only")
+    preparation = ["preparing", "ready"]
+    posts = []
+
+    def handler(request):
+        path = request.url.path
+        if path == "/prepare":
+            return httpx.Response(202, json={"state": preparation.pop(0)})
+        if path.endswith("/options"):
+            return httpx.Response(200, json={"contract_version": 1, "workflow_contract_version": 2,
+                                             "mode": ["i2v"], "managed_recipes": []})
+        if path.endswith("/capacity"):
+            return httpx.Response(200, json={"active": [], "queues": []})
+        if request.method == "POST":
+            posts.append(1)
+            return httpx.Response(202, json={"status": "submitted"})
+        return httpx.Response(200, json={"status": "submitted"})
+
+    async def scenario():
+        svc = service(tmp_path, handler)
+        u24 = {**endpoint(), "id": "u24-h3", "url": "http://100.120.143.109:19390",
+               "handoff_url": "http://100.120.143.109:19391", "resource_id": "u24_4060",
+               "priority": 0, "max_parallel": 1,
+               "capabilities": [{"mode": "i2v", "profile": "preview", "durations": [15],
+                                 "aspect_ratios": ["16:9"]}]}
+        svc.video_direct.executors = [u24]
+        job = svc.submit("alice", "video", body(), "persisted", "req")
+        assert svc.store.reserve_video_executor(job["id"], u24, u24["capabilities"][0])
+        await svc.video_direct.step(job["id"])
+        assert posts == []
+        assert svc.store.get(job["id"])["provider_state"]["submitted"] is False
+        await svc.video_direct.step(job["id"])
+        assert posts == [1]
+        await svc.close()
+    asyncio.run(scenario())
 
 
 def test_video_gateway_forwards_trusted_account_policy_without_image_snapshot(media_gateway):

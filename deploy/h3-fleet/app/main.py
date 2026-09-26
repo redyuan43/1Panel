@@ -25,6 +25,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from .workflow_builder import SUPPORTED_MODES, build_workflow
 from .managed_video import QUALITY480_RECIPE
+from .owned_outputs import owned_output
 from .admission import BUSY, CapacityPolicy, InstanceLock, SwapRecovery, resource_snapshot
 from .recipes import RecipeCatalog
 from .recipe_dispatch import RecipeDispatcher, backend_identity
@@ -1509,6 +1510,15 @@ async def view(
             raise HTTPException(404, 'owned Edge output is unavailable')
         return FileResponse(target, media_type='video/mp4', headers={'Cache-Control': 'private, no-store'})
     lane = fleet.recipes.lane_for(job)
+    roots = json.loads(os.environ.get("H3_PERSISTENT_OUTPUT_ROOTS", "{}"))
+    if lane.id in roots:
+        if job["status"] != "completed" or type != "output":
+            raise HTTPException(409, "owned output is not completed")
+        try:
+            target = owned_output(roots[lane.id], filename, subfolder)
+        except ValueError as error:
+            raise HTTPException(404, str(error)) from error
+        return FileResponse(target, media_type="video/mp4", headers={"Cache-Control": "private, no-store"})
     request = fleet.client.build_request(
         "GET",
         f"{lane.url}/view",

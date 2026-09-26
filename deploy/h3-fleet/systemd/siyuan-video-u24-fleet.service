@@ -1,0 +1,17 @@
+[Unit]
+Description=SIYUAN video u24 H3 Fleet (RTX 4060 Ti only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ivan/.local/state/siyuan-video-u24-production
+Environment=SIYUAN_U24_FLEET_RELEASE=/home/ivan/.local/state/siyuan-video-u24-production/current/h3-fleet
+ExecStart=/home/ivan/h3/fleet-venv/bin/python /home/ivan/.local/state/siyuan-video-u24-production/current/h3-fleet/scripts/serve_video_u24_fleet.py
+Restart=on-failure
+RestartSec=15
+UMask=0077
+TimeoutStopSec=45
+
+[Install]
+WantedBy=default.target

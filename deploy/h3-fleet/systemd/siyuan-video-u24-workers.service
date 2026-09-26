@@ -1,0 +1,14 @@
+[Unit]
+Description=SIYUAN video u24 RTX 4060 Ti ComfyUI worker
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/ivan/.local/state/siyuan-video-u24-production
+ExecStart=/usr/bin/python3 /home/ivan/.local/state/siyuan-video-u24-production/current/h3-fleet/scripts/serve_video_u24_workers.py
+Restart=no
+MemoryAccounting=yes
+MemoryMax=32G
+MemorySwapMax=2G
+UMask=0077
+TimeoutStopSec=45
