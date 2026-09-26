@@ -13,7 +13,7 @@
 下列带日期的“未部署”描述记录当日快照；之后的生产状态须按运行镜像的
 OCI revision、配置和发布证据重新核验。
 
-## 2026-09-26 新增 2× DGX Spark 本地端点并扩为 4 本地成员（Git 候选）
+## 2026-09-26 新增 2× DGX Spark 本地端点并扩为 4 本地成员（已部署）
 
 - 新增端点 `spark-dsv41-flash-256k`：2× DGX Spark GB10 上的
   `DeepSeek-v4.1-Flash-EXL3`（vLLM TP=2，EXL3 2.9bpw + DSpark k=3），经 Tailscale
@@ -35,7 +35,35 @@ OCI revision、配置和发布证据重新核验。
   `docs/local-pool-routing-20260908.md` 的 2026-09-26 节）。成员全集仍是代码常量
   `ai_router/local_pool.py` 的 `MEMBERS`；校验放宽为「已知成员的非空唯一子集」，
   使滚动发布期间新旧成员清单可以并存。未知成员、重复项、空清单继续拒绝。
-- 本节描述源码与配置契约；实际镜像、生效成员清单和真实路由结果以本轮发布记录为准。
+- 本节描述源码与配置契约；实际镜像、生效成员清单和真实路由结果见下。
+
+### 2026-09-26 发布记录（已上线）
+
+- commit `f45d95d9a292467b2cd5908764b4b056d17318ef`（`dev-v2`，未 push）；镜像 api
+  `1panel-ai-router:spark-20260926-f45d95d9a-observer`、control
+  `1panel-ai-router:spark-20260926-f45d95d9a`；四个角色滚动替换，
+  `deployment-result.json` 为 `complete: true`，`:4000` 与 `:4001` 健康检查均 200。
+- 运行时把 `routing.local_pool.members` 热更新为四成员（`PUT /api/settings`，
+  无需重启）：原三成员增补 `spark-dsv41-flash-256k`。
+- 实时核验：端点总数 **19**；`spark-dsv41-flash-256k` `healthy=true`、
+  `load_headroom=1.0`、健康探针往返 53.8 ms。
+- 🔴 **`auto` 的实际落点与 `tier_rank` / `quality` 无关**：`routing.objectives.enabled`
+  为真时，`ai_router/policy.py` 的 objective 分支在 `PerformanceRouter.select()`
+  之后直接返回，`local_pool.select()` 不参与初始选点；`routing_modes.py` 的本地排序键
+  是 `(-load_headroom, endpoint_id)`，空闲时所有本地端点余量同为 1.0，退化为端点 id
+  字典序，故 `ai-qwen38-27b` 恒为默认。**配置层不存在「本地端点优先级」字段。**
+- 实测（探针 barrier 对齐起跑 + 每路唯一 nonce）：`auto` 顺序 1×6 → `ai` 6/6
+  （`efficiency_initial`）；`auto` 并发 6 → `ai` 4 + `amd-halogen-qwen38-256k` 1 +
+  `spark-dsv41-flash-256k` 1（后两者 `capacity_spillover`，`capacity-attempts` 1/2/3）；
+  显式 `model=siyuan/dsv41-flash-spark-256k` → `spark` 2/2（`explicit_model`，
+  上游 `DeepSeek-v4.1-Flash-EXL3`）。
+- 当前 `edge-qwen38-flash` 与 `amd-qwen38-rocmfpx-128k` 为 `enabled=false`：
+  **四成员声明与实际可调度成员数不同**，实际只有 `ai-qwen38-27b`（4 槽）与
+  `spark-dsv41-flash-256k`（2 槽）。
+- 零代码的按端点偏向杠杆见 `ai_router/endpoint_config.py` 的
+  `OPERATION_FIELDS = {"enabled", "auto_candidate"}` →
+  `POST /api/endpoints/{id}/actions/{enable,disable,auto-enable,auto-disable}`。
+  本轮按用户选择**不启用**任何偏向配置，`auto` 语义与上线前一致。
 
 ## 2026-09-25 单次视频能力与错误语义审查
 
