@@ -54,7 +54,10 @@ _IDENTITY_DISCLOSURE_PATTERNS = tuple(
             #   "现在回答我的模型来自哪一家厂商"
             # Unqualified infrastructure questions are ordinary tasks, not
             # evidence of a request for this service's private internals.
-            r"(?=[^。？！\n]{0,160}(?:你|您|SIYUAN|\bRouter\b|"
+            r"(?=[^。？！\n]{0,160}(?:你|您|思源|SIYUAN|本服务|这套助手|"
+            r"上一条(?:回答|回复)|\bRouter\b|"
+            r"(?:刚才|此前|上一轮)(?:给我)?(?:回答|回复)(?:的)?模型|"
+            r"当前运行的底层(?:大语言)?模型|"
             r"(?:这|本)(?:次|轮)(?:请求|回答|回复|响应|服务|对话|会话|调用|回合)|"
             r"当前请求|当前服务|这个服务|该服务|"
             r"(?:现在|当前)(?:回答|回复)我|"
@@ -151,6 +154,25 @@ _IDENTITY_DISCLOSURE_PATTERNS = tuple(
             r"[^。？！\n]{0,30}"
             r"\b(?:this\s+(?:request|service|assistant|turn|conversation|"
             r"response|backend|router)|are\s+you|do\s+you|behind\s+this)\b"
+            r"|"
+            # (j) Describe this assistant's own architecture or serving
+            # properties without asking the direct 'which model' question.
+            r"(?:介绍|说明|讲讲|列出|告诉我|概述)[^。？！\n]{0,20}"
+            r"(?:你自己|思源|SIYUAN|本服务|这套助手|这个助手|该助手|"
+            r"当前运行的底层(?:大语言)?模型)"
+            r"[^。？！\n]{0,70}"
+            r"(?:模型|厂商|厂家|供应商|量化|架构|性能|上下文|推理)"
+            r"|"
+            r"(?:思源|SIYUAN|(?:刚才|此前|上一轮)(?:给我)?(?:回答|回复)(?:的)?模型|"
+            r"当前运行的底层(?:大语言)?模型)"
+            r"[^。？！\n]{0,25}"
+            r"(?:底层|实际|供应商|厂商|厂家|量化|架构|性能|上下文|推理)"
+            r"[^。？！\n]{0,60}"
+            r"(?:模型|供应商|厂商|厂家|量化|架构|性能|上下文|推理)"
+            r"|"
+            r"(?:上一条|上一轮|刚才)(?:回答|回复)"
+            r"[^。？！\n]{0,20}(?:由|是)[^。？！\n]{0,12}"
+            r"(?:哪|什么|谁)[^。？！\n]{0,6}(?:模型|厂商)"
             r")"
         ),
         r"(?:你|您)(?:到底|究竟|实际)?是谁",
@@ -410,6 +432,8 @@ def sanitize_payload(
     payload: bytes,
     profile: IdentityProfile,
     identifiers: tuple[str, ...],
+    *,
+    output_redactions: list[int] | None = None,
 ) -> tuple[bytes, int]:
     if not profile.enabled or not payload:
         return payload, 0
@@ -430,6 +454,7 @@ def sanitize_payload(
         public,
         profile,
         identifiers,
+        output_redactions=output_redactions,
     )
     count += int(public != value)
     return (
@@ -448,17 +473,23 @@ def sanitize_value(
     identifiers: tuple[str, ...],
     *,
     parent_key: str = "",
+    output_redactions: list[int] | None = None,
+    in_output: bool = False,
 ) -> tuple[Any, int]:
     if isinstance(value, str):
         if parent_key in _SKIP_REDACTION_KEYS:
             return value, 0
         if parent_key in _PROTOCOL_JSON_KEYS:
-            return _sanitize_protocol_string(
+            sanitized, count = _sanitize_protocol_string(
                 value,
                 profile,
                 identifiers,
             )
-        return redact_text(value, profile, identifiers)
+        else:
+            sanitized, count = redact_text(value, profile, identifiers)
+        if in_output and output_redactions is not None:
+            output_redactions[0] += count
+        return sanitized, count
     if isinstance(value, list):
         result = []
         count = 0
@@ -468,6 +499,8 @@ def sanitize_value(
                 profile,
                 identifiers,
                 parent_key=parent_key,
+                output_redactions=output_redactions,
+                in_output=in_output,
             )
             result.append(sanitized)
             count += item_count
@@ -483,6 +516,11 @@ def sanitize_value(
             profile,
             identifiers,
             parent_key=str(key),
+            output_redactions=output_redactions,
+            in_output=(
+                in_output
+                or (parent_key in {"", "response"} and key in {"choices", "output", "output_text"})
+            ),
         )
         result[key] = sanitized
         count += item_count
@@ -691,6 +729,26 @@ def identity_disclosure_requires_model_protocol(
     return False
 
 
+_IDENTITY_STREAM_HOLD_PATTERN = re.compile(
+    r"(?:思源|SIYUAN|你|您|本服务|这套助手|当前服务|"
+    r"本次回复|上一条回答|上一条回复|刚才回复|上一轮回复)"
+    r"[^\n。！？]{0,80}"
+    r"(?:底层|架构|量化|身份|供应商|厂商|GPU|显卡|模型版本|"
+    r"模型来源|运行模型|上下文窗口|路由|部署|推理性能)",
+    re.IGNORECASE,
+)
+
+
+def identity_stream_requires_hold(body: dict[str, Any], api_kind: str) -> bool:
+    """Hold only identity-adjacent streams until late output redactions are known."""
+    view = review_view(body, api_kind)
+    return any(
+        _IDENTITY_STREAM_HOLD_PATTERN.search(text)
+        for text in (view.current_query, *view.fallback_queries)
+        if text
+    )
+
+
 def _latest_user_text(body: dict[str, Any], api_kind: str) -> str:
     if api_kind == "responses" and isinstance(body.get("input"), str):
         return str(body["input"])
@@ -742,6 +800,7 @@ class IdentityStreamSanitizer:
         self._redactors: dict[str, _StreamingTextRedactor] = {}
         self._templates: dict[str, dict[str, Any]] = {}
         self.redactions = 0
+        self.output_redactions = 0
 
     def feed(self, chunk: bytes) -> list[bytes]:
         if not self.profile.enabled:
@@ -815,6 +874,7 @@ class IdentityStreamSanitizer:
     def _sanitize_event(self, payload: dict[str, Any]) -> dict[str, Any]:
         value = public_payload(payload, self.profile.public_model_id)
         self.redactions += int(value != payload)
+        event_type = str(value.get("type", ""))
 
         choices = value.get("choices")
         if isinstance(choices, list):
@@ -899,12 +959,20 @@ class IdentityStreamSanitizer:
                 value,
             )
 
+        output_redactions = [0]
         sanitized, count = sanitize_value(
             value,
             self.profile,
             self.identifiers,
+            output_redactions=output_redactions,
+            in_output=event_type in {
+                "response.output_text.done",
+                "response.function_call_arguments.done",
+                "response.output_item.done",
+            },
         )
         self.redactions += count
+        self.output_redactions += output_redactions[0]
         return sanitized
 
     def _feed_text(
@@ -923,6 +991,7 @@ class IdentityStreamSanitizer:
         self._templates[key] = copy.deepcopy(template)
         value, count = redactor.feed(text)
         self.redactions += count
+        self.output_redactions += count
         return value
 
     def _flush_text(self) -> list[bytes]:
@@ -930,6 +999,7 @@ class IdentityStreamSanitizer:
         for key, redactor in tuple(self._redactors.items()):
             text, count = redactor.finish()
             self.redactions += count
+            self.output_redactions += count
             if not text:
                 continue
             payload = self._templates[key]

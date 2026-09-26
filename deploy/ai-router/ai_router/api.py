@@ -74,6 +74,7 @@ from .identity import (
     IdentityProfile,
     IdentityStreamSanitizer,
     identity_disclosure_requires_model_protocol,
+    identity_stream_requires_hold,
     internal_identifiers,
     is_identity_disclosure_request,
     sanitize_payload,
@@ -2180,6 +2181,16 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     capsule=capsule,
                 )
                 if bool(routed_body.get("stream")):
+                    hold_public_output = bool(
+                        identity.enabled
+                        and identity_stream_requires_hold(identity_input_body, api_kind)
+                    )
+                    identity_protocol_required = bool(
+                        hold_public_output
+                        and identity_disclosure_requires_model_protocol(
+                            received_body, api_kind,
+                        )
+                    )
                     resource_finalizer = _StreamResourceFinalizer(
                         current,
                         lease,
@@ -2233,6 +2244,8 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         budget_reservation=budget_reservation,
                         retryable_empty_output=retry_empty_stream,
                         outcome=stream_outcome,
+                        hold_public_output=hold_public_output,
+                        identity_protocol_required=identity_protocol_required,
                     )
                     response_iterator = stream_iterator
                     if retry_empty_stream:
@@ -2277,6 +2290,15 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         response_iterator = _prepend_stream_chunk(
                             first_stream_chunk,
                             stream_iterator,
+                        )
+                    if hold_public_output:
+                        response_iterator = _hold_identity_stream(
+                            response_iterator,
+                            api_kind=api_kind,
+                            request_id=request_id,
+                            identity=identity,
+                            outcome=stream_outcome,
+                            protocol_required=identity_protocol_required,
                         )
                     response = _FinalizingStreamingResponse(
                         response_iterator,
@@ -2330,12 +2352,30 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                         payload,
                         model=decision.endpoint.public_model,
                     )
+                output_redactions = [0]
                 with phase("response_sanitize"):
                     public_payload, redactions = sanitize_payload(
                         payload,
                         identity,
                         identifiers,
+                        output_redactions=output_redactions,
                     )
+                identity_output_replaced = bool(
+                    identity.enabled and output_redactions[0]
+                )
+                if identity_output_replaced:
+                    if identity_disclosure_requires_model_protocol(
+                        received_body, api_kind,
+                    ):
+                        raise RouterError(
+                            "the requested output format is not available",
+                            status_code=400,
+                            code="identity_disclosure_not_available",
+                        )
+                    public_payload = _replace_public_identity_output(
+                        public_payload, api_kind, identity,
+                    )
+                    trace.payload["identity_output_replaced"] = True
                 public_payload = rewrite_response_model(
                     public_payload,
                     (
@@ -2421,12 +2461,19 @@ async def _proxy(request: Request, api_kind: str) -> Response:
                     ),
                 )
                 if current.training is not None:
-                    await current.training.complete(
-                        training_token,
-                        status_code=upstream.status_code,
-                        response_payload=payload,
-                        public_assistant_items=assistant_items_from_response(public_payload, api_kind),
-                    )
+                    if identity_output_replaced:
+                        await current.training.fail(
+                            training_token,
+                            status_code=502,
+                            error={"type": "privacy_output_replaced"},
+                        )
+                    else:
+                        await current.training.complete(
+                            training_token,
+                            status_code=upstream.status_code,
+                            response_payload=payload,
+                            public_assistant_items=assistant_items_from_response(public_payload, api_kind),
+                        )
                 await _audit(
                     current,
                     request_id=request_id,
@@ -2766,6 +2813,41 @@ async def _identity_intercept_response(
             )
         if request_tracked:
             await current.track_request_finished(owner_token)
+
+
+def _replace_public_identity_output(
+    payload: bytes,
+    api_kind: str,
+    identity: IdentityProfile,
+) -> bytes:
+    """Replace a redacted model answer without changing its public response ID."""
+    value = json.loads(payload)
+    if api_kind == "chat":
+        for choice in value.get("choices", []):
+            choice["message"] = {
+                "role": "assistant",
+                "content": identity.identity_response,
+            }
+            choice["finish_reason"] = "stop"
+            choice.pop("logprobs", None)
+    else:
+        value["output"] = [{
+            "id": f"msg_{value.get('id', '')}",
+            "type": "message",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": identity.identity_response,
+                "annotations": [],
+            }],
+        }]
+        if "output_text" in value:
+            value["output_text"] = identity.identity_response
+        value["status"] = "completed"
+        value.pop("error", None)
+        value.pop("incomplete_details", None)
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
 def _identity_response_payload(
@@ -5411,6 +5493,75 @@ async def _prepend_stream_chunk(
         yield chunk
 
 
+_MAX_IDENTITY_HELD_STREAM_BYTES = 8 * 1024 * 1024
+
+
+class _IdentityHeldStreamOverflow(Exception):
+    pass
+
+
+async def _hold_identity_stream(
+    iterator: AsyncIterator[bytes],
+    *,
+    api_kind: str,
+    request_id: str,
+    identity: IdentityProfile,
+    outcome: dict[str, Any],
+    protocol_required: bool,
+) -> AsyncIterator[bytes]:
+    """Withhold identity-adjacent streams until the entire answer is safe to send."""
+    chunks: list[bytes] = []
+    size = 0
+    overflow = False
+    async for chunk in iterator:
+        size += len(chunk)
+        if size > _MAX_IDENTITY_HELD_STREAM_BYTES:
+            overflow = True
+            chunks.clear()
+        elif not overflow:
+            chunks.append(chunk)
+    if overflow or outcome.get("delivery_error") == "identity_stream_too_large":
+        yield _stream_error_event(
+            api_kind,
+            code="identity_stream_too_large",
+            message="the held model stream exceeded its safe output limit",
+        )
+        return
+    if not outcome.get("completed") or outcome.get("archive_failure"):
+        yield _stream_error_event(
+            api_kind,
+            code="stream_interrupted",
+            message="the model stream did not complete safely",
+        )
+        return
+    if outcome.get("identity_output_replaced"):
+        if protocol_required or outcome.get("delivery_error") == "identity_disclosure_not_available":
+            yield _stream_error_event(
+                api_kind,
+                code="identity_disclosure_not_available",
+                message="the requested output format is not available",
+            )
+            return
+        payload = _identity_response_payload(
+            api_kind,
+            request_id=request_id,
+            identity=identity,
+            input_tokens=0,
+            output_tokens=max(1, len(identity.identity_response) // 4),
+        )
+        if outcome.get("response_id"):
+            payload["id"] = outcome["response_id"]
+            if api_kind == "responses":
+                payload["output"][0]["id"] = f"msg_{outcome['response_id']}"
+        if isinstance(outcome.get("usage"), dict):
+            payload["usage"] = outcome["usage"]
+        async for chunk in _identity_stream(api_kind, payload, identity.identity_response):
+            yield chunk
+        return
+    for chunk in chunks:
+        yield chunk
+
+
 async def _stream_response(
     current: RouterRuntime,
     upstream: httpx.Response,
@@ -5434,6 +5585,8 @@ async def _stream_response(
     retryable_empty_output: bool = False,
     outcome: dict[str, Any] | None = None,
     public_body: dict[str, Any] | None = None,
+    hold_public_output: bool = False,
+    identity_protocol_required: bool = False,
 ) -> AsyncIterator[bytes]:
     await resource_finalizer.begin_stream()
     accumulator = SSEAccumulator(api_kind)
@@ -5469,6 +5622,7 @@ async def _stream_response(
     archive_failure = False
     queued_archive = getattr(current.training, "queue", None) is not None
     effective_output_exposed = False
+    public_output_bytes = 0
     # Keep bounded evidence only in the existing encrypted failure archive.
     # Never log raw model output or mark an incomplete response trainable.
     raw_upstream_tail = bytearray()
@@ -5498,6 +5652,9 @@ async def _stream_response(
             visible = b"".join(usage_filter.feed(chunk)) if usage_filter else chunk
             for rewritten_chunk in model_rewriter.feed(visible):
                 for public_chunk in sanitizer.feed(rewritten_chunk):
+                    public_output_bytes += len(public_chunk)
+                    if hold_public_output and public_output_bytes > _MAX_IDENTITY_HELD_STREAM_BYTES:
+                        raise _IdentityHeldStreamOverflow
                     accumulator.feed(public_chunk)
                     output_clock.feed(public_chunk)
                     if decision.trace:
@@ -5538,6 +5695,9 @@ async def _stream_response(
                 public_chunks.extend(sanitizer.feed(rewritten_chunk))
             public_chunks.extend(sanitizer.finish())
             for public_chunk in public_chunks:
+                public_output_bytes += len(public_chunk)
+                if hold_public_output and public_output_bytes > _MAX_IDENTITY_HELD_STREAM_BYTES:
+                    raise _IdentityHeldStreamOverflow
                 accumulator.feed(public_chunk)
                 output_clock.feed(public_chunk)
                 if decision.trace:
@@ -5598,6 +5758,9 @@ async def _stream_response(
         )
         accumulator.feed(error_event)
         yield error_event
+    except _IdentityHeldStreamOverflow:
+        pending_public_chunks.clear()
+        held_terminal_chunks.clear()
     except RouterError as exc:
         if exc.code != "invalid_upstream_response":
             raise
@@ -5627,6 +5790,17 @@ async def _stream_response(
             and retryable_empty_output
             and not effective_output_exposed
         )
+        delivery_error = (
+            "identity_stream_too_large"
+            if hold_public_output
+            and public_output_bytes > _MAX_IDENTITY_HELD_STREAM_BYTES
+            else "identity_disclosure_not_available"
+            if hold_public_output
+            and completed
+            and identity_protocol_required
+            and sanitizer.output_redactions
+            else None
+        )
         if outcome is not None:
             outcome.update(
                 completed=completed,
@@ -5635,6 +5809,16 @@ async def _stream_response(
                 effective_output_exposed=effective_output_exposed,
                 retryable_empty_output=intermediate_empty_output,
                 output_integrity=copy.deepcopy(output_integrity),
+                identity_output_replaced=bool(
+                    hold_public_output and sanitizer.output_redactions
+                ),
+                delivery_error=delivery_error,
+                response_id=accumulator.response_id,
+                usage=(
+                    adapter_usage
+                    if api_kind == "responses" and decision.native_or_adapter == "adapter"
+                    else private_accumulator.usage
+                ),
             )
 
         async def finalize_stream() -> None:
@@ -5650,7 +5834,27 @@ async def _stream_response(
                 stream_lease = getattr(resource_finalizer, "lease", None)
                 if stream_lease is not None:
                     await stream_lease.release_deployment()
-                if completed:
+                if completed and not delivery_error:
+                    identity_output_replaced = bool(
+                        hold_public_output and sanitizer.output_redactions
+                    )
+                    public_assistant_items = accumulator.assistant_items()
+                    if identity_output_replaced:
+                        if api_kind == "chat":
+                            public_assistant_items = [{
+                                "role": "assistant",
+                                "content": identity.identity_response,
+                            }]
+                        else:
+                            public_assistant_items = _identity_response_payload(
+                                api_kind,
+                                request_id=request_id,
+                                identity=identity,
+                                input_tokens=0,
+                                output_tokens=0,
+                            )["output"]
+                        if decision.trace:
+                            decision.trace.payload["identity_output_replaced"] = True
                     await persist_history(
                         current.compactor,
                         current.conversations,
@@ -5659,9 +5863,9 @@ async def _stream_response(
                         body=body,
                         api_kind=api_kind,
                         public_body=public_body,
-                        public_assistant_items=accumulator.assistant_items(),
+                        public_assistant_items=public_assistant_items,
                         assistant_items=private_history_items(
-                            accumulator.assistant_items(),
+                            public_assistant_items,
                             (
                                 adapter_private_items
                                 if (
@@ -5679,8 +5883,14 @@ async def _stream_response(
                             state.branch_id or state.conversation_id,
                         )
                     if current.training is not None:
-                        await asyncio.shield(
-                            current.training.complete(
+                        if identity_output_replaced:
+                            await asyncio.shield(current.training.fail(
+                                training_token,
+                                status_code=502,
+                                error={"type": "privacy_output_replaced"},
+                            ))
+                        else:
+                            await asyncio.shield(current.training.complete(
                                 training_token,
                                 status_code=status_code,
                                 public_assistant_items=accumulator.assistant_items(),
@@ -5694,48 +5904,65 @@ async def _stream_response(
                                     else private_accumulator.assistant_items()
                                 ),
                                 usage=private_accumulator.usage,
+                            ))
+                elif current.training is not None and not intermediate_empty_output:
+                    if delivery_error:
+                        await asyncio.shield(current.training.fail(
+                            training_token,
+                            status_code=(
+                                400 if delivery_error == "identity_disclosure_not_available"
+                                else 502
+                            ),
+                            error={"type": delivery_error},
+                        ))
+                    else:
+                        failure_status = 502 if invalid_output else 499
+                        failure_code = (
+                            "invalid_upstream_response"
+                            if invalid_output
+                            else "stream_interrupted"
+                        )
+                        failure_message = (
+                            "the model completed without effective output"
+                            if invalid_output
+                            else "stream ended before a complete response"
+                        )
+                        await asyncio.shield(
+                            current.training.fail(
+                                training_token,
+                                status_code=failure_status,
+                                error={
+                                    "type": failure_code,
+                                    "message": failure_message,
+                                },
+                                response_payload=json.dumps({
+                                    "diagnostic": {
+                                        "stream_format": "responses_adapter" if api_kind == "responses" and decision.native_or_adapter == "adapter" else api_kind,
+                                        "upstream_sse_tail": raw_upstream_tail.decode("utf-8", errors="replace"),
+                                        "truncated": raw_upstream_bytes > len(raw_upstream_tail),
+                                        "output_integrity": output_integrity,
+                                    },
+                                }, ensure_ascii=False).encode("utf-8"),
+                                interrupted=not invalid_output,
                             )
                         )
-                elif current.training is not None and not intermediate_empty_output:
-                    failure_status = 502 if invalid_output else 499
+                if (not completed or delivery_error) and decision.trace and not intermediate_empty_output:
+                    failure_status = (
+                        400 if delivery_error == "identity_disclosure_not_available"
+                        else 502 if delivery_error or invalid_output else 499
+                    )
                     failure_code = (
-                        "invalid_upstream_response"
-                        if invalid_output
-                        else "stream_interrupted"
-                    )
-                    failure_message = (
-                        "the model completed without effective output"
-                        if invalid_output
-                        else "stream ended before a complete response"
-                    )
-                    await asyncio.shield(
-                        current.training.fail(
-                            training_token,
-                            status_code=failure_status,
-                            error={
-                                "type": failure_code,
-                                "message": failure_message,
-                            },
-                            response_payload=json.dumps({
-                                "diagnostic": {
-                                    "stream_format": "responses_adapter" if api_kind == "responses" and decision.native_or_adapter == "adapter" else api_kind,
-                                    "upstream_sse_tail": raw_upstream_tail.decode("utf-8", errors="replace"),
-                                    "truncated": raw_upstream_bytes > len(raw_upstream_tail),
-                                    "output_integrity": output_integrity,
-                                },
-                            }, ensure_ascii=False).encode("utf-8"),
-                            interrupted=not invalid_output,
+                        delivery_error
+                        or (
+                            "invalid_upstream_response"
+                            if invalid_output
+                            else "stream_interrupted"
                         )
                     )
-                if not completed and decision.trace and not intermediate_empty_output:
-                    failure_status = 502 if invalid_output else 499
-                    failure_code = (
-                        "invalid_upstream_response"
-                        if invalid_output
-                        else "stream_interrupted"
-                    )
                     failure_message = (
-                        "the model completed without effective output"
+                        "the held model stream could not be delivered"
+                        if delivery_error
+                        else "the model completed without effective output"
                         if invalid_output
                         else "stream ended before a complete response"
                     )
@@ -5753,7 +5980,7 @@ async def _stream_response(
                         status_code=failure_status,
                         code=failure_code,
                         message=failure_message,
-                        interrupted=not invalid_output,
+                        interrupted=not completed and not invalid_output,
                         attempt=decision.attempts,
                     )
                     await _save_request_trace(
@@ -5771,9 +5998,11 @@ async def _stream_response(
                         decision=decision,
                         status_code=(
                             status_code
-                            if completed
+                            if completed and not delivery_error
+                            else 400
+                            if delivery_error == "identity_disclosure_not_available"
                             else 502
-                            if invalid_output
+                            if delivery_error or invalid_output
                             else 499
                         ),
                         started_at=started_at,
@@ -5799,6 +6028,8 @@ async def _stream_response(
                     message="archive queue admission failed", interrupted=True, attempt=decision.attempts)
                 await _save_request_trace(current, decision.trace)
             archive_failure = True
+            if outcome is not None:
+                outcome["archive_failure"] = True
     if archive_failure:
         yield _stream_error_event(api_kind, code="training_archive_unavailable",
                                   message="archive queue admission failed")

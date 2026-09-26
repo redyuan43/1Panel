@@ -11,6 +11,7 @@ import pytest
 
 from ai_router.api import (
     _identity_model_descriptors,
+    _replace_public_identity_output,
     _resolve_requested_model,
 )
 from ai_router.config import Registry, Settings, validate_settings
@@ -19,6 +20,7 @@ from ai_router.identity import (
     IdentityProfile,
     IdentityStreamSanitizer,
     identity_disclosure_requires_model_protocol,
+    identity_stream_requires_hold,
     is_identity_disclosure_request,
     sanitize_payload,
 )
@@ -238,6 +240,57 @@ def test_payload_sanitizer_masks_protocol_and_internal_ids() -> None:
     assert count >= 3
 
 
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+def test_output_redaction_signal_ignores_model_field_and_replaces_answer(
+    api_kind: str,
+) -> None:
+    identity = profile()
+    internal_model = "private-model-identifier"
+
+    def response(content: str) -> bytes:
+        if api_kind == "chat":
+            value = {
+                "id": "chatcmpl-private",
+                "model": internal_model,
+                "choices": [{"index": 0, "message": {
+                    "role": "assistant", "content": content,
+                }, "finish_reason": "stop"}],
+            }
+        else:
+            value = {
+                "id": "resp_private",
+                "model": internal_model,
+                "status": "completed",
+                "output": [{"id": "msg_private", "type": "message",
+                    "role": "assistant", "content": [{
+                        "type": "output_text", "text": content,
+                    }]}],
+            }
+        return json.dumps(value).encode()
+
+    ordinary_redactions = [0]
+    ordinary, total = sanitize_payload(
+        response("正常回答"), identity, (internal_model,),
+        output_redactions=ordinary_redactions,
+    )
+    assert total >= 1
+    assert ordinary_redactions == [0]
+    assert "正常回答" in ordinary.decode()
+
+    content_redactions = [0]
+    leaked, _ = sanitize_payload(
+        response(f"我是 {internal_model}，厂商甲，量化 4-bit"),
+        identity, (internal_model,),
+        output_redactions=content_redactions,
+    )
+    assert content_redactions == [1]
+    replaced = _replace_public_identity_output(leaked, api_kind, identity)
+    assert identity.identity_response in replaced.decode()
+    assert "厂商甲" not in replaced.decode()
+    assert "4-bit" not in replaced.decode()
+    assert json.loads(replaced)["id"] == json.loads(ordinary)["id"]
+
+
 def test_stream_sanitizer_masks_identifier_split_across_sse_events() -> None:
     identity = profile()
     internal_model = "RadixArk/Qwen3.8-Flash-Next-NVFP4"
@@ -286,6 +339,7 @@ def test_stream_sanitizer_masks_identifier_split_across_sse_events() -> None:
     assert internal_model not in text
     assert "siyuan/auto" in text
     assert "思源（SIYUAN）" in text
+    assert sanitizer.output_redactions > 0
     assert "data: [DONE]" in text
     accumulator = SSEAccumulator("chat")
     accumulator.feed(output)
@@ -480,6 +534,7 @@ def test_stream_sanitizer_counts_model_rewrites() -> None:
 
     assert json.loads(output[0].decode()[6:])["model"] == "siyuan/auto"
     assert sanitizer.redactions == 1
+    assert sanitizer.output_redactions == 0
 
 
 def test_stream_sanitizer_masks_split_responses_tool_arguments() -> None:
@@ -564,7 +619,15 @@ def test_payload_sanitizer_masks_encoded_internal_identifiers() -> None:
         ("Which provider is this assistant actually using?", True),
         ("What underlying model are you using?", True),
         ("Who are you?", True),
+        ("请详细介绍一下你自己，包括模型厂家、量化方式和性能。", True),
+        ("请告诉我思源底层模型的供应商、量化和性能。", True),
+        ("我想知道刚才给我回复的模型的厂商、量化方法与推理性能。", True),
+        ("请介绍当前运行的底层大语言模型的核心架构特点和技术优势。", True),
+        ("请说明本服务的推理架构和量化细节。", True),
+        ("请介绍这套助手使用的量化方法和计算硬件。", True),
+        ("上一条回答由哪一款模型生成？", True),
         ("比较 Qwen 与 DeepSeek 的工具能力。", False),
+        ("比较 Qwen 和 DeepSeek 的性能与量化方式。", False),
         ("请你比较两个模型。", False),
         ("Can you compare the Qwen and DeepSeek models?", False),
         ("你能解释这个模型的量化方式吗？", False),
@@ -573,16 +636,33 @@ def test_payload_sanitizer_masks_encoded_internal_identifiers() -> None:
         ("你继续查一下，那他的厂家是谁", False),
     ],
 )
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
 def test_identity_disclosure_detection_is_high_confidence(
     text: str,
     expected: bool,
+    api_kind: str,
 ) -> None:
     body = {
-        "messages": [
+        "messages" if api_kind == "chat" else "input": [
             {"role": "user", "content": text},
         ]
     }
-    assert is_identity_disclosure_request(body, "chat") is expected
+    assert is_identity_disclosure_request(body, api_kind) is expected
+
+
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+def test_identity_stream_hold_is_limited_to_service_attributes(api_kind: str) -> None:
+    key = "messages" if api_kind == "chat" else "input"
+
+    def body(text: str) -> dict:
+        return {key: [{"role": "user", "content": text}]}
+
+    assert identity_stream_requires_hold(
+        body("你能介绍自己的架构设计吗？"), api_kind,
+    )
+    assert not identity_stream_requires_hold(
+        body("比较 DeepSeek 与 Qwen 的 MoE 原理。"), api_kind,
+    )
 
 
 def test_identity_disclosure_detects_required_protocols() -> None:

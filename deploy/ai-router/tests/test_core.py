@@ -8162,6 +8162,222 @@ def _public_test_runtime(
     return runtime, secret
 
 
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+def test_public_output_redaction_replaces_entire_answer_without_blocking_normal_task(
+    tmp_path: Path,
+    monkeypatch,
+    api_kind: str,
+) -> None:
+    training_key = tmp_path / "training.key"
+    training_key.write_bytes(Fernet.generate_key())
+    monkeypatch.setenv("AI_ROUTER_TRAINING_ENABLED", "true")
+    monkeypatch.setenv("AI_ROUTER_TRAINING_DB_PATH", str(tmp_path / "training.sqlite3"))
+    monkeypatch.setenv("AI_ROUTER_TRAINING_KEY_PATH", str(training_key))
+    runtime, secret = _public_test_runtime(
+        tmp_path, monkeypatch, client_id=f"public-output-guard-{api_kind}",
+    )
+    internal_model = "DeepSeek-v4.1-Flash-EXL3"
+    calls = 0
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        content = (
+            f"我是 {internal_model}，使用 EXL3 量化，速度为 21 t/s。"
+            if calls == 1 else "你好，任务已完成。"
+        )
+        if api_kind == "responses":
+            return httpx.Response(200, json={
+                "id": f"resp-output-{calls}",
+                "object": "response",
+                "status": "completed",
+                "model": internal_model,
+                "output": [{"id": f"msg-output-{calls}", "type": "message",
+                            "role": "assistant", "status": "completed",
+                            "content": [{"type": "output_text", "text": content}]}],
+                "usage": {"input_tokens": 10, "output_tokens": 20},
+            })
+        return httpx.Response(200, json={
+            "id": f"chatcmpl-output-{calls}",
+            "object": "chat.completion",
+            "model": internal_model,
+            "choices": [{"index": 0, "message": {
+                "role": "assistant", "content": content,
+            }, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20},
+        })
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream),
+    )
+    body = {"model": "siyuan/auto"}
+    if api_kind == "chat":
+        body["messages"] = [{"role": "user", "content": "请写一句简短的问候。"}]
+    else:
+        body["input"] = "请写一句简短的问候。"
+    with TestClient(create_app(runtime)) as client:
+        responses = [client.post(
+            "/v1/chat/completions" if api_kind == "chat" else "/v1/responses",
+            headers={"Authorization": f"Bearer {secret}"},
+            json=body,
+        ) for _ in range(2)]
+
+    assert [response.status_code for response in responses] == [200, 200], [
+        response.text for response in responses
+    ]
+    assert "不对外披露" in responses[0].text
+    assert internal_model not in responses[0].text
+    assert "EXL3" not in responses[0].text
+    assert "21 t/s" not in responses[0].text
+    assert "你好，任务已完成。" in responses[1].text
+    assert calls == 2
+    assert runtime.training is not None
+    training_status = run(runtime.training.status())
+    assert training_status["records"] == 2
+    assert training_status["trainable_records"] == 1
+    run(runtime.internal_client.aclose())
+    run(runtime.close())
+
+
+@pytest.mark.parametrize("api_kind", ["chat", "responses"])
+def test_identity_adjacent_stream_replaces_late_private_marker_before_delivery(
+    tmp_path: Path, monkeypatch, api_kind: str,
+) -> None:
+    runtime, secret = _public_test_runtime(
+        tmp_path, monkeypatch, client_id=f"public-held-{api_kind}",
+    )
+    internal_model = "DeepSeek-v4.1-Flash-EXL3"
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        events = [
+            {"id": "chatcmpl-held", "object": "chat.completion.chunk",
+             "model": internal_model, "choices": [{"index": 0,
+             "delta": {"role": "assistant"}, "finish_reason": None}]},
+            {"id": "chatcmpl-held", "object": "chat.completion.chunk",
+             "model": internal_model, "choices": [{"index": 0,
+             "delta": {"content": "先说公开的 MoE 原理。"}, "finish_reason": None}]},
+            {"id": "chatcmpl-held", "object": "chat.completion.chunk",
+             "model": internal_model, "choices": [{"index": 0,
+             "delta": {"content": f"实际是 {internal_model}，速度 21 t/s。"},
+             "finish_reason": None}]},
+            {"id": "chatcmpl-held", "object": "chat.completion.chunk",
+             "model": internal_model, "choices": [{"index": 0,
+             "delta": {}, "finish_reason": "stop"}]},
+        ]
+        content = "".join(
+            f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            for event in events
+        ) + "data: [DONE]\n\n"
+        return httpx.Response(200, content=content.encode(),
+                              headers={"content-type": "text/event-stream"})
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream),
+    )
+    body = {"model": "siyuan/auto", "stream": True}
+    if api_kind == "chat":
+        body["messages"] = [{"role": "user", "content": "你能介绍自己的架构设计吗？"}]
+    else:
+        body["input"] = "你能介绍自己的架构设计吗？"
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/v1/chat/completions" if api_kind == "chat" else "/v1/responses",
+            headers={"Authorization": f"Bearer {secret}"}, json=body,
+        )
+    assert response.status_code == 200
+    assert "不对外披露" in response.text
+    assert "先说公开" not in response.text
+    assert "21 t/s" not in response.text
+    assert internal_model not in response.text
+    run(runtime.internal_client.aclose())
+    run(runtime.close())
+
+
+@pytest.mark.parametrize("failure", ["overflow", "required_tool"])
+def test_held_identity_stream_failure_does_not_persist_unsent_answer(
+    tmp_path: Path, monkeypatch, failure: str,
+) -> None:
+    training_key = tmp_path / "training.key"
+    training_key.write_bytes(Fernet.generate_key())
+    monkeypatch.setenv("AI_ROUTER_TRAINING_ENABLED", "true")
+    monkeypatch.setenv("AI_ROUTER_TRAINING_DB_PATH", str(tmp_path / "training.sqlite3"))
+    monkeypatch.setenv("AI_ROUTER_TRAINING_KEY_PATH", str(training_key))
+    runtime, secret = _public_test_runtime(
+        tmp_path, monkeypatch,
+        client_id=f"public-held-failure-{failure.replace('_', '-')}",
+    )
+    internal_model = "DeepSeek-v4.1-Flash-EXL3"
+    if failure == "overflow":
+        monkeypatch.setattr("ai_router.api._MAX_IDENTITY_HELD_STREAM_BYTES", 1024)
+    content = (
+        "公开内容" * 200
+        if failure == "overflow"
+        else f"实际模型为 {internal_model}。"
+    )
+
+    async def upstream(_request: httpx.Request) -> httpx.Response:
+        events = [
+            {"id": "chatcmpl-unsent", "model": internal_model,
+             "choices": [{"index": 0, "delta": {"role": "assistant"},
+                          "finish_reason": None}]},
+            {"id": "chatcmpl-unsent", "model": internal_model,
+             "choices": [{"index": 0, "delta": {"content": content},
+                          "finish_reason": None}]},
+            {"id": "chatcmpl-unsent", "model": internal_model,
+             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+        ]
+        payload = "".join(
+            f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            for event in events
+        ) + "data: [DONE]\n\n"
+        return httpx.Response(200, content=payload.encode(),
+                              headers={"content-type": "text/event-stream"})
+
+    runtime.internal_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream),
+    )
+    body = {"model": "siyuan/auto", "stream": True,
+            "messages": [{"role": "user", "content": "你能介绍自己的架构设计吗？"}]}
+    if failure == "required_tool":
+        body["tools"] = [{"type": "function", "function": {
+            "name": "answer", "parameters": {"type": "object"},
+        }}]
+        body["tool_choice"] = "required"
+    with TestClient(create_app(runtime)) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {secret}"}, json=body,
+        )
+    assert response.status_code == 200
+    assert (
+        "identity_stream_too_large" if failure == "overflow"
+        else "identity_disclosure_not_available"
+    ) in response.text
+    assert content not in response.text
+    assert internal_model not in response.text
+    assert run(runtime.conversations.branch_for_response("chatcmpl-unsent")) is None
+    assert runtime.training is not None
+    training_status = run(runtime.training.status())
+    assert training_status["records"] == 1
+    assert training_status["trainable_records"] == 0
+    audit_path = tmp_path / (
+        f"public-held-failure-{failure.replace('_', '-')}-audit.jsonl"
+    )
+    audit_events = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    completed = [
+        event for event in audit_events
+        if event.get("event") == "request_completed"
+    ]
+    assert completed[-1]["status_code"] == (
+        502 if failure == "overflow" else 400
+    )
+    run(runtime.internal_client.aclose())
+    run(runtime.close())
+
+
 @pytest.mark.parametrize("api_kind,stream", [
     ("chat", False), ("chat", True), ("responses", False), ("responses", True),
 ])
@@ -8533,6 +8749,14 @@ def test_public_client_catalog_permissions_and_identity_intercept(
                 ],
             },
         )
+        indirect_identity = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {secret}"},
+            json={"model": "siyuan/auto", "messages": [{
+                "role": "user",
+                "content": "请介绍当前运行的底层大语言模型的核心架构特点和技术优势。",
+            }]},
+        )
         followup = client.post(
             "/v1/chat/completions",
             headers={
@@ -8602,6 +8826,8 @@ def test_public_client_catalog_permissions_and_identity_intercept(
     assert accepted_auto.status_code == 200
     assert accepted_auto.json()["model"] == "siyuan/auto"
     assert identity.status_code == 200
+    assert indirect_identity.status_code == 200
+    assert "不对外披露" in indirect_identity.text
     assert identity.json()["model"] == "siyuan/auto"
     assert "不对外披露" in identity.json()["choices"][0]["message"]["content"]
     assert identity.headers["x-1panel-public-model"] == "siyuan/auto"
@@ -8979,7 +9205,7 @@ def test_public_response_and_error_hide_internal_route_details(
     assert "x-1panel-route-model" not in success.headers
     assert "x-internal-node" not in success.headers
     assert comparison.status_code == 200
-    assert "不对外披露" not in comparison.text
+    assert "不对外披露" in comparison.text
     assert (
         "Can you compare the Qwen and DeepSeek models?"
         in upstream_texts

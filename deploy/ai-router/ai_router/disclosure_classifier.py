@@ -58,7 +58,10 @@ _MIXED_TASK_PATTERN = re.compile(
 )
 _QUOTE_MARKER_PATTERN = re.compile(r'["\'`\u201c\u201d\u2018\u2019<>]')
 _SERVICE_TARGET_PATTERN = re.compile(
-    r"(?:你|您|这个助手|该助手|当前助手|思源|SIYUAN|"
+    r"(?:你|您|这个助手|该助手|当前助手|这套助手|本服务|思源|SIYUAN|"
+    r"上一条(?:回答|回复)|"
+    r"(?:刚才|此前|上一轮)(?:给我)?(?:回答|回复)(?:的)?模型|"
+    r"当前运行的底层(?:大语言)?模型|"
     r"(?:这|本|当前)(?:次|轮)?(?:请求|回答|回复|响应|服务|对话|会话|调用|回合)|"
     r"(?:当前|这个|该)\s*Router|(?:现在|当前)(?:回答|回复)我|"
     r"\b(?:you|your|siyuan|this\s+(?:request|service|assistant|turn|"
