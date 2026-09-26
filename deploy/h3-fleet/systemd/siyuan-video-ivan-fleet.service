@@ -1,7 +1,7 @@
 [Unit]
 Description=SIYUAN video Ivan H3 Fleet
 After=network-online.target siyuan-video-ivan-workers.service
-Requires=siyuan-video-ivan-workers.service
+Wants=siyuan-video-ivan-workers.service
 
 [Service]
 Type=simple
